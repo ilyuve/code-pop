@@ -1,7 +1,7 @@
 import axios from 'axios';
 import type { Repo, SearchResult, Stats, AddRepoForm } from '../types';
 
-const DEFAULT_API_ENDPOINT = 'http://localhost:8080/api/v1';
+const DEFAULT_API_ENDPOINT = 'http://localhost:3000/api';
 
 const getApiEndpoint = () => {
   return localStorage.getItem('codepop-api-endpoint') || DEFAULT_API_ENDPOINT;
@@ -25,17 +25,22 @@ apiClient.interceptors.response.use(
 // Repository APIs
 export const fetchRepos = async (): Promise<Repo[]> => {
   const response = await apiClient.get('/repos');
-  return response.data.repos;
+  return response.data;
 };
 
 export const fetchRepo = async (id: string): Promise<Repo> => {
   const response = await apiClient.get(`/repos/${id}`);
-  return response.data.repo;
+  return response.data;
 };
 
 export const addRepo = async (data: AddRepoForm): Promise<Repo> => {
   const response = await apiClient.post('/repos', data);
-  return response.data.repo;
+  return response.data;
+};
+
+export const updateRepo = async (id: string, data: Partial<AddRepoForm>): Promise<Repo> => {
+  const response = await apiClient.patch(`/repos/${id}`, data);
+  return response.data;
 };
 
 export const deleteRepo = async (id: string): Promise<void> => {
@@ -43,18 +48,38 @@ export const deleteRepo = async (id: string): Promise<void> => {
 };
 
 export const reindexRepo = async (id: string): Promise<void> => {
-  await apiClient.post(`/repos/${id}/reindex`);
+  await apiClient.post(`/repos/${id}/index`);
+};
+
+export const fetchRepoFiles = async (id: string): Promise<any[]> => {
+  const response = await apiClient.get(`/repos/${id}/files`);
+  return response.data;
+};
+
+export const fetchRepoSymbols = async (id: string): Promise<any[]> => {
+  const response = await apiClient.get(`/repos/${id}/symbols`);
+  return response.data;
 };
 
 // Search APIs
-export const searchCode = async (query: string, repoId?: string): Promise<SearchResult[]> => {
-  const response = await apiClient.post('/search', { query, repoId });
-  return response.data.results;
+export const searchCode = async (query: string, repoId?: string, limit: number = 20): Promise<SearchResult[]> => {
+  const response = await apiClient.post('/search', { query, repoId, limit });
+  return response.data;
 };
 
-// Stats APIs
-export const fetchStats = async (): Promise<Stats> => {
-  const response = await apiClient.get('/stats');
+export const searchSymbol = async (query: string, repoId?: string): Promise<any[]> => {
+  const response = await apiClient.post('/search/symbol', { query, repoId });
+  return response.data;
+};
+
+export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => {
+  const response = await apiClient.get(`/search/history?limit=${limit}`);
+  return response.data;
+};
+
+// Health APIs
+export const fetchHealth = async (): Promise<any> => {
+  const response = await apiClient.get('/health');
   return response.data;
 };
 
