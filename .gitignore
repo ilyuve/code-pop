@@ -1,13 +1,39 @@
+# 依赖目录
 node_modules/
-.DS_Store
-dist/
-build/
+node_modules.tar.gz
+
+# 日志文件
+*.log
+logs/
+
+# 数据库数据
+pgdata/
+postgres/
+
+# 配置文件
 .env
 .env.local
-*.log
+.env.*.local
+
+# 代码仓库目录
+repos/
+
+# 构建产物
+dist/
+build/
+*.pyc
+__pycache__/
+
+# IDE
 .vscode/
 .idea/
-__pycache__/
-*.pyc
-.next/
-coverage/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
