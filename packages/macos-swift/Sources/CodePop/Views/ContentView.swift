@@ -14,9 +14,9 @@ struct ContentView: View {
         var icon: String {
             switch self {
             case .search: return "magnifyingglass"
-            case .repos: return "folder.badge.gear"
+            case .repos: return "folder"
             case .status: return "waveform.path.ecg"
-            case .settings: return "gearshape.fill"
+            case .settings: return "gearshape"
             }
         }
     }
@@ -25,13 +25,11 @@ struct ContentView: View {
         NavigationSplitView {
             List(SidebarItem.allCases, selection: $selectedTab) { item in
                 Label(item.rawValue, systemImage: item.icon)
-                    .font(PopArtTheme.bodyFont)
                     .tag(item)
-                    .padding(.vertical, 4)
             }
-            .navigationTitle("CodePop")
             .listStyle(.sidebar)
-            .frame(minWidth: 160)
+            .frame(minWidth: 180)
+            .navigationTitle("CodePop")
         } detail: {
             Group {
                 switch selectedTab {
@@ -48,30 +46,29 @@ struct ContentView: View {
             .environmentObject(appState)
         }
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                ConnectionBadge()
+            ToolbarItem(placement: .principal) {
+                Text("CodePop")
+                    .font(.headline)
+            }
+            ToolbarItem(placement: .automatic) {
+                ConnectionStatusView()
                     .environmentObject(appState)
             }
         }
     }
 }
 
-struct ConnectionBadge: View {
+struct ConnectionStatusView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
         HStack(spacing: 6) {
-            Circle()
-                .fill(appState.apiService.isReachable ? PopArtTheme.success : PopArtTheme.warning)
-                .frame(width: 8, height: 8)
+            Image(systemName: appState.apiService.isReachable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundColor(appState.apiService.isReachable ? .green : .orange)
+                .imageScale(.small)
             Text(appState.apiService.isReachable ? "已连接" : "未连接")
-                .font(PopArtTheme.captionFont)
-                .foregroundColor(.secondary)
+                .font(.caption)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
         .task {
             await appState.apiService.checkHealth()
         }

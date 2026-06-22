@@ -5,114 +5,76 @@ struct StatusView: View {
     @StateObject private var viewModel = StatusViewModel()
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("系统状态")
-                    .font(PopArtTheme.titleFont)
-                    .foregroundColor(.white)
-                Spacer()
+        ScrollView {
+            VStack(spacing: 20) {
+                if viewModel.isLoading && viewModel.status == nil {
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .padding(.top, 60)
+                } else if let status = viewModel.status {
+                    statusContent(status)
+                } else if let error = viewModel.errorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundColor(.red)
+                        .padding(.top, 60)
+                }
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+        }
+        .navigationTitle("系统状态")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
                 Button(action: {
                     Task { await viewModel.load(api: appState.apiService) }
                 }) {
                     Image(systemName: "arrow.clockwise")
-                        .foregroundColor(PopArtTheme.accent)
                 }
-                .buttonStyle(.plain)
-            }
-            .padding()
-            .background(PopArtTheme.cardBackground)
-
-            if viewModel.isLoading && viewModel.status == nil {
-                Spacer()
-                ProgressView()
-                    .scaleEffect(1.2)
-                    .tint(PopArtTheme.accent)
-                Spacer()
-            } else if let status = viewModel.status {
-                statusContent(status)
-            } else if let error = viewModel.errorMessage {
-                Spacer()
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 48))
-                        .foregroundColor(PopArtTheme.warning)
-                    Text(error)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding()
-                Spacer()
             }
         }
-        .background(PopArtTheme.dark.ignoresSafeArea())
         .task {
             await viewModel.load(api: appState.apiService)
         }
     }
 
     private func statusContent(_ status: SystemStatus) -> some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                HStack(spacing: 20) {
-                    StatusCard(title: "状态", value: status.status.uppercased(), color: PopArtTheme.statusColor(status.status))
-                    StatusCard(title: "版本", value: status.version, color: PopArtTheme.secondary)
-                }
+        VStack(spacing: 20) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180))], spacing: 16) {
+                StatusMetricCard(title: "状态", value: status.status.capitalized, color: CodePopTheme.statusColor(status.status))
+                StatusMetricCard(title: "版本", value: status.version, color: .accentColor)
+                StatusMetricCard(title: "运行时间", value: formatUptime(status.uptime), color: .green)
+                StatusMetricCard(title: "活跃请求", value: "\(status.activeRequests)", color: .orange)
+                StatusMetricCard(title: "索引任务", value: "\(status.indexingTasks)", color: .purple)
+                StatusMetricCard(title: "降级功能", value: "\(status.degradedFeatures.count)", color: status.degradedFeatures.isEmpty ? .green : .red)
+            }
 
-                HStack(spacing: 20) {
-                    StatusCard(title: "运行时间", value: formatUptime(status.uptime), color: PopArtTheme.accent)
-                    StatusCard(title: "活跃请求", value: "\(status.activeRequests)", color: PopArtTheme.success)
-                }
-
-                HStack(spacing: 20) {
-                    StatusCard(title: "索引任务", value: "\(status.indexingTasks)", color: PopArtTheme.warning)
-                    StatusCard(title: "降级功能", value: "\(status.degradedFeatures.count)", color: status.degradedFeatures.isEmpty ? PopArtTheme.success : PopArtTheme.primary)
-                }
-
-                if !status.degradedFeatures.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("降级功能列表")
-                            .font(PopArtTheme.headlineFont)
-                            .foregroundColor(.white)
+            if !status.degradedFeatures.isEmpty {
+                GroupBox("降级功能") {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(status.degradedFeatures, id: \.self) { feature in
-                            HStack {
-                                Circle()
-                                    .fill(PopArtTheme.warning)
-                                    .frame(width: 6, height: 6)
-                                Text(feature)
-                                    .font(PopArtTheme.bodyFont)
-                                    .foregroundColor(.white.opacity(0.85))
-                                Spacer()
-                            }
+                            Label(feature, systemImage: "exclamationmark.circle")
+                                .font(.body)
                         }
                     }
-                    .padding()
-                    .background(PopArtTheme.cardBackground)
-                    .cornerRadius(12)
-                }
-
-                if !status.metrics.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("指标")
-                            .font(PopArtTheme.headlineFont)
-                            .foregroundColor(.white)
-                        ForEach(Array(status.metrics.keys.sorted()), id: \.self) { key in
-                            HStack {
-                                Text(key)
-                                    .font(PopArtTheme.bodyFont)
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                                Text(String(format: "%.2f", status.metrics[key] ?? 0))
-                                    .font(PopArtTheme.bodyFont)
-                                    .foregroundColor(PopArtTheme.accent)
-                            }
-                        }
-                    }
-                    .padding()
-                    .background(PopArtTheme.cardBackground)
-                    .cornerRadius(12)
+                    .padding(4)
                 }
             }
-            .padding()
+
+            if !status.metrics.isEmpty {
+                GroupBox("指标") {
+                    Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
+                        ForEach(Array(status.metrics.keys.sorted()), id: \.self) { key in
+                            GridRow {
+                                Text(key)
+                                    .foregroundColor(.secondary)
+                                Text(String(format: "%.2f", status.metrics[key] ?? 0))
+                                    .gridColumnAlignment(.trailing)
+                            }
+                        }
+                    }
+                    .padding(4)
+                }
+            }
         }
     }
 
@@ -123,28 +85,24 @@ struct StatusView: View {
     }
 }
 
-struct StatusCard: View {
+struct StatusMetricCard: View {
     let title: String
     let value: String
     let color: Color
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             Text(title)
-                .font(PopArtTheme.captionFont)
+                .font(.caption)
                 .foregroundColor(.secondary)
             Text(value)
-                .font(PopArtTheme.headlineFont)
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .foregroundColor(color)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
         .padding()
-        .background(PopArtTheme.cardBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(color.opacity(0.3), lineWidth: 2)
-        )
-        .cornerRadius(12)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

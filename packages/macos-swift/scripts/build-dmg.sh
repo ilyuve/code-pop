@@ -48,6 +48,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
 EOF
@@ -55,7 +57,7 @@ EOF
 echo "[3/5] Copying resources..."
 ICON_SRC="$PROJECT_DIR/../macos/release/mac-arm64/CodePop.app/Contents/Resources/icon.icns"
 if [ -f "$ICON_SRC" ]; then
-    cp "$ICON_SRC" "$APP_BUNDLE/Contents/Resources/icon.icns"
+    cp "$ICON_SRC" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 else
     echo "Warning: icon.icns not found, app will use default icon"
 fi
@@ -63,12 +65,52 @@ fi
 echo "[4/5] Signing app bundle..."
 codesign --force --deep --sign - "$APP_BUNDLE"
 
-echo "[5/5] Creating DMG..."
+echo "[5/5] Creating DMG with Applications alias..."
 rm -f "$DMG_PATH"
 TMP_DMG_DIR=$(mktemp -d)
 cp -R "$APP_BUNDLE" "$TMP_DMG_DIR/"
-hdiutil create -volname "$APP_NAME" -srcfolder "$TMP_DMG_DIR" -ov -format UDZO "$DMG_PATH"
+ln -s /Applications "$TMP_DMG_DIR/Applications"
+
+# Create a writable DMG first, then convert to compressed
+TMP_DMG="$BUILD_DIR/tmp-$APP_NAME.dmg"
+hdiutil create -volname "$APP_NAME" -srcfolder "$TMP_DMG_DIR" -ov -format UDRW "$TMP_DMG"
 rm -rf "$TMP_DMG_DIR"
+
+# Mount and set Finder layout
+MOUNT_DIR=$(hdiutil attach "$TMP_DMG" | grep "/Volumes/" | tail -1 | awk '{for(i=3;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ *$//')
+
+if [ -n "$MOUNT_DIR" ]; then
+    echo "Setting DMG layout on $MOUNT_DIR ..."
+    osascript <<APPLESCRIPT > /dev/null 2>&1 || true
+    tell application "Finder"
+        tell disk "$APP_NAME"
+            open
+            set current view of container window to icon view
+            set toolbar visible of container window to false
+            set statusbar visible of container window to false
+            set the bounds of container window to {400, 100, 850, 360}
+            set theViewOptions to icon view options of container window
+            set arrangement of theViewOptions to not arranged
+            set icon size of theViewOptions to 72
+            set text size of theViewOptions to 12
+            try
+                set position of item "$APP_NAME.app" of container window to {120, 100}
+                set position of item "Applications" of container window to {360, 100}
+            end try
+            update without registering applications
+            delay 2
+            close
+        end tell
+    end tell
+APPLESCRIPT
+    sleep 2
+    hdiutil detach "$MOUNT_DIR" -force || true
+    sleep 1
+fi
+
+# Convert to compressed read-only DMG
+hdiutil convert "$TMP_DMG" -format UDZO -o "$DMG_PATH"
+rm -f "$TMP_DMG"
 
 echo "Done!"
 echo "App: $APP_BUNDLE"

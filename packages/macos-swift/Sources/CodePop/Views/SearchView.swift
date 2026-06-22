@@ -7,106 +7,83 @@ struct SearchView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
             searchBar
-            repoFilter
             resultsList
         }
-        .background(PopArtTheme.dark.ignoresSafeArea())
+        .navigationTitle("代码搜索")
         .task {
             await loadRepos()
         }
     }
 
-    private var header: some View {
-        HStack {
-            Text("代码搜索")
-                .font(PopArtTheme.titleFont)
-                .foregroundColor(.white)
-            Spacer()
-            Text("CodePop")
-                .font(PopArtTheme.headlineFont)
-                .foregroundColor(PopArtTheme.primary)
-        }
-        .padding()
-        .background(PopArtTheme.cardBackground)
-    }
-
     private var searchBar: some View {
         HStack(spacing: 12) {
-            Image(systemName: "magnifyingglass")
-                .foregroundColor(PopArtTheme.secondary)
-            TextField("搜索代码、函数、符号...", text: $viewModel.query)
-                .font(PopArtTheme.bodyFont)
-                .textFieldStyle(.plain)
-                .onSubmit {
-                    Task { await viewModel.search(api: appState.apiService) }
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("搜索代码、函数、符号...", text: $viewModel.query)
+                    .textFieldStyle(.plain)
+                    .onSubmit {
+                        Task { await viewModel.search(api: appState.apiService) }
+                    }
+                if !viewModel.query.isEmpty {
+                    Button(action: { viewModel.clear() }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-            if viewModel.isLoading {
-                ProgressView()
-                    .scaleEffect(0.7)
-                    .tint(PopArtTheme.accent)
             }
-            Button(action: {
-                Task { await viewModel.search(api: appState.apiService) }
-            }) {
-                Text("搜索")
-                    .font(PopArtTheme.bodyFont)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .background(PopArtTheme.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.query.trimmingCharacters(in: .whitespaces).isEmpty)
-        }
-        .padding()
-        .background(PopArtTheme.surface)
-        .cornerRadius(12)
-        .padding()
-    }
+            .padding(8)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
 
-    private var repoFilter: some View {
-        HStack {
-            Text("仓库筛选:")
-                .font(PopArtTheme.bodyFont)
-                .foregroundColor(.secondary)
-            Picker("", selection: $viewModel.selectedRepoId) {
+            Picker("仓库", selection: $viewModel.selectedRepoId) {
                 Text("全部仓库").tag(nil as String?)
                 ForEach(repos) { repo in
                     Text(repo.name).tag(repo.id as String?)
                 }
             }
             .pickerStyle(.menu)
-            .frame(width: 200)
-            Spacer()
+            .frame(width: 160)
+
+            Button("搜索") {
+                Task { await viewModel.search(api: appState.apiService) }
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(viewModel.query.trimmingCharacters(in: .whitespaces).isEmpty)
+
+            if viewModel.isLoading {
+                ProgressView()
+                    .scaleEffect(0.8)
+            }
         }
-        .padding(.horizontal)
-        .padding(.bottom, 8)
+        .padding()
     }
 
     private var resultsList: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                if let error = viewModel.errorMessage {
-                    Text(error)
-                        .foregroundColor(PopArtTheme.primary)
-                        .padding()
-                }
-
-                if viewModel.results.isEmpty && !viewModel.isLoading && viewModel.errorMessage == nil && !viewModel.query.isEmpty {
-                    Text("暂无结果")
-                        .foregroundColor(.secondary)
-                        .padding(.top, 40)
-                }
-
-                ForEach(viewModel.results) { result in
-                    SearchResultCard(result: result)
+        List {
+            if let error = viewModel.errorMessage {
+                Section {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundColor(.red)
                 }
             }
-            .padding()
+
+            if viewModel.results.isEmpty && !viewModel.isLoading && viewModel.errorMessage == nil && !viewModel.query.isEmpty {
+                Section {
+                    Text("暂无结果")
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 40)
+                }
+            }
+
+            ForEach(viewModel.results) { result in
+                SearchResultRow(result: result)
+            }
         }
+        .listStyle(.inset)
     }
 
     private func loadRepos() async {
@@ -118,53 +95,44 @@ struct SearchView: View {
     }
 }
 
-struct SearchResultCard: View {
+struct SearchResultRow: View {
     let result: SearchResult
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(result.filePath)
-                    .font(PopArtTheme.captionFont)
-                    .foregroundColor(PopArtTheme.accent)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.primary)
                 Spacer()
                 Text(result.language.uppercased())
-                    .font(PopArtTheme.captionFont)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(PopArtTheme.secondary.opacity(0.2))
-                    .foregroundColor(PopArtTheme.secondary)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
                 Text(String(format: "%.2f", result.score))
-                    .font(PopArtTheme.captionFont)
-                    .foregroundColor(PopArtTheme.success)
+                    .font(.caption2)
+                    .foregroundColor(.green)
+                    .frame(minWidth: 32, alignment: .trailing)
             }
 
             Text(result.content)
                 .font(.system(size: 12, design: .monospaced))
-                .foregroundColor(.white.opacity(0.9))
-                .lineLimit(6)
+                .foregroundColor(.secondary)
+                .lineLimit(4)
 
             if !result.symbols.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(result.symbols.prefix(4), id: \.self) { symbol in
                         Text(symbol)
-                            .font(PopArtTheme.captionFont)
+                            .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(PopArtTheme.primary.opacity(0.15))
-                            .foregroundColor(PopArtTheme.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .background(Color.accentColor.opacity(0.12))
+                            .foregroundColor(.accentColor)
+                            .clipShape(Capsule())
                     }
                 }
             }
         }
-        .padding()
-        .background(PopArtTheme.cardBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(PopArtTheme.surface, lineWidth: 1)
-        )
-        .cornerRadius(12)
+        .padding(.vertical, 6)
     }
 }
