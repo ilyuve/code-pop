@@ -37,4 +37,5 @@ packages/macos/release/
 Thumbs.db
 
 # Docker
-docker-compose.override.yml*.dmg
+docker-compose.override.yml
+*.dmg
