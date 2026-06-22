@@ -6,16 +6,16 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
-  Code2,
+  Sparkles,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { clsx } from 'clsx';
 
 const navItems = [
-  { path: '/', icon: LayoutDashboard, label: '仪表盘' },
-  { path: '/repos', icon: FolderGit2, label: '仓库' },
-  { path: '/search', icon: Search, label: '搜索' },
-  { path: '/settings', icon: Settings, label: '设置' },
+  { path: '/', icon: LayoutDashboard, label: '仪表盘', color: '#ff3d8a' },
+  { path: '/repos', icon: FolderGit2, label: '仓库', color: '#2ad4ff' },
+  { path: '/search', icon: Search, label: '搜索', color: '#fff34d' },
+  { path: '/settings', icon: Settings, label: '设置', color: '#6effb0' },
 ];
 
 export const Sidebar = () => {
@@ -25,39 +25,74 @@ export const Sidebar = () => {
   return (
     <aside
       className={clsx(
-        'fixed left-0 top-0 h-full bg-slate-900 text-white transition-all duration-300 z-40',
+        'fixed left-0 top-0 h-full z-40 transition-all duration-300',
+        'bg-white border-r-2 border-[#2D2D2D]',
         sidebarOpen ? 'w-64' : 'w-16'
       )}
+      style={{ boxShadow: '4px 0 0 #fff34d' }}
     >
-      <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-800">
-        <Code2 className="w-8 h-8 text-indigo-500 flex-shrink-0" />
+      {/* Logo */}
+      <div className="flex items-center gap-3 px-4 py-5 border-b-2 border-[#2D2D2D]">
+        <div 
+          className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ background: 'linear-gradient(135deg, #ff3d8a 0%, #b88dff 100%)', border: '2px solid #2D2D2D', boxShadow: '3px 3px 0 #2D2D2D' }}
+        >
+          <Sparkles className="w-6 h-6 text-white" />
+        </div>
         {sidebarOpen && (
-          <span className="font-bold text-lg whitespace-nowrap">CodePop</span>
+          <div className="flex flex-col">
+            <span className="font-black text-lg tracking-tight">CodePop</span>
+            <span className="text-xs text-[#666] font-medium">代码波普</span>
+          </div>
         )}
       </div>
 
-      <nav className="p-3 space-y-1">
-        {navItems.map(({ path, icon: Icon, label }) => (
-          <NavLink
-            key={path}
-            to={path}
-            className={clsx(
-              'flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200',
-              'hover:bg-slate-800 hover:text-indigo-400',
-              location.pathname === path
-                ? 'bg-slate-800 text-indigo-400 border-l-2 border-indigo-500'
-                : 'text-slate-300'
-            )}
-          >
-            <Icon className="w-5 h-5 flex-shrink-0" />
-            {sidebarOpen && <span className="whitespace-nowrap">{label}</span>}
-          </NavLink>
-        ))}
+      {/* Navigation */}
+      <nav className="p-3 space-y-2">
+        {navItems.map(({ path, icon: Icon, label, color }) => {
+          const isActive = location.pathname === path;
+          return (
+            <NavLink
+              key={path}
+              to={path}
+              className={clsx(
+                'flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200',
+                isActive
+                  ? 'bg-[#2D2D2D] text-white'
+                  : 'hover:bg-[#F5F5F0] hover:text-[#ff3d8a]'
+              )}
+              style={!isActive ? { borderLeft: `3px solid ${color}` } : undefined}
+            >
+              <div
+                className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 transition-all"
+                style={{
+                  background: isActive ? 'transparent' : `${color}20`,
+                  border: isActive ? '2px solid #2D2D2D' : `2px solid ${color}`,
+                }}
+              >
+                <Icon 
+                  className="w-5 h-5" 
+                  style={{ color: isActive ? 'white' : color }}
+                />
+              </div>
+              {sidebarOpen && (
+                <span className="font-semibold whitespace-nowrap">{label}</span>
+              )}
+            </NavLink>
+          );
+        })}
       </nav>
 
+      {/* Toggle Button */}
       <button
         onClick={toggleSidebar}
-        className="absolute bottom-4 -right-3 w-6 h-6 bg-slate-700 rounded-full flex items-center justify-center hover:bg-slate-600 transition-colors"
+        className={clsx(
+          'absolute bottom-6 w-8 h-8 rounded-full flex items-center justify-center',
+          'bg-[#2D2D2D] text-white transition-all',
+          'hover:bg-[#ff3d8a] hover:scale-110',
+          sidebarOpen ? '-right-4' : 'left-1/2 -translate-x-1/2'
+        )}
+        style={{ boxShadow: '3px 3px 0 rgba(0,0,0,0.2)' }}
       >
         {sidebarOpen ? (
           <ChevronLeft className="w-4 h-4" />

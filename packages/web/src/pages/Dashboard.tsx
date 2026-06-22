@@ -1,175 +1,354 @@
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   FolderGit2,
-  FileText,
+  Files,
+  Hash,
   Search,
-  Clock,
-  Plus,
   TrendingUp,
+  Clock,
+  Sparkles,
+  Zap,
+  ArrowRight,
 } from 'lucide-react';
-import { fetchStats } from '../api';
-import { useStore } from '../store';
-import { SearchBox } from '../components/SearchBox';
-import { useSearch } from '../hooks/useSearch';
-import { useNavigate } from 'react-router-dom';
+import { useRepos } from '../../hooks/useRepos';
+import { useSearch } from '../../hooks/useSearch';
 
 export const Dashboard = () => {
-  const navigate = useNavigate();
-  const { recentSearches } = useStore();
-  const { query, setQuery, search, recentSearches: storeRecentSearches } = useSearch();
+  const { repos, isLoading: reposLoading } = useRepos();
+  const { recentSearches } = useSearch();
+  const [animated, setAnimated] = useState(false);
 
-  const { data: stats, isLoading } = useQuery({
-    queryKey: ['stats'],
-    queryFn: fetchStats,
-  });
+  useEffect(() => {
+    setAnimated(true);
+  }, []);
 
-  const handleSearch = (searchQuery: string) => {
-    if (searchQuery.trim()) {
-      search(searchQuery);
-      navigate('/search');
-    }
-  };
+  const totalFiles = repos.reduce((acc, r) => acc + (r.fileCount || 0), 0);
+  const totalSymbols = repos.reduce((acc, r) => acc + (r.symbolCount || 0), 0);
+  const indexedRepos = repos.filter(r => r.status === 'indexed').length;
 
-  const statsCards = [
+  const stats = [
     {
-      title: '总仓库数',
-      value: stats?.totalRepos ?? '-',
+      label: '代码仓库',
+      value: repos.length,
       icon: FolderGit2,
-      color: 'bg-indigo-500',
+      color: '#ff3d8a',
+      bgColor: '#ff3d8a20',
     },
     {
-      title: '索引文件数',
-      value: stats?.totalFiles ?? '-',
-      icon: FileText,
-      color: 'bg-emerald-500',
+      label: '已索引文件',
+      value: totalFiles,
+      icon: Files,
+      color: '#2ad4ff',
+      bgColor: '#2ad4ff20',
     },
     {
-      title: '最近搜索',
-      value: recentSearches.length || 0,
-      icon: Search,
-      color: 'bg-amber-500',
+      label: '代码符号',
+      value: totalSymbols,
+      icon: Hash,
+      color: '#fff34d',
+      bgColor: '#fff34d20',
+    },
+    {
+      label: '索引完成',
+      value: indexedRepos,
+      icon: TrendingUp,
+      color: '#6effb0',
+      bgColor: '#6effb020',
     },
   ];
 
   return (
-    <div className="space-y-8 animate-fadeIn">
-      {/* Quick Search Section */}
-      <section className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-8 text-white">
-        <h2 className="text-2xl font-bold mb-2">快速搜索</h2>
-        <p className="text-indigo-100 mb-6">输入关键词，快速搜索代码库中的内容</p>
-        <div className="max-w-2xl">
-          <SearchBox
-            value={query}
-            onChange={setQuery}
-            onSearch={handleSearch}
-            placeholder="输入搜索关键词..."
-            recentSearches={storeRecentSearches}
-          />
+    <div className="p-8 space-y-8">
+      {/* Hero Section */}
+      <section
+        className="relative overflow-hidden rounded-2xl p-8 animate-fadeIn"
+        style={{
+          background: 'linear-gradient(135deg, #ff3d8a 0%, #b88dff 100%)',
+          border: '3px solid #2D2D2D',
+          boxShadow: '8px 8px 0 #2D2D2D',
+        }}
+      >
+        {/* Dot Pattern */}
+        <div
+          className="absolute inset-0 opacity-30"
+          style={{
+            backgroundImage: `
+              radial-gradient(circle, rgba(255,255,255,0.3) 0 2px, transparent 2px),
+              radial-gradient(circle, rgba(255,255,255,0.15) 0 1px, transparent 1px)
+            `,
+            backgroundSize: '16px 16px, 8px 8px',
+            backgroundPosition: '0 0, 4px 4px',
+          }}
+        />
+
+        <div className="relative z-10">
+          <div className="flex items-center gap-3 mb-4">
+            <div
+              className="w-14 h-14 rounded-xl flex items-center justify-center"
+              style={{
+                background: '#fff34d',
+                border: '2px solid #2D2D2D',
+                boxShadow: '4px 4px 0 #2D2D2D',
+              }}
+            >
+              <Sparkles className="w-8 h-8 text-[#2D2D2D]" />
+            </div>
+            <div>
+              <h1 className="text-3xl font-black text-white tracking-tight">
+                代码波普
+              </h1>
+              <p className="text-white/80 font-medium">
+                让代码真正活着，让 AI 真正理解
+              </p>
+            </div>
+          </div>
+
+          <p className="text-white/90 text-lg mb-6 max-w-2xl">
+            面向 AI Agent 的代码专用检索基础设施。通过混合索引、智能检索与上下文压缩，
+            为 Claude Code、Cursor 等编码 Agent 提供精准的代码上下文。
+          </p>
+
+          <div className="flex gap-4">
+            <Link
+              to="/repos"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-xl font-bold"
+              style={{
+                background: '#fff34d',
+                color: '#2D2D2D',
+                border: '2px solid #2D2D2D',
+                boxShadow: '4px 4px 0 #2D2D2D',
+              }}
+            >
+              <Zap className="w-5 h-5" />
+              添加仓库
+            </Link>
+            <Link
+              to="/search"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-xl font-bold"
+              style={{
+                background: 'rgba(255,255,255,0.2)',
+                color: 'white',
+                border: '2px solid white',
+              }}
+            >
+              <Search className="w-5 h-5" />
+              开始搜索
+            </Link>
+          </div>
         </div>
       </section>
 
       {/* Stats Grid */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {statsCards.map((card, index) => (
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {stats.map((stat, index) => (
           <div
-            key={card.title}
-            className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 hover:shadow-lg transition-all duration-200 hover:border-indigo-200 dark:hover:border-indigo-700"
-            style={{ animationDelay: `${index * 100}ms` }}
+            key={stat.label}
+            className="relative bg-white rounded-2xl p-6 animate-fadeIn"
+            style={{
+              border: '2px solid #2D2D2D',
+              boxShadow: '6px 6px 0 #2D2D2D',
+              animationDelay: `${index * 100}ms`,
+            }}
           >
-            <div className="flex items-center justify-between mb-4">
-              <div className={`p-3 ${card.color} rounded-xl`}>
-                <card.icon className="w-6 h-6 text-white" />
+            <div
+              className="absolute top-0 left-0 w-full h-1 rounded-t-xl"
+              style={{ background: stat.color }}
+            />
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-sm text-[#666] font-medium mb-1">{stat.label}</p>
+                <p className="text-4xl font-black text-[#2D2D2D]">
+                  {reposLoading ? (
+                    <span className="skeleton h-12 w-24 inline-block" />
+                  ) : (
+                    stat.value.toLocaleString()
+                  )}
+                </p>
               </div>
-              <TrendingUp className="w-5 h-5 text-emerald-500" />
+              <div
+                className="w-14 h-14 rounded-xl flex items-center justify-center"
+                style={{
+                  background: stat.bgColor,
+                  border: `2px solid ${stat.color}`,
+                }}
+              >
+                <stat.icon className="w-7 h-7" style={{ color: stat.color }} />
+              </div>
             </div>
-            <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">
-              {card.title}
-            </h3>
-            {isLoading ? (
-              <div className="h-8 w-20 bg-slate-200 dark:bg-slate-700 rounded animate-pulse" />
-            ) : (
-              <p className="text-3xl font-bold text-slate-900 dark:text-white">
-                {card.value}
-              </p>
-            )}
           </div>
         ))}
       </section>
 
-      {/* Quick Actions & Recent Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Quick Actions */}
-        <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-          <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-4">
-            快捷操作
-          </h3>
-          <div className="space-y-3">
+      {/* Two Column Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Recent Repos */}
+        <section className="bg-white rounded-2xl p-6 animate-fadeIn" style={{ border: '2px solid #2D2D2D', boxShadow: '6px 6px 0 #2D2D2D' }}>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-xl font-black flex items-center gap-2">
+              <FolderGit2 className="w-6 h-6" style={{ color: '#2ad4ff' }} />
+              最近仓库
+            </h2>
             <Link
               to="/repos"
-              className="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-700/50 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors group"
+              className="text-sm font-semibold flex items-center gap-1 hover:text-[#ff3d8a] transition-colors"
             >
-              <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg group-hover:bg-indigo-200 dark:group-hover:bg-indigo-900/50 transition-colors">
-                <Plus className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-              </div>
-              <div>
-                <p className="font-medium text-slate-900 dark:text-white">
-                  添加新仓库
-                </p>
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  从本地路径或 Git URL 添加
-                </p>
-              </div>
-            </Link>
-            <Link
-              to="/search"
-              className="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-700/50 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors group"
-            >
-              <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg group-hover:bg-emerald-200 dark:group-hover:bg-emerald-900/50 transition-colors">
-                <Search className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-              </div>
-              <div>
-                <p className="font-medium text-slate-900 dark:text-white">
-                  高级搜索
-                </p>
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  按仓库筛选，自定义搜索范围
-                </p>
-              </div>
+              查看全部
+              <ArrowRight className="w-4 h-4" />
             </Link>
           </div>
-        </section>
 
-        {/* Recent Searches */}
-        <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-          <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
-            <Clock className="w-5 h-5" />
-            最近搜索
-          </h3>
-          {storeRecentSearches.length === 0 ? (
-            <p className="text-slate-500 dark:text-slate-400 text-sm py-8 text-center">
-              暂无搜索记录
-            </p>
+          {reposLoading ? (
+            <div className="space-y-4">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="skeleton h-20 rounded-xl" />
+              ))}
+            </div>
+          ) : repos.length === 0 ? (
+            <div className="text-center py-12">
+              <div
+                className="w-20 h-20 rounded-2xl mx-auto mb-4 flex items-center justify-center"
+                style={{ background: '#F5F5F0', border: '2px dashed #2D2D2D' }}
+              >
+                <FolderGit2 className="w-10 h-10 text-[#666]" />
+              </div>
+              <p className="text-[#666] mb-4">还没有添加任何仓库</p>
+              <Link
+                to="/repos"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold"
+                style={{ background: '#ff3d8a', color: 'white', border: '2px solid #2D2D2D' }}
+              >
+                添加第一个仓库
+              </Link>
+            </div>
           ) : (
-            <div className="space-y-2">
-              {storeRecentSearches.slice(0, 5).map((term, index) => (
-                <button
-                  key={index}
-                  onClick={() => {
-                    setQuery(term);
-                    navigate('/search');
-                  }}
-                  className="w-full flex items-center gap-3 p-3 text-left bg-slate-50 dark:bg-slate-700/50 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            <div className="space-y-3">
+              {repos.slice(0, 5).map((repo, index) => (
+                <Link
+                  key={repo.id}
+                  to={`/repos/${repo.id}`}
+                  className="block p-4 rounded-xl border-2 border-transparent hover:border-[#ff3d8a] transition-all"
+                  style={{ background: '#F5F5F0' }}
                 >
-                  <Search className="w-4 h-4 text-slate-400" />
-                  <span className="text-slate-700 dark:text-slate-200">
-                    {term}
-                  </span>
-                </button>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-10 h-10 rounded-lg flex items-center justify-center"
+                        style={{
+                          background: '#2D2D2D',
+                          color: '#fff34d',
+                          fontWeight: 'bold',
+                          fontSize: '14px',
+                        }}
+                      >
+                        {repo.name.slice(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <p className="font-bold">{repo.name}</p>
+                        <p className="text-sm text-[#666]">{repo.path}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="px-2 py-1 rounded-lg text-xs font-bold"
+                        style={{
+                          background: repo.status === 'indexed' ? '#6effb020' : '#fff34d20',
+                          color: repo.status === 'indexed' ? '#2D2D2D' : '#2D2D2D',
+                        }}
+                      >
+                        {repo.status === 'indexed' ? '已索引' : '索引中'}
+                      </span>
+                    </div>
+                  </div>
+                </Link>
               ))}
             </div>
           )}
         </section>
+
+        {/* Recent Searches */}
+        <section className="bg-white rounded-2xl p-6 animate-fadeIn" style={{ border: '2px solid #2D2D2D', boxShadow: '6px 6px 0 #2D2D2D', animationDelay: '200ms' }}>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-xl font-black flex items-center gap-2">
+              <Clock className="w-6 h-6" style={{ color: '#b88dff' }} />
+              最近搜索
+            </h2>
+            <Link
+              to="/search"
+              className="text-sm font-semibold flex items-center gap-1 hover:text-[#ff3d8a] transition-colors"
+            >
+              查看全部
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+          </div>
+
+          {recentSearches.length === 0 ? (
+            <div className="text-center py-12">
+              <div
+                className="w-20 h-20 rounded-2xl mx-auto mb-4 flex items-center justify-center"
+                style={{ background: '#F5F5F0', border: '2px dashed #2D2D2D' }}
+              >
+                <Search className="w-10 h-10 text-[#666]" />
+              </div>
+              <p className="text-[#666] mb-4">还没有搜索记录</p>
+              <Link
+                to="/search"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold"
+                style={{ background: '#2ad4ff', color: '#2D2D2D', border: '2px solid #2D2D2D' }}
+              >
+                开始搜索
+              </Link>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {recentSearches.map((search, index) => (
+                <Link
+                  key={index}
+                  to={`/search?q=${encodeURIComponent(search.query)}`}
+                  className="flex items-center gap-3 p-3 rounded-xl hover:bg-[#F5F5F0] transition-colors"
+                >
+                  <div
+                    className="w-10 h-10 rounded-lg flex items-center justify-center"
+                    style={{ background: '#fff34d20' }}
+                  >
+                    <Search className="w-5 h-5" style={{ color: '#fff34d' }} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{search.query}</p>
+                    <p className="text-sm text-[#666]">
+                      {search.results} 个结果 · {search.timestamp}
+                    </p>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* Ticker */}
+      <div
+        className="overflow-hidden py-3"
+        style={{ background: '#fff34d', borderTop: '2px solid #2D2D2D', borderBottom: '2px solid #2D2D2D' }}
+      >
+        <div className="flex gap-8 animate-[ticker_30s_linear_infinite] whitespace-nowrap">
+          {[...Array(2)].map((_, i) => (
+            <span key={i} className="flex items-center gap-8 text-sm font-bold text-[#2D2D2D]">
+              <span>代码波普</span>
+              <span className="w-2 h-2 rounded-full bg-[#ff3d8a]" />
+              <span>让代码真正活着</span>
+              <span className="w-2 h-2 rounded-full bg-[#2ad4ff]" />
+              <span>AI 代码检索基础设施</span>
+              <span className="w-2 h-2 rounded-full bg-[#6effb0]" />
+              <span>POP ART STYLE</span>
+              <span className="w-2 h-2 rounded-full bg-[#b88dff]" />
+              <span>VECTOR SEARCH</span>
+              <span className="w-2 h-2 rounded-full bg-[#ff8a3d]" />
+              <span>SEMANTIC CODE SEARCH</span>
+              <span className="w-2 h-2 rounded-full bg-[#ff3d8a]" />
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   );
