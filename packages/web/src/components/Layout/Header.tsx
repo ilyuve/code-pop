@@ -15,7 +15,14 @@ export const Header = () => {
   const { sidebarOpen, toggleSidebar, wsStatus } = useStore();
   const title = routeTitles[location.pathname] || 'CodePop';
 
-  const statusConfig = {
+  const statusConfig: Record<string, {
+    icon: typeof Wifi;
+    color: string;
+    bgColor: string;
+    label: string;
+    dotColor: string;
+    animate?: boolean;
+  }> = {
     connected: {
       icon: Wifi,
       color: 'text-green-500',

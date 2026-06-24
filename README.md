@@ -3,9 +3,9 @@ CodePop 代码波普 - SEO Keywords
 代码检索, AI代码检索, 向量数据库, pgvector, 语义搜索, Claude Code, Cursor AI, AI Agent, 代码索引, 代码搜索, 代码理解, RAG, 代码RAG, 代码向量化, Code Search, Semantic Code Search, Vector Database, AI Infrastructure
 -->
 
-# Code:Pop — 让代码,真正活着。
+# Code:Pop — 让代码，真正活着。
 
-> **中文名：代码波普** · **代码,真正活着**  
+> **中文名：代码波普** · **代码，真正活着**  
 > **🤖 AI INFRASTRUCTURE** · **代码专用检索基础设施**
 
 ---
@@ -28,239 +28,186 @@ CodePop 代码波普 - SEO Keywords
 
 | 特性 | 说明 |
 |------|------|
-| 🚀 **开箱即用** | Docker 一键部署，5 分钟完成配置 |
-| 🎯 **精准检索** | 向量 + 符号 + 图检索的混合索引 |
-| 📊 **上下文压缩** | 智能 Token 控制，降低 API 成本 |
-| 🔌 **多 Agent 支持** | 原生支持 Claude Code、Cursor、VS Code 等 |
-| 🐘 **PostgreSQL + pgvector** | 成熟稳定，运维友好 |
-| 🔒 **隐私优先** | 数据留在本机，不上传云端 |
+| 🚀 **开箱即用** | Docker Compose 一键部署，5 分钟完成配置 |
+| 🎯 **精准检索** | 向量 + 符号 + BM25 + 调用图 四路召回混合排序 |
+| 📊 **上下文压缩** | 函数级分块，超长函数按 200 行切分 |
+| 🔌 **多 Agent 支持** | REST API + WebSocket + MCP Server |
+| 🐘 **PostgreSQL + pgvector** | 768 维向量，IVFFlat 索引 |
+| 🔒 **隐私优先** | 本地 sentence-transformers 模型，不依赖 OpenAI |
 
 ---
 
 ## 🚀 快速开始
 
-### 一键部署（推荐）
+### 环境要求
+
+- Docker + Docker Compose
+- Git
+
+### 一键部署
 
 ```bash
 git clone https://github.com/luyemoon/code-pop.git
 cd code-pop
-./scripts/deploy.sh
+cp .env.example .env
+# 按需编辑 .env，然后启动
+docker compose up --build -d
 ```
 
-详细指南请查看 [快速入门](./GETTING_STARTED.md)
+服务启动后：
 
-### 支持的部署方式
+- Web UI: http://localhost:3000
+- REST API: http://localhost:8080
+- API 文档: http://localhost:8080/docs
+- WebSocket: ws://localhost:8080/ws
+- MCP SSE: http://localhost:8080/mcp/sse
 
-| 方式 | 说明 | 适合场景 |
-|------|------|----------|
-| 🐳 **Docker 一键部署** | 包含 PostgreSQL，一行命令 | 快速体验、生产部署 |
-| 💻 **本地开发** | pnpm + Docker Desktop | 开发调试 |
-| 📱 **macOS 应用** | DMG 安装包 | macOS 用户 |
-| 🔌 **纯 API 服务** | 无 Web 界面 | 极简部署 |
+### 本地开发（Python 后端）
+
+```bash
+cd backend
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 启动 PostgreSQL（可用 docker compose up -d postgres）
+python scripts/init_db.py
+uvicorn main:app --reload --host 0.0.0.0 --port 8080
+```
+
+### 本地开发（React 前端）
+
+```bash
+cd packages/web
+npm install
+npm run dev
+```
 
 ---
 
-## 🎛️ 多端支持
+## 📡 API 端点
 
-### 1. Web 管理界面
-- 仓库管理
-- 实时索引进度
-- 可视化搜索
-- 系统设置
+### 仓库管理
 
-### 2. MCP Server (原生 AI Agent 支持)
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/repos` | 创建仓库 `{name, git_url}` |
+| GET | `/api/repos` | 仓库列表 |
+| GET | `/api/repos/{id}` | 仓库详情 |
+| DELETE | `/api/repos/{id}` | 删除仓库（级联删除文件/符号/向量） |
+| POST | `/api/repos/{id}/index` | 手动触发索引 |
+| GET | `/api/repos/{id}/files` | 仓库文件列表 |
+| GET | `/api/repos/{id}/symbols` | 仓库符号列表 |
+
+### 检索
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/search` | 混合检索 `{query, repo_id?, limit?}` |
+| POST | `/api/search/symbol` | 符号搜索 `{query, repo_id?, limit?}` |
+| GET | `/api/search/history` | 搜索历史 |
+
+### Webhook & WebSocket
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/webhook/github` | 接收 GitHub push 事件 |
+| WS | `/ws` | 索引进度实时推送 |
+
+### MCP
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/mcp/sse` | MCP Server SSE 事件流 |
+
+MCP 暴露工具：
+
+- `codepop_search(query, repo_id?, limit?)`
+- `codepop_repos()`
+- `codepop_symbols(repo_id, file_path)`
+
+---
+
+## ⚙️ 配置说明
+
+复制 `.env.example` 为 `.env` 并按需修改：
+
 ```bash
-# Claude Code
-./scripts/setup-mcp.sh
+# 数据库
+DATABASE_URL=postgresql://postgres:codepop123@localhost:5432/codepop
+POSTGRES_PASSWORD=codepop123
 
-# Cursor (settings.json)
+# GitHub Webhook 签名密钥（可选）
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
+
+# 本地嵌入模型
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+
+# 代码存储目录
+REPOS_DIR=./repos
+
+# API 端口
+API_HOST=0.0.0.0
+API_PORT=8080
+```
+
+---
+
+## 🧠 架构概览
+
+```
+用户提交 GitHub 仓库地址
+        ↓
+POST /api/repos 创建仓库记录
+        ↓
+后台启动索引任务（WebSocket 推送进度）
+        ↓
+git clone / git pull 代码到本地目录
+        ↓
+tree-sitter 遍历文件 → 提取符号（函数/类/接口）
+        ↓
+按符号切分 chunk（函数级优先，超长按 200 行切分）
+        ↓
+sentence-transformers 生成 768 维 embedding
+        ↓
+写入 PostgreSQL + pgvector
+        ↓
+用户通过 MCP 或 REST 查询
+        ↓
+四路召回（向量 + 符号 + BM25 + 调用图）混合排序
+        ↓
+返回带代码片段和行号的检索结果
+```
+
+---
+
+## 🤝 接入 AI Agent
+
+### Cursor / Windsurf MCP 配置
+
+在 MCP 配置中添加：
+
+```json
 {
   "mcpServers": {
     "codepop": {
-      "url": "http://localhost:3001"
+      "url": "http://localhost:8080/mcp/sse"
     }
   }
 }
 ```
 
-### 3. REST API
-```bash
-# 搜索代码
-curl -X POST http://localhost:3000/api/search \
-  -d '{"query": "用户认证"}'
+### GitHub Webhook 配置
 
-# 添加仓库
-curl -X POST http://localhost:3000/api/repos \
-  -d '{"name": "my-project", "path": "/path/to/project"}'
-```
+在仓库 Settings → Webhooks 中添加：
 
-### 4. macOS 原生应用
-- 系统托盘常驻
-- 全局快捷键 ⌘⇧C 快速搜索
-- 原生 macOS 体验
+- Payload URL: `http://your-server/webhook/github`
+- Content type: `application/json`
+- Secret: 与 `.env` 中 `GITHUB_WEBHOOK_SECRET` 一致
+- 选择 `Just the push event`
 
 ---
 
-## 🏗️ 技术架构
+## 📄 License
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     多端接入层                               │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │
-│  │  Web UI  │ │ MCP Server│ │  REST API │ │macOS App│      │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘      │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      核心服务层                              │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │
-│  │ 代码索引器   │ │ 搜索服务    │ │ 嵌入服务    │          │
-│  │(tree-sitter)│ │(混合检索)   │ │(OpenAI等)  │          │
-│  └─────────────┘ └─────────────┘ └─────────────┘          │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 数据库适配层 (Adapter)                       │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │
-│  │ PostgreSQL  │ │   SQLite    │ │    Mock     │          │
-│  │  + pgvector │ │  (嵌入式)   │ │   (测试)    │          │
-│  └─────────────┘ └─────────────┘ └─────────────┘          │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 📦 项目结构
-
-```
-codepop/
-├── packages/
-│   ├── core/           # 核心库（数据库适配层、索引器）
-│   ├── server/         # HTTP Server + MCP Server
-│   ├── cli/            # CLI 工具
-│   ├── web/           # React Web 管理界面
-│   └── macos/         # macOS 原生应用
-├── docker/             # Docker 配置
-├── scripts/             # 部署脚本
-├── docs/               # 文档
-├── GETTING_STARTED.md  # 快速入门
-└── README.md
-```
-
----
-
-## 🔍 支持的 AI Agent
-
-| Agent | 接入方式 | 状态 |
-|-------|----------|------|
-| **Claude Code** | MCP 原生 | ✅ 已支持 |
-| **Cursor** | MCP Server | ✅ 已支持 |
-| **VS Code (Copilot)** | REST API | ✅ 已支持 |
-| **Codex** | REST API | ✅ 已支持 |
-| **JetBrains IDEs** | REST API | ✅ 已支持 |
-| **Vim/Neovim** | CLI | 🚧 开发中 |
-
----
-
-## 🗄️ 数据库选项
-
-| 数据库 | 说明 | 适合场景 |
-|--------|------|----------|
-| **PostgreSQL + pgvector** | 向量检索生产首选 | 生产环境 |
-| **SQLite** | 嵌入式，无需安装 | 开发、测试 |
-| **现有 PostgreSQL** | 连接已有数据库 | 企业环境 |
-
----
-
-## 📈 性能指标
-
-| 指标 | 目标值 |
-|------|--------|
-| 查询延迟 P95 | < 500ms |
-| Top-5 命中率 | > 85% |
-| Token 压缩率 | 60-80% |
-| 增量同步延迟 | < 3s |
-| 支持仓库规模 | 10万+ 文件 |
-
----
-
-## 🚀 快速上手
-
-### 方式 1: Docker 一键部署
-
-```bash
-git clone https://github.com/luyemoon/code-pop.git
-cd code-pop
-./scripts/deploy.sh
-```
-
-### 方式 2: 本地开发
-
-```bash
-# 安装依赖
-pnpm install
-
-# 启动 PostgreSQL
-./scripts/start-local.sh
-
-# 启动服务
-pnpm dev
-```
-
-### 方式 3: macOS 应用
-
-```bash
-./scripts/build-macos.sh
-# 或下载 DMG: https://github.com/luyemoon/code-pop/releases
-```
-
-详细指南：[快速入门](./GETTING_STARTED.md)
-
----
-
-## 🤝 贡献指南
-
-欢迎提交 PR 和 Issue！
-
-```bash
-# Fork 项目
-# 创建分支
-git checkout -b feature/your-feature
-
-# 开发
-pnpm install
-pnpm dev
-
-# 提交
-git commit -m "feat: add your feature"
-git push origin feature/your-feature
-
-# 创建 PR
-```
-
----
-
-## 📄 许可证
-
-MIT License
-
----
-
-## 📞 联系方式
-
-- 官方网站: https://codepop.cn (开发中)
-- GitHub: https://github.com/luyemoon/code-pop
-- 问题反馈: https://github.com/luyemoon/code-pop/issues
-- 文档: https://github.com/luyemoon/code-pop/blob/main/GETTING_STARTED.md
-
----
-
-<div align="center">
-
-**🎨 POP. ART. CODE. ALIVE. 🎨**
-
-**让代码真正活着，让 AI 真正理解。**
-
-</div>
+MIT License © CodePop Team

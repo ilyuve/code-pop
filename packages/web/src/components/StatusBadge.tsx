@@ -1,18 +1,30 @@
 import { clsx } from 'clsx';
 import { CheckCircle, Loader2, AlertCircle } from 'lucide-react';
+import type { Repo } from '../types';
 
-type Status = 'indexing' | 'completed' | 'error';
+type Status = Repo['status'];
 
 interface StatusBadgeProps {
   status: Status;
 }
 
-const statusConfig = {
+const statusConfig: Record<Status, {
+  label: string;
+  icon: typeof Loader2;
+  className: string;
+  iconClass: string;
+}> = {
   indexing: {
     label: '索引中',
     icon: Loader2,
     className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
     iconClass: 'animate-spin',
+  },
+  indexed: {
+    label: '已索引',
+    icon: CheckCircle,
+    className: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+    iconClass: '',
   },
   completed: {
     label: '已完成',

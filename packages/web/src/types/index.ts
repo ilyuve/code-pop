@@ -4,9 +4,11 @@ export interface Repo {
   name: string;
   path: string;
   gitUrl?: string;
-  status: 'indexing' | 'completed' | 'error';
+  status: 'indexing' | 'indexed' | 'completed' | 'error';
   totalFiles: number;
   indexedFiles: number;
+  fileCount?: number;
+  symbolCount?: number;
   createdAt: string;
   lastIndexedAt: string;
 }
@@ -43,6 +45,7 @@ export interface ApiResponse<T> {
 
 // Form types
 export interface AddRepoForm {
+  name?: string;
   path?: string;
   gitUrl?: string;
 }

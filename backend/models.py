@@ -1,159 +1,131 @@
-"""Pydantic models and enums shared across the CodePop backend."""
+"""SQLAlchemy ORM models for the CodePop backend."""
 
+import uuid
 from datetime import datetime
-from enum import Enum
-from typing import Any, Dict, List, Optional
+from enum import Enum as PyEnum
 
-from pydantic import BaseModel, Field
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from config import settings
+from database import Base
 
 
-class Language(str, Enum):
-    typescript = "typescript"
-    python = "python"
-    go = "go"
-    rust = "rust"
-    java = "java"
-    cpp = "cpp"
+def _uuid() -> str:
+    return str(uuid.uuid4())
 
 
-class RepoStatus(str, Enum):
-    indexed = "indexed"
+class RepoStatus(str, PyEnum):
+    pending = "pending"
     indexing = "indexing"
+    indexed = "indexed"
     error = "error"
-    degraded = "degraded"
 
 
-class SymbolType(str, Enum):
-    function = "function"
-    class_ = "class"
-    variable = "variable"
-    interface = "interface"
-    method = "method"
-    property = "property"
-    import_ = "import"
+class Repository(Base):
+    __tablename__ = "repositories"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False)
+    git_url = Column(String(512), nullable=False)
+    local_path = Column(String(512), nullable=False)
+    status = Column(String(32), default=RepoStatus.pending.value, nullable=False)
+    last_indexed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    files = relationship("CodeFile", back_populates="repo", cascade="all, delete-orphan")
+    symbols = relationship("Symbol", back_populates="repo", cascade="all, delete-orphan")
+    embeddings = relationship("Embedding", back_populates="repo", cascade="all, delete-orphan")
+    edges = relationship("CallGraphEdge", back_populates="repo", cascade="all, delete-orphan")
+    history = relationship("SearchHistory", back_populates="repo", cascade="all, delete-orphan")
 
 
-class SearchMode(str, Enum):
-    semantic = "semantic"
-    symbol = "symbol"
-    hybrid = "hybrid"
+class CodeFile(Base):
+    __tablename__ = "code_files"
+    __table_args__ = (UniqueConstraint("repo_id", "path", name="uix_file_repo_path"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    path = Column(String(1024), nullable=False)
+    language = Column(String(32), nullable=False)
+    content_hash = Column(String(64), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    repo = relationship("Repository", back_populates="files")
+    symbols = relationship("Symbol", back_populates="file", cascade="all, delete-orphan")
+    embeddings = relationship("Embedding", back_populates="file", cascade="all, delete-orphan")
 
 
-class Repository(BaseModel):
-    id: str
-    name: str
-    path: str
-    git_url: Optional[str] = None
-    status: RepoStatus = RepoStatus.indexing
-    file_count: int = 0
-    symbol_count: int = 0
-    embedding_count: int = 0
-    created_at: datetime
-    updated_at: datetime
-    git_modified_at: Optional[datetime] = None
-    git_author: Optional[str] = None
-    last_indexed_at: Optional[datetime] = None
-    indexing_progress: int = 0
+class Symbol(Base):
+    __tablename__ = "symbols"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_id = Column(UUID(as_uuid=True), ForeignKey("code_files.id", ondelete="CASCADE"), nullable=False)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(512), nullable=False)
+    type = Column(String(32), nullable=False)  # function / class / interface / variable
+    kind = Column(String(32), nullable=False)
+    line = Column(Integer, nullable=False)
+    column = Column(Integer, default=0, nullable=False)
+    end_line = Column(Integer, nullable=False)
+    end_column = Column(Integer, default=0, nullable=False)
+    is_exported = Column(Integer, default=0, nullable=False)  # 0/1
+
+    file = relationship("CodeFile", back_populates="symbols")
+    repo = relationship("Repository", back_populates="symbols")
 
 
-class Symbol(BaseModel):
-    id: str
-    file_id: str
-    repo_id: str
-    name: str
-    type: SymbolType
-    kind: str
-    line: int
-    column: int
-    end_line: int
-    end_column: int
-    parent_id: Optional[str] = None
-    is_exported: bool = False
-    docstring: Optional[str] = None
+class Embedding(Base):
+    __tablename__ = "embeddings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_id = Column(UUID(as_uuid=True), ForeignKey("code_files.id", ondelete="CASCADE"), nullable=False)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    start_line = Column(Integer, nullable=False)
+    end_line = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(settings.embedding_dim), nullable=False)
+    token_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    file = relationship("CodeFile", back_populates="embeddings")
+    repo = relationship("Repository", back_populates="embeddings")
 
 
-class CodeFile(BaseModel):
-    id: str
-    repo_id: str
-    path: str
-    language: str
-    content: str
-    content_hash: str
-    size_bytes: int
-    created_at: datetime
-    updated_at: datetime
-    git_modified_at: Optional[datetime] = None
+class CallGraphEdge(Base):
+    __tablename__ = "call_graph_edges"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_symbol_id = Column(UUID(as_uuid=True), ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
+    target_symbol_id = Column(UUID(as_uuid=True), ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    call_type = Column(String(32), default="direct", nullable=False)
+
+    repo = relationship("Repository", back_populates="edges")
 
 
-class Embedding(BaseModel):
-    id: str
-    file_id: str
-    chunk_index: int
-    content: str
-    embedding: List[float]
-    token_count: int
-    created_at: datetime
+class SearchHistory(Base):
+    __tablename__ = "search_history"
 
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    query = Column(Text, nullable=False)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True)
+    mode = Column(String(32), default="hybrid", nullable=False)
+    results_count = Column(Integer, default=0, nullable=False)
+    latency_ms = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-class CallGraphEdge(BaseModel):
-    id: str
-    source_symbol_id: str
-    target_symbol_id: str
-    source_file_id: str
-    target_file_id: str
-    repo_id: str
-    call_type: str  # direct, indirect, import
-
-
-class SearchQuery(BaseModel):
-    query: str
-    repo_id: Optional[str] = None
-    language: Optional[Language] = None
-    limit: int = Field(default=20, ge=1, le=100)
-    max_tokens: int = Field(default=8000, ge=100)
-    mode: SearchMode = SearchMode.hybrid
-
-
-class SearchResult(BaseModel):
-    id: str
-    file_id: str
-    file_path: str
-    content: str
-    similarity: float
-    language: str
-    symbols: List[str] = []
-    line: int = 0
-    score: float = 0.0
-    score_breakdown: Dict[str, float] = {}
-
-
-class IndexProgress(BaseModel):
-    repo_id: str
-    total_files: int
-    processed_files: int
-    status: str
-    error: Optional[str] = None
-
-
-class SystemStatus(BaseModel):
-    status: str
-    version: str
-    uptime: float
-    active_requests: int
-    indexing_tasks: int
-    degraded_features: List[str] = []
-    metrics: Dict[str, float] = {}
-
-
-class DegradationStatus(BaseModel):
-    feature: str
-    status: str
-    reason: Optional[str] = None
-    fallback: Optional[str] = None
-
-
-class MCPRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Optional[Any] = None
-    method: str
-    params: Dict[str, Any] = Field(default_factory=dict)
+    repo = relationship("Repository", back_populates="history")

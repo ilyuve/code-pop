@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: ankane/pgvector:pg16
+    image: pgvector/pgvector:pg16
     container_name: codepop-postgres
     environment:
       POSTGRES_DB: codepop
@@ -20,21 +20,24 @@ services:
     networks:
       - codepop-network
 
-  codepop:
-    image: codepop/codepop:latest
-    container_name: codepop-server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: codepop-backend:latest
+    container_name: codepop-backend
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-codepop123}@postgres:5432/codepop
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      CODEPOP_HOST: 0.0.0.0
-      CODEPOP_PORT: 8080
-      CODEPOP_MCP_PORT: 8081
+      REPOS_DIR: /app/repos
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      LOG_LEVEL: INFO
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
     volumes:
       - ./repos:/app/repos
-      - ./logs:/app/logs
     ports:
       - "8080:8080"
-      - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,14 +45,15 @@ services:
       - codepop-network
 
   web:
-    image: codepop/web:latest
+    build:
+      context: ./packages/web
+      dockerfile: Dockerfile
+    image: codepop-web:latest
     container_name: codepop-web
-    environment:
-      API_URL: http://codepop:8080
     ports:
       - "3000:3000"
     depends_on:
-      - codepop
+      - backend
     networks:
       - codepop-network
 

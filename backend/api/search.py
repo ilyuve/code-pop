@@ -1,69 +1,82 @@
-"""Search routes."""
+"""Search endpoints."""
 
 import time
-from datetime import datetime
-from typing import Optional
+from typing import List
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 
-from core.data import files, search_history, symbols
-from models import SearchQuery, SearchResult
-from state import degradation_manager, search_engine
+from config import settings
+from database import get_db
+from models import SearchHistory
+from schemas import (
+    SearchHistoryResponse,
+    SearchQuery,
+    SearchResultItem,
+    SymbolSearchQuery,
+)
+from services.searcher import Searcher
 
-router = APIRouter(prefix="/api/search")
-
-
-@router.post("", response_model=list[SearchResult])
-async def search_code(query: SearchQuery):
-    """Run the four-way hybrid retrieval engine."""
-    start_time = time.time()
-
-    try:
-        results = await search_engine.search(query)
-        search_history.append(
-            {
-                "query": query.query,
-                "timestamp": datetime.now().isoformat(),
-                "results": len(results),
-                "mode": query.mode.value,
-            }
-        )
-        degradation_manager.record_latency((time.time() - start_time) * 1000)
-        degradation_manager.increment_metric("request_count")
-        return results
-    except Exception as exc:
-        degradation_manager.report_health("search", "degraded", str(exc))
-        degradation_manager.increment_metric("error_count")
-        raise HTTPException(status_code=500, detail=str(exc))
+router = APIRouter(prefix="/api/search", tags=["search"])
 
 
-@router.post("/symbol")
-async def search_symbol(query: str, repo_id: Optional[str] = None, limit: int = 20):
-    """Search symbols by name."""
-    results = []
-    for symbol in symbols.values():
-        file = files.get(symbol.file_id)
-        if not file:
-            continue
-        if repo_id and file.repo_id != repo_id:
-            continue
-        if query.lower() in symbol.name.lower():
-            results.append(
-                {
-                    "id": symbol.id,
-                    "name": symbol.name,
-                    "type": symbol.type.value,
-                    "kind": symbol.kind,
-                    "file_path": file.path,
-                    "language": file.language,
-                    "line": symbol.line,
-                    "is_exported": symbol.is_exported,
-                }
-            )
-    return results[:limit]
+def _record_history(
+    db: Session,
+    query: str,
+    repo_id: UUID | None,
+    mode: str,
+    results_count: int,
+    latency_ms: int,
+) -> None:
+    history = SearchHistory(
+        query=query,
+        repo_id=repo_id,
+        mode=mode,
+        results_count=results_count,
+        latency_ms=latency_ms,
+    )
+    db.add(history)
+    db.commit()
 
 
-@router.get("/history")
-async def get_search_history(limit: int = 10):
-    """Return recent search history."""
-    return search_history[-limit:][::-1]
+@router.post("", response_model=List[SearchResultItem])
+def search(query: SearchQuery, db: Session = Depends(get_db)) -> List[SearchResultItem]:
+    if query.limit > settings.search_max_limit:
+        raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
+
+    start = time.perf_counter()
+    searcher = Searcher(db)
+    results = searcher.hybrid_search(query.query, query.repo_id, query.limit)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+
+    _record_history(db, query.query, query.repo_id, query.mode, len(results), latency_ms)
+    return results
+
+
+@router.post("/symbol", response_model=List[SearchResultItem])
+def symbol_search(
+    query: SymbolSearchQuery, db: Session = Depends(get_db)
+) -> List[SearchResultItem]:
+    if query.limit > settings.search_max_limit:
+        raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
+
+    start = time.perf_counter()
+    searcher = Searcher(db)
+    results = searcher.symbol_search(query.query, query.repo_id, query.limit)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+
+    _record_history(db, query.query, query.repo_id, "symbol", len(results), latency_ms)
+    return results
+
+
+@router.get("/history", response_model=List[SearchHistoryResponse])
+def search_history(
+    repo_id: UUID | None = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> List[SearchHistory]:
+    q = db.query(SearchHistory)
+    if repo_id:
+        q = q.filter(SearchHistory.repo_id == repo_id)
+    return q.order_by(SearchHistory.created_at.desc()).limit(limit).all()

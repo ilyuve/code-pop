@@ -4,12 +4,10 @@
   "description": "CodePop - AI 代码检索基础设施",
   "private": true,
   "scripts": {
-    "build": "pnpm -r build",
-    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm --filter @codepop/web build",
+    "dev": "pnpm --filter @codepop/web dev",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm --filter @codepop/web lint"
   },
   "keywords": [
     "code-search",

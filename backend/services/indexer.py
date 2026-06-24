@@ -1,254 +1,336 @@
-"""Repository indexing: file ingestion, symbol extraction, embeddings, call graph."""
+"""Repository indexing orchestration: git -> parse -> embed -> store."""
 
 import asyncio
-import hashlib
-import uuid
-from datetime import datetime
-from typing import TYPE_CHECKING
-
-from core.data import call_graph, embeddings, files, symbols
-from models import CallGraphEdge, CodeFile, Embedding, RepoStatus, Symbol, SymbolType
-from services.embedding import EmbeddingManager
-from services.websocket import ConnectionManager
-
-if TYPE_CHECKING:
-    from services.degradation import DegradationManager
-
-
-def generate_mock_content(filename: str, language: str) -> str:
-    """Generate realistic demo code content for the MVP."""
-    if language == "python":
-        if "main" in filename:
-            return '''#!/usr/bin/env python3
-"""Main entry point for the application."""
-
-import asyncio
-from fastapi import FastAPI
-from api import router
-from utils import setup_logging, initialize_db
-from config import settings
-
-app = FastAPI(title="CodePop API", version="0.1.0")
-
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
-    setup_logging()
-    initialize_db()
-    app.include_router(router)
-    return app
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "version": "0.1.0"}
-
-async def main():
-    """Main entry point."""
-    application = create_app()
-    import uvicorn
-    await uvicorn.main(["--host", "0.0.0.0", "--port", "3000"])
-
-if __name__ == "__main__":
-    asyncio.run(main())
-'''
-        if "utils" in filename:
-            return '''"""Utility functions for the application."""
-
 import logging
-import os
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID
 
-def setup_logging(level: str = "INFO") -> None:
-    """Configure logging for the application."""
-    logging.basicConfig(
-        level=getattr(logging, level),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+from sqlalchemy.orm import Session
+
+from config import settings
+from database import SessionLocal
+from models import CallGraphEdge, CodeFile, Embedding, RepoStatus, Repository, Symbol
+from services.embedder import Embedder
+from services.notifier import notifier
+from services.parser import (
+    ParseResult,
+    detect_language,
+    is_binary,
+    list_source_files,
+    parse_file,
+    should_skip_path,
+)
+from services.repo_sync import clone_or_pull
+
+logger = logging.getLogger(__name__)
+
+# Isolated executor for CPU-bound parsing and embedding.
+_index_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="indexer-")
+
+
+def _notify(loop: asyncio.AbstractEventLoop, repo_id: str, status: str, progress: float, error: str | None = None) -> None:
+    """Schedule a WebSocket notification on the main event loop from a worker thread."""
+    try:
+        asyncio.run_coroutine_threadsafe(
+            notifier.send_repo_update(repo_id, status, progress, error),
+            loop,
+        )
+    except Exception as exc:
+        logger.warning("Failed to send WS notification: %s", exc)
+
+
+def _read_file(file_path: Path) -> Optional[str]:
+    """Read a source file, skipping binaries and oversized files."""
+    if file_path.stat().st_size > settings.index_max_file_size:
+        logger.debug("Skipping oversized file: %s", file_path)
+        return None
+    try:
+        content_bytes = file_path.read_bytes()
+    except Exception as exc:
+        logger.warning("Cannot read %s: %s", file_path, exc)
+        return None
+    if is_binary(content_bytes):
+        return None
+    return content_bytes.decode("utf-8", errors="replace")
+
+
+def _index_file(
+    db: Session,
+    repo_id: UUID,
+    repo_path: Path,
+    file_path: Path,
+) -> Optional[Tuple[CodeFile, ParseResult]]:
+    """Index a single source file. Returns inserted CodeFile and parse result."""
+    rel_path = str(file_path.relative_to(repo_path))
+
+    if should_skip_path(rel_path):
+        return None
+
+    content = _read_file(file_path)
+    if content is None:
+        print(f"[INDEXER] skip read failed {rel_path}", flush=True)
+        return None
+
+    existing = (
+        db.query(CodeFile)
+        .filter(CodeFile.repo_id == repo_id, CodeFile.path == rel_path)
+        .first()
     )
 
-def initialize_db(connection_string: Optional[str] = None) -> None:
-    """Initialize database connection."""
-    from database import Database
-    db_url = connection_string or os.getenv("DATABASE_URL")
-    Database.initialize(db_url)
+    parsed = parse_file(rel_path, content, settings.index_chunk_max_lines)
+    if parsed is None:
+        print(f"[INDEXER] parse failed {rel_path}", flush=True)
+        return None
 
-def calculate_similarity(vec1: list, vec2: list) -> float:
-    """Calculate cosine similarity between two vectors."""
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-    norm1 = sum(a * a for a in vec1) ** 0.5
-    norm2 = sum(b * b for b in vec2) ** 0.5
-    return dot_product / (norm1 * norm2) if norm1 and norm2 else 0.0
-'''
-        if "api" in filename:
-            return '''"""API routes for the application."""
+    # If an existing file has the same hash, we still need to ensure its
+    # symbols and embeddings were actually persisted. A previous interrupted
+    # index run may have left orphaned code_files rows.
+    if existing and existing.content_hash == parsed.content_hash:
+        has_children = (
+            db.query(Symbol.id).filter(Symbol.file_id == existing.id).first() is not None
+            and db.query(Embedding.id).filter(Embedding.file_id == existing.id).first() is not None
+        )
+        if has_children:
+            print(f"[INDEXER] unchanged {rel_path}", flush=True)
+            return None
+        print(
+            f"[INDEXER] hash match but missing children for {rel_path}, re-indexing",
+            flush=True,
+        )
+        db.delete(existing)
+        db.flush()
+    elif existing:
+        db.delete(existing)
+        db.flush()
 
-from fastapi import APIRouter, HTTPException
-from models import Repository, SearchQuery, SearchResult
-from services import search_service, repo_service
+    language = detect_language(rel_path) or parsed.language
+    code_file = CodeFile(
+        repo_id=repo_id,
+        path=rel_path,
+        language=language or "unknown",
+        content_hash=parsed.content_hash,
+        size_bytes=parsed.size_bytes,
+        updated_at=datetime.utcnow(),
+    )
+    db.add(code_file)
+    db.flush()  # obtain code_file.id
+    print(f"[INDEXER] inserted {rel_path} symbols={len(parsed.symbols)} chunks={len(parsed.chunks)}", flush=True)
 
-router = APIRouter(prefix="/api")
-
-@router.post("/repos", response_model=Repository)
-async def create_repo(name: str, path: str):
-    """Create a new repository."""
-    return await repo_service.create_repo(name, path)
-
-@router.get("/repos", response_model=list[Repository])
-async def list_repos():
-    """List all repositories."""
-    return await repo_service.list_repos()
-
-@router.post("/search", response_model=list[SearchResult])
-async def search_code(query: SearchQuery):
-    """Search code using hybrid retrieval."""
-    return await search_service.search(query)
-'''
-        return '''"""Configuration settings for the application."""
-
-from pydantic_settings import BaseSettings
-
-class Settings(BaseSettings):
-    """Application settings."""
-    database_url: str = "sqlite:///./codepop.db"
-    api_port: int = 3000
-    debug: bool = False
-    log_level: str = "INFO"
-
-    class Config:
-        env_file = ".env"
-
-settings = Settings()
-'''
-    return f"// {filename}\nconsole.log('Hello World');"
+    return code_file, parsed
 
 
-async def run_indexing(
-    repo_id: str,
-    embedding_manager: EmbeddingManager,
-    ws_manager: ConnectionManager,
-    degradation_manager: "DegradationManager",
+def _bulk_insert_symbols_and_embeddings(
+    db: Session,
+    repo_id: UUID,
+    file_records: List[Tuple[CodeFile, ParseResult]],
 ) -> None:
-    """Index a repository by generating mock files, symbols, embeddings and graph edges."""
-    from core.data import repos
-
-    repo = repos.get(repo_id)
-    if not repo:
+    """Embed chunks and bulk insert symbols + embeddings for parsed files."""
+    logger.info(
+        "Bulk inserting %d parsed files for repo %s",
+        len(file_records),
+        repo_id,
+    )
+    if not file_records:
         return
 
-    degradation_manager.report_health("indexing", "healthy")
+    embedder = Embedder()
+
+    # Insert symbols first so we can map names to IDs later.
+    symbol_mappings: List[Dict[str, Any]] = []
+    for code_file, parsed in file_records:
+        for sym in parsed.symbols:
+            symbol_mappings.append(
+                {
+                    "file_id": code_file.id,
+                    "repo_id": repo_id,
+                    "name": sym.name,
+                    "type": sym.type,
+                    "kind": sym.kind,
+                    "line": sym.line,
+                    "column": sym.column,
+                    "end_line": sym.end_line,
+                    "end_column": sym.end_column,
+                    "is_exported": 1 if sym.is_exported else 0,
+                }
+            )
+
+    logger.info("Inserting %d symbols", len(symbol_mappings))
+    if symbol_mappings:
+        db.bulk_insert_mappings(Symbol, symbol_mappings)
+        db.flush()
+
+    # Prepare embedding records.
+    embedding_mappings: List[Dict[str, Any]] = []
+    texts_to_embed: List[str] = []
+    meta: List[Tuple[UUID, int, int, int, int]] = []  # (file_id, chunk_index, start_line, end_line, token_count)
+
+    for code_file, parsed in file_records:
+        for idx, chunk in enumerate(parsed.chunks):
+            texts_to_embed.append(chunk.content)
+            meta.append((code_file.id, idx, chunk.start_line, chunk.end_line, len(chunk.content.split())))
+
+    logger.info("Encoding %d chunks", len(texts_to_embed))
+    if not texts_to_embed:
+        return
+
+    vectors = embedder.encode(texts_to_embed)
+    for text_idx, (vector, mapping_meta) in enumerate(zip(vectors, meta)):
+        file_id, chunk_index, start_line, end_line, token_count = mapping_meta
+        embedding_mappings.append(
+            {
+                "file_id": file_id,
+                "repo_id": repo_id,
+                "chunk_index": chunk_index,
+                "start_line": start_line,
+                "end_line": end_line,
+                "content": texts_to_embed[text_idx],
+                "embedding": vector,
+                "token_count": token_count,
+            }
+        )
+
+    # Batch insert embeddings.
+    batch_size = settings.index_batch_size
+    for i in range(0, len(embedding_mappings), batch_size):
+        batch = embedding_mappings[i : i + batch_size]
+        db.bulk_insert_mappings(Embedding, batch)
+        db.flush()
+
+
+def _rebuild_call_graph(
+    db: Session,
+    repo_id: UUID,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+) -> None:
+    """Rebuild call graph edges from parsed call pairs for changed files."""
+    if not file_records:
+        return
+
+    symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
+    name_to_ids: Dict[str, List[UUID]] = {}
+    for sym in symbols:
+        name_to_ids.setdefault(sym.name, []).append(sym.id)
+
+    edges: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for code_file, parsed in file_records:
+        for caller_name, callee_name in parsed.calls:
+            caller_ids = name_to_ids.get(caller_name, [])
+            callee_ids = name_to_ids.get(callee_name, [])
+            for source_id in caller_ids:
+                for target_id in callee_ids:
+                    key = (source_id, target_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    edges.append(
+                        {
+                            "source_symbol_id": source_id,
+                            "target_symbol_id": target_id,
+                            "repo_id": repo_id,
+                            "call_type": "direct",
+                        }
+                    )
+
+    if edges:
+        # Remove existing edges to avoid duplicates on re-index.
+        db.query(CallGraphEdge).filter(CallGraphEdge.repo_id == repo_id).delete()
+        batch_size = settings.index_batch_size
+        for i in range(0, len(edges), batch_size):
+            db.bulk_insert_mappings(CallGraphEdge, edges[i : i + batch_size])
+        db.flush()
+
+
+def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
+    """Synchronous indexing routine executed in a worker thread."""
+    db = SessionLocal()
+    repo_id_str = str(repo_id)
+    file_records: List[Tuple[CodeFile, ParseResult]] = []
 
     try:
-        mock_files = [
-            {"name": "main.py", "language": "python"},
-            {"name": "utils.py", "language": "python"},
-            {"name": "api.py", "language": "python"},
-            {"name": "config.py", "language": "python"},
-        ]
-        total_files = len(mock_files)
-        repo.indexing_progress = 0
+        repo = db.query(Repository).filter(Repository.id == repo_id).first()
+        if not repo:
+            logger.error("Repository %s not found", repo_id)
+            return
 
-        for i, mock_file in enumerate(mock_files):
-            file_content = generate_mock_content(mock_file["name"], mock_file["language"])
-            content_hash = hashlib.sha256(file_content.encode()).hexdigest()
+        repo.status = RepoStatus.indexing.value
+        db.commit()
+        _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0)
 
-            file = CodeFile(
-                id=str(uuid.uuid4()),
-                repo_id=repo_id,
-                path=f"{repo.path}/{mock_file['name']}",
-                language=mock_file["language"],
-                content=file_content,
-                content_hash=content_hash,
-                size_bytes=len(file_content),
-                created_at=datetime.now(),
-                updated_at=datetime.now(),
-            )
-            files[file.id] = file
+        local_path = clone_or_pull(repo.name, repo.git_url)
+        repo.local_path = str(local_path)
+        db.commit()
 
-            await extract_symbols_and_graph(file)
-            await create_embeddings(file, embedding_manager)
+        source_files = list_source_files(local_path)
+        total = len(source_files)
+        processed = 0
+        skipped = 0
 
-            repo.indexing_progress = ((i + 1) / total_files) * 100
-            repo.file_count += 1
+        for file_path in source_files:
+            try:
+                result = _index_file(db, repo_id, local_path, file_path)
+                if result:
+                    file_records.append(result)
+                else:
+                    skipped += 1
+            except Exception as exc:
+                logger.warning("Failed to index %s: %s", file_path.relative_to(local_path), exc)
+                skipped += 1
 
-            await ws_manager.broadcast(
-                {"type": "repo_update", "repo_id": repo_id, "progress": repo.indexing_progress},
-                "repos",
-            )
-            await asyncio.sleep(0.5)
+            processed += 1
+            if processed % 10 == 0 or processed == total:
+                progress = (processed / total * 100.0) if total else 100.0
+                _notify(loop, repo_id_str, RepoStatus.indexing.value, progress)
 
-        repo.status = RepoStatus.indexed
-        repo.last_indexed_at = datetime.now()
-        repo.symbol_count = len([s for s in symbols.values() if s.repo_id == repo_id])
-        repo.embedding_count = len(
-            [e for e in embeddings.values() if e.file_id in files and files[e.file_id].repo_id == repo_id]
+        # Keep file_records and their children in a single transaction so an
+        # interrupted run cannot leave orphaned code_files rows.
+        print(f"[INDEXER] file_records={len(file_records)} for repo {repo_id}", flush=True)
+        _bulk_insert_symbols_and_embeddings(db, repo_id, file_records)
+        _rebuild_call_graph(db, repo_id, file_records)
+        db.commit()
+
+        repo.status = RepoStatus.indexed.value
+        repo.last_indexed_at = datetime.utcnow()
+        db.commit()
+
+        _notify(loop, repo_id_str, RepoStatus.indexed.value, 100.0)
+        logger.info(
+            "Indexed repository %s: %d files processed, %d inserted/updated, %d skipped",
+            repo_id,
+            total,
+            len(file_records),
+            skipped,
         )
-
-        await ws_manager.broadcast({"type": "repo_indexed", "repo_id": repo_id}, "repos")
 
     except Exception as exc:
-        repo.status = RepoStatus.error
-        degradation_manager.report_health("indexing", "degraded", str(exc))
-        await ws_manager.broadcast(
-            {"type": "repo_error", "repo_id": repo_id, "error": str(exc)},
-            "repos",
-        )
+        logger.exception("Failed to index repository %s: %s", repo_id, exc)
+        try:
+            repo = db.query(Repository).filter(Repository.id == repo_id).first()
+            if repo:
+                repo.status = RepoStatus.error.value
+                db.commit()
+            _notify(loop, repo_id_str, RepoStatus.error.value, 0.0, str(exc))
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
-async def extract_symbols_and_graph(file: CodeFile) -> None:
-    """Extract demo symbols and a single call graph edge from a file."""
-    symbols_to_create = [
-        {"name": "create_app", "type": "function", "line": 12},
-        {"name": "main", "type": "function", "line": 28},
-        {"name": "app", "type": "variable", "line": 10},
-    ]
-    created_symbols = []
-
-    for sym_data in symbols_to_create:
-        symbol = Symbol(
-            id=str(uuid.uuid4()),
-            file_id=file.id,
-            repo_id=file.repo_id,
-            name=sym_data["name"],
-            type=SymbolType[sym_data["type"]],
-            kind=sym_data["type"],
-            line=sym_data["line"],
-            column=0,
-            end_line=sym_data["line"] + 5,
-            end_column=0,
-            is_exported=True,
-        )
-        symbols[symbol.id] = symbol
-        created_symbols.append(symbol)
-
-    if len(created_symbols) >= 2:
-        edge = CallGraphEdge(
-            id=str(uuid.uuid4()),
-            source_symbol_id=created_symbols[0].id,
-            target_symbol_id=created_symbols[1].id,
-            source_file_id=file.id,
-            target_file_id=file.id,
-            repo_id=file.repo_id,
-            call_type="direct",
-        )
-        call_graph[edge.id] = edge
+async def index_repo(repo_id: UUID) -> None:
+    """Public async entry point to index a repository in the background."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        _index_executor,
+        _sync_index_repo,
+        repo_id,
+        loop,
+    )
 
 
-async def create_embeddings(file: CodeFile, embedding_manager: EmbeddingManager) -> None:
-    """Chunk a file and generate embeddings for each chunk."""
-    lines = file.content.split("\n")
-    chunk_size = 50
-    chunks = [lines[i : i + chunk_size] for i in range(0, len(lines), chunk_size)]
-
-    for i, chunk_lines in enumerate(chunks):
-        chunk_content = "\n".join(chunk_lines)
-        embedding = embedding_manager.generate_embedding(chunk_content)
-
-        emb = Embedding(
-            id=str(uuid.uuid4()),
-            file_id=file.id,
-            chunk_index=i,
-            content=chunk_content,
-            embedding=embedding,
-            token_count=len(chunk_content) // 4,
-            created_at=datetime.now(),
-        )
-        embeddings[emb.id] = emb
+def shutdown_indexer() -> None:
+    """Gracefully shut down the background indexing executor."""
+    _index_executor.shutdown(wait=True)

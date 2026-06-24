@@ -64,7 +64,7 @@ export const useStore = create<AppStore>()(
 
       // Settings State
       settings: {
-        apiEndpoint: 'http://localhost:8080/api/v1',
+        apiEndpoint: 'http://localhost:8080/api',
         embeddingProvider: 'openai',
         theme: 'dark',
       },

@@ -1,0 +1,98 @@
+"""Pydantic request / response schemas."""
+
+from datetime import datetime
+from typing import List, Optional
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+class RepoCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    git_url: str = Field(..., min_length=1)
+
+
+class RepoResponse(BaseModel):
+    id: UUID
+    name: str
+    git_url: str
+    local_path: str
+    status: str
+    last_indexed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+    total_files: int = 0
+    indexed_files: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class SearchQuery(BaseModel):
+    query: str = Field(..., min_length=1)
+    repo_id: Optional[UUID] = None
+    limit: int = Field(default=20, ge=1, le=100)
+    mode: str = "hybrid"
+
+
+class SearchResultItem(BaseModel):
+    id: UUID
+    file_id: UUID
+    repo_id: UUID
+    repo_name: str
+    file_path: str
+    language: str
+    content: str
+    line: int
+    score: float
+    score_breakdown: dict
+
+
+class SymbolSearchQuery(BaseModel):
+    query: str = Field(..., min_length=1)
+    repo_id: Optional[UUID] = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class SymbolResponse(BaseModel):
+    id: UUID
+    file_id: UUID
+    repo_id: UUID
+    name: str
+    type: str
+    kind: str
+    line: int
+    column: int
+    end_line: int
+    is_exported: bool
+    file_path: str
+
+    class Config:
+        from_attributes = True
+
+
+class SearchHistoryResponse(BaseModel):
+    id: UUID
+    query: str
+    repo_id: Optional[UUID]
+    mode: str
+    results_count: int
+    latency_ms: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class WebhookPayload(BaseModel):
+    ref: Optional[str] = None
+    repository: Optional[dict] = None
+    commits: Optional[List[dict]] = None
+
+
+class WSMessage(BaseModel):
+    type: str
+    repo_id: Optional[str] = None
+    progress: Optional[float] = None
+    status: Optional[str] = None
+    error: Optional[str] = None

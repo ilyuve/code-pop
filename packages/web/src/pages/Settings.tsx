@@ -33,7 +33,7 @@ export const Settings = () => {
   };
 
   const handleReset = () => {
-    setApiEndpoint('http://localhost:8080/api/v1');
+    setApiEndpoint('http://localhost:8080/api');
     setEmbeddingProvider('openai');
     setTheme('dark');
     setHasChanges(true);
@@ -64,7 +64,7 @@ export const Settings = () => {
             type="text"
             value={apiEndpoint}
             onChange={(e) => setApiEndpoint(e.target.value)}
-            placeholder="http://localhost:8080/api/v1"
+            placeholder="http://localhost:8080/api"
             className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">

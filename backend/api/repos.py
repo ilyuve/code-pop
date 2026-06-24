@@ -1,143 +1,142 @@
-"""Repository management routes."""
+"""Repository management endpoints."""
 
-import asyncio
-import time
-import uuid
-from datetime import datetime
-from typing import Optional
+import logging
+from typing import Any, Dict, List
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 
-from core.data import call_graph, embeddings, files, repos, symbols
-from models import Repository
-from services.indexer import run_indexing
-from state import degradation_manager, embedding_manager, ws_manager
+from config import settings
+from database import get_db
+from models import CodeFile, RepoStatus, Repository, Symbol
+from schemas import RepoCreate, RepoResponse
+from services.indexer import index_repo
+from services.repo_sync import is_valid_git_url
 
-router = APIRouter(prefix="/api/repos")
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/repos", tags=["repos"])
 
 
-@router.post("", response_model=Repository)
-async def create_repo(name: str, path: str, git_url: Optional[str] = None):
-    """Create a new code repository and start indexing."""
-    start_time = time.time()
+def _repo_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
-    if any(r.path == path for r in repos.values()):
-        raise HTTPException(status_code=409, detail="仓库已存在")
 
-    repo_id = str(uuid.uuid4())
-    now = datetime.now()
+def _attach_counts(db: Session, repo: Repository) -> Repository:
+    """Attach transient count attributes for Pydantic serialization."""
+    repo.total_files = db.query(CodeFile).filter(CodeFile.repo_id == repo.id).count()
+    repo.indexed_files = repo.total_files
+    return repo
 
+
+def _get_repo(db: Session, repo_id: UUID) -> Repository:
+    repo = db.query(Repository).filter(Repository.id == repo_id).first()
+    if not repo:
+        raise _repo_not_found()
+    return repo
+
+
+@router.post("", response_model=RepoResponse, status_code=status.HTTP_201_CREATED)
+def create_repo(
+    payload: RepoCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> Repository:
+    if not is_valid_git_url(payload.git_url):
+        raise HTTPException(status_code=400, detail="Invalid git URL")
+
+    existing = db.query(Repository).filter(Repository.git_url == payload.git_url).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Repository already exists")
+
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in payload.name).lower()
     repo = Repository(
-        id=repo_id,
-        name=name,
-        path=path,
-        git_url=git_url,
-        created_at=now,
-        updated_at=now,
+        name=payload.name,
+        git_url=payload.git_url,
+        local_path=str(settings.repos_dir / safe_name),
+        status=RepoStatus.pending.value,
     )
-    repos[repo_id] = repo
+    db.add(repo)
+    db.commit()
+    db.refresh(repo)
 
-    asyncio.create_task(
-        run_indexing(repo_id, embedding_manager, ws_manager, degradation_manager)
-    )
-
-    degradation_manager.record_latency((time.time() - start_time) * 1000)
-    return repo
-
-
-@router.get("", response_model=list[Repository])
-async def list_repos():
-    """List all registered repositories."""
-    return list(repos.values())
+    # Trigger initial indexing in background.
+    background_tasks.add_task(index_repo, repo.id)
+    logger.info("Created repository %s and scheduled indexing", repo.id)
+    return _attach_counts(db, repo)
 
 
-@router.get("/{repo_id}", response_model=Repository)
-async def get_repo(repo_id: str):
-    """Get a single repository by ID."""
-    repo = repos.get(repo_id)
-    if not repo:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-    return repo
+@router.get("", response_model=List[RepoResponse])
+def list_repos(db: Session = Depends(get_db)) -> List[Repository]:
+    repos = db.query(Repository).order_by(Repository.created_at.desc()).all()
+    return [_attach_counts(db, r) for r in repos]
 
 
-@router.patch("/{repo_id}", response_model=Repository)
-async def update_repo(repo_id: str, name: Optional[str] = None):
-    """Update repository metadata."""
-    repo = repos.get(repo_id)
-    if not repo:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-
-    if name:
-        repo.name = name
-    repo.updated_at = datetime.now()
-    return repo
+@router.get("/{repo_id}", response_model=RepoResponse)
+def get_repo(repo_id: UUID, db: Session = Depends(get_db)) -> Repository:
+    repo = _get_repo(db, repo_id)
+    return _attach_counts(db, repo)
 
 
-@router.delete("/{repo_id}")
-async def delete_repo(repo_id: str):
-    """Delete a repository and all associated data."""
-    if repo_id not in repos:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-
-    files_to_delete = [fid for fid, f in files.items() if f.repo_id == repo_id]
-    for fid in files_to_delete:
-        del files[fid]
-
-    symbols_to_delete = [sid for sid, s in symbols.items() if s.file_id in files_to_delete]
-    for sid in symbols_to_delete:
-        del symbols[sid]
-
-    embeddings_to_delete = [eid for eid, e in embeddings.items() if e.file_id in files_to_delete]
-    for eid in embeddings_to_delete:
-        del embeddings[eid]
-
-    edges_to_delete = [eid for eid, e in call_graph.items() if e.repo_id == repo_id]
-    for eid in edges_to_delete:
-        del call_graph[eid]
-
-    del repos[repo_id]
-    return {"status": "success"}
+@router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_repo(repo_id: UUID, db: Session = Depends(get_db)) -> None:
+    repo = _get_repo(db, repo_id)
+    db.delete(repo)
+    db.commit()
+    logger.info("Deleted repository %s", repo_id)
 
 
-@router.post("/{repo_id}/index")
-async def trigger_index(repo_id: str):
-    """Manually re-trigger indexing for a repository."""
-    from models import RepoStatus
-
-    repo = repos.get(repo_id)
-    if not repo:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-
-    repo.status = RepoStatus.indexing
-    repo.indexing_progress = 0
-    repo.updated_at = datetime.now()
-
-    asyncio.create_task(
-        run_indexing(repo_id, embedding_manager, ws_manager, degradation_manager)
-    )
-    return {"status": "indexing", "repo_id": repo_id}
+@router.post("/{repo_id}/index", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_index(
+    repo_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> dict:
+    repo = _get_repo(db, repo_id)
+    background_tasks.add_task(index_repo, repo.id)
+    return {"status": "indexing", "repo_id": str(repo_id)}
 
 
 @router.get("/{repo_id}/files")
-async def get_repo_files(repo_id: str):
-    """List files belonging to a repository."""
-    if repo_id not in repos:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-    return [f for f in files.values() if f.repo_id == repo_id]
+def list_repo_files(repo_id: UUID, db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    repo = _get_repo(db, repo_id)
+    files = db.query(CodeFile).filter(CodeFile.repo_id == repo.id).order_by(CodeFile.path).all()
+    return [
+        {
+            "id": str(f.id),
+            "path": f.path,
+            "language": f.language,
+            "size_bytes": f.size_bytes,
+            "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+        }
+        for f in files
+    ]
 
 
 @router.get("/{repo_id}/symbols")
-async def get_repo_symbols(repo_id: str):
-    """List symbols belonging to a repository."""
-    if repo_id not in repos:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-    repo_files = {fid for fid, f in files.items() if f.repo_id == repo_id}
-    return [s for s in symbols.values() if s.file_id in repo_files]
-
-
-@router.get("/{repo_id}/call-graph")
-async def get_repo_call_graph(repo_id: str):
-    """Get the call graph edges for a repository."""
-    if repo_id not in repos:
-        raise HTTPException(status_code=404, detail="仓库不存在")
-    return {"edges": [e for e in call_graph.values() if e.repo_id == repo_id]}
+def list_repo_symbols(
+    repo_id: UUID,
+    file_path: str | None = None,
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    repo = _get_repo(db, repo_id)
+    q = db.query(Symbol).filter(Symbol.repo_id == repo.id)
+    if file_path:
+        file = db.query(CodeFile).filter(CodeFile.repo_id == repo.id, CodeFile.path == file_path).first()
+        if file:
+            q = q.filter(Symbol.file_id == file.id)
+    symbols = q.order_by(Symbol.line).all()
+    return [
+        {
+            "id": str(s.id),
+            "file_id": str(s.file_id),
+            "name": s.name,
+            "type": s.type,
+            "kind": s.kind,
+            "line": s.line,
+            "column": s.column,
+            "end_line": s.end_line,
+            "is_exported": bool(s.is_exported),
+        }
+        for s in symbols
+    ]

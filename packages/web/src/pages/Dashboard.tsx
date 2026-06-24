@@ -336,7 +336,7 @@ export const Dashboard = () => {
               {recentSearches.map((search, index) => (
                 <Link
                   key={index}
-                  to={`/search?q=${encodeURIComponent(search.query)}`}
+                  to={`/search?q=${encodeURIComponent(search)}`}
                   className="flex items-center gap-3 p-3 rounded-xl hover:bg-[#F5F5F0] transition-colors"
                 >
                   <div
@@ -346,10 +346,7 @@ export const Dashboard = () => {
                     <Search className="w-5 h-5" style={{ color: '#fff34d' }} />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="font-medium truncate">{search.query}</p>
-                    <p className="text-sm text-[#666]">
-                      {search.results} 个结果 · {search.timestamp}
-                    </p>
+                    <p className="font-medium truncate">{search}</p>
                   </div>
                 </Link>
               ))}
