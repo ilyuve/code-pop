@@ -2,10 +2,12 @@
 
 import json
 import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List
 from uuid import UUID
 
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent, Tool
@@ -24,7 +26,8 @@ mcp_server = Server("codepop")
 sse_transport = SseServerTransport("/mcp/messages/")
 
 
-def _db():
+@contextmanager
+def _db_session():
     db = SessionLocal()
     try:
         yield db
@@ -94,19 +97,15 @@ def _tool_codepop_search(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     repo_id = arguments.get("repo_id")
     limit = int(arguments.get("limit", 10))
 
-    db = next(_db())
-    try:
+    with _db_session() as db:
         repo_uuid = UUID(repo_id) if repo_id else None
         searcher = Searcher(db)
         results: List[SearchResultItem] = searcher.hybrid_search(query, repo_uuid, limit)
         return [r.model_dump() for r in results]
-    finally:
-        db.close()
 
 
 def _tool_codepop_repos() -> List[Dict[str, Any]]:
-    db = next(_db())
-    try:
+    with _db_session() as db:
         repos = db.query(Repository).order_by(Repository.created_at.desc()).all()
         return [
             {
@@ -118,16 +117,13 @@ def _tool_codepop_repos() -> List[Dict[str, Any]]:
             }
             for r in repos
         ]
-    finally:
-        db.close()
 
 
 def _tool_codepop_symbols(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     repo_id = UUID(arguments["repo_id"])
     file_path = arguments["file_path"]
 
-    db = next(_db())
-    try:
+    with _db_session() as db:
         code_file = (
             db.query(CodeFile)
             .filter(CodeFile.repo_id == repo_id, CodeFile.path == file_path)
@@ -154,17 +150,19 @@ def _tool_codepop_symbols(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
             for s in symbols
         ]
-    finally:
-        db.close()
 
 
-async def mcp_sse_endpoint(request: Request) -> None:
-    """FastAPI endpoint that bridges the MCP server over SSE."""
-    async with sse_transport.connect_session(
-        request.scope, request.receive, request._send
-    ) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options(),
-        )
+async def mcp_sse_endpoint(request: Request) -> StreamingResponse:
+    """FastAPI-compatible SSE endpoint without private attributes."""
+    async def event_generator():
+        send = request.scope.get("asgi", {}).get("send") or request._send
+        async with sse_transport.connect_session(
+            request.scope, request.receive, send
+        ) as (read_stream, write_stream):
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options(),
+            )
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

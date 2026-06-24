@@ -205,15 +205,47 @@ def _rebuild_call_graph(
     repo_id: UUID,
     file_records: List[Tuple[CodeFile, ParseResult]],
 ) -> None:
-    """Rebuild call graph edges from parsed call pairs for changed files."""
+    """Rebuild call graph edges ONLY for changed files."""
     if not file_records:
         return
 
-    symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
+    # 1. Collect changed file IDs and symbol names appearing in changed calls.
+    changed_file_ids = {code_file.id for code_file, _ in file_records}
+    changed_symbol_names: set = set()
+    for _, parsed in file_records:
+        for caller, callee in parsed.calls:
+            changed_symbol_names.add(caller)
+            changed_symbol_names.add(callee)
+
+    # 2. Find symbol IDs that belong to changed files OR appear in changed calls.
+    symbols_to_update = (
+        db.query(Symbol)
+        .filter(Symbol.repo_id == repo_id)
+        .filter(
+            (Symbol.file_id.in_(changed_file_ids))
+            | (Symbol.name.in_(list(changed_symbol_names)))
+        )
+        .all()
+    )
+    symbol_ids_to_update = {s.id for s in symbols_to_update}
+
+    if not symbol_ids_to_update:
+        return
+
+    # 3. Delete ONLY edges where source or target is in the affected set.
+    db.query(CallGraphEdge).filter(
+        CallGraphEdge.repo_id == repo_id,
+        (CallGraphEdge.source_symbol_id.in_(symbol_ids_to_update))
+        | (CallGraphEdge.target_symbol_id.in_(symbol_ids_to_update)),
+    ).delete(synchronize_session=False)
+
+    # 4. Build name -> id map for ALL symbols in repo (needed for cross-file calls).
+    all_symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
     name_to_ids: Dict[str, List[UUID]] = {}
-    for sym in symbols:
+    for sym in all_symbols:
         name_to_ids.setdefault(sym.name, []).append(sym.id)
 
+    # 5. Insert new edges from changed files only.
     edges: List[Dict[str, Any]] = []
     seen: set = set()
 
@@ -237,8 +269,6 @@ def _rebuild_call_graph(
                     )
 
     if edges:
-        # Remove existing edges to avoid duplicates on re-index.
-        db.query(CallGraphEdge).filter(CallGraphEdge.repo_id == repo_id).delete()
         batch_size = settings.index_batch_size
         for i in range(0, len(edges), batch_size):
             db.bulk_insert_mappings(CallGraphEdge, edges[i : i + batch_size])

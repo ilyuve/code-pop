@@ -18,12 +18,13 @@ def init_db() -> None:
     logger.info("Creating tables...")
     Base.metadata.create_all(bind=engine)
 
-    logger.info("Creating IVFFlat vector index...")
+    logger.info("Creating HNSW vector index...")
     with engine.connect() as conn:
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS idx_embeddings_vector "
-                "ON embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
+                "ON embeddings USING hnsw (embedding vector_cosine_ops) "
+                "WITH (m = 16, ef_construction = 64)"
             )
         )
         conn.execute(
@@ -36,6 +37,16 @@ def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS idx_code_files_path "
                 "ON code_files (repo_id, path)"
+            )
+        )
+        conn.commit()
+
+    logger.info("Creating GIN index for full-text search...")
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_embeddings_content_fts "
+                "ON embeddings USING GIN (to_tsvector('english', content))"
             )
         )
         conn.commit()

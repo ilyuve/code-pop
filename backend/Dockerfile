@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # Copy application code.
 COPY . .
 
+# Pre-download embedding model to avoid runtime downloads on container restart.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
 # Ensure repository storage directory exists.
 RUN mkdir -p /app/repos
 

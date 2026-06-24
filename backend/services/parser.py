@@ -6,56 +6,64 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from tree_sitter import Language as TSLanguage, Parser, Tree
-from tree_sitter_python import language as python_language
+from tree_sitter import Language, Parser
+
 
 logger = logging.getLogger(__name__)
 
 
-def _load_language(language: str) -> Optional[TSLanguage]:
-    """Lazy load tree-sitter language binding."""
-    if language == "python":
-        return TSLanguage(python_language())
-    if language == "typescript":
-        try:
-            from tree_sitter_typescript import language_typescript, language_tsx
-            return TSLanguage(language_typescript())
-        except Exception:
+def _load_language(language: str) -> Optional[Language]:
+    """Lazy load tree-sitter language binding.
+
+    tree-sitter 0.24+ language bindings return Language objects directly,
+    while older bindings return function pointers that need wrapping.
+    """
+    binding = None
+    try:
+        if language == "python":
+            from tree_sitter_python import language as python_language
+            binding = python_language
+        elif language == "typescript":
             try:
-                from tree_sitter_typescript import language as ts_language
-                return TSLanguage(ts_language())
+                from tree_sitter_typescript import language_typescript
+                binding = language_typescript
             except Exception:
-                return None
-    if language == "javascript":
-        try:
+                from tree_sitter_typescript import language as ts_language
+                binding = ts_language
+        elif language == "javascript":
             from tree_sitter_javascript import language as js_language
-            return TSLanguage(js_language())
-        except Exception:
-            return None
-    if language == "go":
-        try:
+            binding = js_language
+        elif language == "go":
             from tree_sitter_go import language as go_language
-            return TSLanguage(go_language())
-        except Exception:
-            return None
-    if language == "java":
-        try:
+            binding = go_language
+        elif language == "java":
             from tree_sitter_java import language as java_language
-            return TSLanguage(java_language())
-        except Exception:
-            return None
-    if language == "rust":
-        try:
+            binding = java_language
+        elif language == "rust":
             from tree_sitter_rust import language as rust_language
-            return TSLanguage(rust_language())
-        except Exception:
-            return None
-    if language == "cpp":
-        try:
+            binding = rust_language
+        elif language == "cpp":
             from tree_sitter_cpp import language as cpp_language
-            return TSLanguage(cpp_language())
-        except Exception:
-            return None
+            binding = cpp_language
+    except Exception as exc:
+        logger.warning("Language binding unavailable for %s: %s", language, exc)
+        return None
+
+    if binding is None:
+        return None
+
+    # tree-sitter 0.24 bindings: language is already a Language object
+    if isinstance(binding, Language):
+        return binding
+
+    # Older bindings: language is a callable returning the language pointer
+    try:
+        if callable(binding):
+            return Language(binding())
+    except Exception as exc:
+        logger.warning("Failed to wrap language binding for %s: %s", language, exc)
+        return None
+
     return None
 
 

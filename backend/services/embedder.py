@@ -30,7 +30,7 @@ class Embedder:
         return self._model
 
     def encode(self, texts: List[str]) -> List[List[float]]:
-        """Encode a list of texts into normalized 768-d vectors."""
+        """Encode a list of texts into normalized 384-d vectors."""
         if not texts:
             return []
         embeddings = self.model.encode(
