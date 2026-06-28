@@ -25,7 +25,7 @@ docker logs -f codepop-backend
 
 # 4. 访问
 #   前端: http://localhost:3000
-#   API:  http://localhost:8080/api/health
+#   API:  http://localhost:8080/health
 ```
 
 环境变量可在项目根目录创建 `.env` 覆盖：
@@ -40,7 +40,7 @@ EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/health` | 健康检查 |
+| GET | `/health` | 健康检查 |
 | POST | `/api/repos` | 创建仓库 |
 | POST | `/api/repos/:id/index` | 触发索引 |
 | POST | `/api/search` | 混合搜索 |
