@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm } from '../types';
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats } from '../types';
 
 const DEFAULT_API_ENDPOINT = 'http://localhost:8080/api';
 
@@ -51,6 +51,7 @@ const mapSearchResult = (data: any): SearchResult => ({
   lineNumber: data.line,
   code: data.content,
   score: data.score,
+  scoreBreakdown: data.score_breakdown || {},
 });
 
 // Repository APIs
@@ -110,6 +111,65 @@ export const searchSymbol = async (query: string, repoId?: string): Promise<any[
 export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => {
   const response = await apiClient.get(`/search/history?limit=${limit}`);
   return response.data;
+};
+
+export const fetchSearchHistoryStats = async (): Promise<SearchHistoryStats> => {
+  const response = await apiClient.get('/search/history/stats');
+  return response.data;
+};
+
+// Benchmark APIs
+export const runBenchmark = async (payload: {
+  query: string;
+  repo_id?: string;
+  mode: 'with_codepop' | 'without_codepop';
+  expected_files?: string[];
+  expected_lines?: number[];
+}): Promise<BenchmarkRun> => {
+  const response = await apiClient.post('/search/benchmark', payload);
+  return {
+    id: response.data.id,
+    query: response.data.query,
+    repoId: response.data.repo_id,
+    mode: response.data.mode,
+    latencyMs: response.data.latency_ms,
+    resultsCount: response.data.results_count,
+    relevantResultsCount: response.data.relevant_results_count,
+    tokenConsumed: response.data.token_consumed,
+    accuracyScore: response.data.accuracy_score,
+    createdAt: response.data.created_at,
+  };
+};
+
+export const fetchBenchmarks = async (params?: { repoId?: string; mode?: string }): Promise<BenchmarkRun[]> => {
+  const query = new URLSearchParams();
+  if (params?.repoId) query.append('repo_id', params.repoId);
+  if (params?.mode) query.append('mode', params.mode);
+  const response = await apiClient.get(`/search/benchmark?${query.toString()}`);
+  return response.data.map((r: any) => ({
+    id: r.id,
+    query: r.query,
+    repoId: r.repo_id,
+    mode: r.mode,
+    latencyMs: r.latency_ms,
+    resultsCount: r.results_count,
+    relevantResultsCount: r.relevant_results_count,
+    tokenConsumed: r.token_consumed,
+    accuracyScore: r.accuracy_score,
+    createdAt: r.created_at,
+  }));
+};
+
+export const fetchBenchmarkSummary = async (): Promise<BenchmarkSummary> => {
+  const response = await apiClient.get('/search/benchmark/summary');
+  return {
+    totalRuns: response.data.total_runs,
+    avgLatencyMs: response.data.avg_latency_ms,
+    avgTokenConsumed: response.data.avg_token_consumed,
+    avgAccuracyScore: response.data.avg_accuracy_score,
+    latencyTrend: response.data.latency_trend,
+    savingsVsBaseline: response.data.savings_vs_baseline,
+  };
 };
 
 // Health APIs

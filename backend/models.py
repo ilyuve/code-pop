@@ -126,6 +126,30 @@ class SearchHistory(Base):
     mode = Column(String(32), default="hybrid", nullable=False)
     results_count = Column(Integer, default=0, nullable=False)
     latency_ms = Column(Integer, default=0, nullable=False)
+    input_tokens = Column(Integer, default=0, nullable=False)
+    output_tokens = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     repo = relationship("Repository", back_populates="history")
+
+
+class BenchmarkMode(str, PyEnum):
+    with_codepop = "with_codepop"
+    without_codepop = "without_codepop"
+
+
+class BenchmarkRun(Base):
+    __tablename__ = "benchmark_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    query = Column(Text, nullable=False)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True)
+    mode = Column(String(32), default=BenchmarkMode.with_codepop.value, nullable=False)
+    latency_ms = Column(Integer, default=0, nullable=False)
+    results_count = Column(Integer, default=0, nullable=False)
+    relevant_results_count = Column(Integer, default=0, nullable=False)
+    token_consumed = Column(Integer, default=0, nullable=False)
+    accuracy_score = Column(Integer, default=0, nullable=False)  # 0-100 scaled integer
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    repo = relationship("Repository")

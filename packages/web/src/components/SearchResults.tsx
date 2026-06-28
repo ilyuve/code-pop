@@ -1,6 +1,6 @@
-import type { SearchResult } from '../types';
+import type { SearchResult, ScoreBreakdown } from '../types';
 import { CodePreview } from './CodePreview';
-import { FileText, Copy, CheckCircle } from 'lucide-react';
+import { FileText, Copy, CheckCircle, ChevronDown, BarChart3 } from 'lucide-react';
 import { useState } from 'react';
 import { clsx } from 'clsx';
 
@@ -9,14 +9,67 @@ interface SearchResultsProps {
   isLoading?: boolean;
 }
 
+const SCORE_LABELS: Record<string, string> = {
+  vector: '向量',
+  symbol: '符号',
+  bm25: 'BM25',
+  graph: '调用图',
+  final: '综合',
+};
+
+const SCORE_COLORS: Record<string, string> = {
+  vector: '#ff3d8a',
+  symbol: '#2ad4ff',
+  bm25: '#fff34d',
+  graph: '#b88dff',
+  final: '#6effb0',
+};
+
 export const SearchResults = ({ results, isLoading }: SearchResultsProps) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const handleCopy = async (result: SearchResult) => {
     const code = result.code;
     await navigator.clipboard.writeText(code);
     setCopiedId(`${result.repoId}-${result.filePath}-${result.lineNumber}`);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const toggleExpand = (resultId: string) => {
+    setExpandedId((prev) => (prev === resultId ? null : resultId));
+  };
+
+  const renderScoreBreakdown = (breakdown: ScoreBreakdown) => {
+    const entries = Object.entries(breakdown)
+      .filter(([, value]) => typeof value === 'number')
+      .sort(([, a], [, b]) => (b as number) - (a as number));
+
+    if (entries.length === 0) return null;
+
+    return (
+      <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/50 space-y-2">
+        {entries.map(([key, value]) => {
+          const percentage = Math.min(Math.max((value as number) * 100, 0), 100);
+          const label = SCORE_LABELS[key] || key;
+          const color = SCORE_COLORS[key] || '#94a3b8';
+          return (
+            <div key={key} className="flex items-center gap-3 text-sm">
+              <span className="w-14 text-slate-500 dark:text-slate-400 shrink-0">{label}</span>
+              <div className="flex-1 h-2 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{ width: `${percentage}%`, backgroundColor: color }}
+                />
+              </div>
+              <span className="w-14 text-right font-medium text-slate-700 dark:text-slate-300">
+                {(value as number).toFixed(2)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   if (isLoading) {
@@ -54,6 +107,7 @@ export const SearchResults = ({ results, isLoading }: SearchResultsProps) => {
       {results.map((result, index) => {
         const resultId = `${result.repoId}-${result.filePath}-${result.lineNumber}`;
         const isCopied = copiedId === resultId;
+        const isExpanded = expandedId === resultId;
 
         return (
           <div
@@ -69,6 +123,21 @@ export const SearchResults = ({ results, isLoading }: SearchResultsProps) => {
                 <span className="text-slate-400">行 {result.lineNumber}</span>
               </div>
               <div className="flex items-center gap-3">
+                <button
+                  onClick={() => toggleExpand(resultId)}
+                  className={clsx(
+                    'flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors',
+                    isExpanded
+                      ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400'
+                      : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                  )}
+                >
+                  <BarChart3 className="w-3 h-3" />
+                  <span>{result.score.toFixed(2)}</span>
+                  <ChevronDown
+                    className={clsx('w-3 h-3 transition-transform', isExpanded && 'rotate-180')}
+                  />
+                </button>
                 <span className="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded">
                   {result.repoName}
                 </span>
@@ -90,6 +159,7 @@ export const SearchResults = ({ results, isLoading }: SearchResultsProps) => {
               </div>
             </div>
             <CodePreview code={result.code} language="typescript" />
+            {isExpanded && renderScoreBreakdown(result.scoreBreakdown)}
           </div>
         );
       })}

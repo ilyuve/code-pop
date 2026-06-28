@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codepop": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sse@latest",
+        "http://localhost:8080/mcp/sse"
+      ]
+    }
+  }
+}

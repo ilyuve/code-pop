@@ -44,3 +44,10 @@ class Embedder:
     def encode_query(self, text: str) -> List[float]:
         """Encode a single query string."""
         return self.encode([text])[0]
+
+    def count_tokens(self, text: str) -> int:
+        """Count tokenizer tokens for a text (fallback to word estimate if no tokenizer)."""
+        try:
+            return len(self.model.tokenizer.encode(text, add_special_tokens=True))
+        except Exception:
+            return max(1, len(text.split()))

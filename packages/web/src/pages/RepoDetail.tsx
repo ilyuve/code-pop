@@ -1,4 +1,5 @@
 import { useParams, useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
   FolderGit2,
@@ -7,12 +8,18 @@ import {
   Clock,
   FileText,
   AlertCircle,
+  ChevronRight,
+  ChevronDown,
+  Folder,
+  Code,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
+import { fetchRepoFiles, fetchRepoSymbols } from '../api';
 import { clsx } from 'clsx';
+import { useState } from 'react';
 
 export const RepoDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -20,6 +27,20 @@ export const RepoDetail = () => {
   const { deleteRepo, reindex, isDeleting, isReindexing } = useRepos();
   const { data: repo, isLoading, error } = useRepo(id!);
   const { isIndexing, progress } = useIndexing(id!);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+
+  const { data: files = [] } = useQuery({
+    queryKey: ['repoFiles', id],
+    queryFn: () => fetchRepoFiles(id!),
+    enabled: !!id && repo?.status === 'indexed',
+  });
+
+  const { data: symbols = [] } = useQuery({
+    queryKey: ['repoSymbols', id, selectedFile],
+    queryFn: () => fetchRepoSymbols(id!, selectedFile || undefined),
+    enabled: !!id && !!selectedFile,
+  });
 
   const handleDelete = () => {
     if (window.confirm('确定要删除这个仓库吗？')) {
@@ -31,6 +52,76 @@ export const RepoDetail = () => {
   const handleReindex = () => {
     reindex(id!);
   };
+
+  const toggleDir = (dir: string) => {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(dir)) next.delete(dir);
+      else next.add(dir);
+      return next;
+    });
+  };
+
+  const buildTree = (paths: string[]) => {
+    const root: Record<string, any> = {};
+    paths.forEach((path) => {
+      const parts = path.split('/');
+      let node = root;
+      parts.forEach((part, idx) => {
+        if (!node[part]) {
+          node[part] = { children: {}, isFile: idx === parts.length - 1, fullPath: parts.slice(0, idx + 1).join('/') };
+        }
+        node = node[part].children;
+      });
+    });
+    return root;
+  };
+
+  const renderTree = (node: Record<string, any>, depth = 0) => {
+    return Object.entries(node).map(([name, info]) => {
+      const isFile = info.isFile;
+      const fullPath = info.fullPath;
+      const paddingLeft = depth * 16 + 8;
+      if (isFile) {
+        return (
+          <button
+            key={fullPath}
+            onClick={() => setSelectedFile(fullPath)}
+            className={clsx(
+              'w-full flex items-center gap-2 px-2 py-1.5 text-left text-sm rounded-lg transition-colors',
+              selectedFile === fullPath
+                ? 'bg-[#ff3d8a20] text-[#ff3d8a] font-semibold'
+                : 'text-[#666] hover:bg-[#F5F5F0]'
+            )}
+            style={{ paddingLeft }}
+          >
+            <FileText className="w-4 h-4 shrink-0" />
+            <span className="truncate">{name}</span>
+          </button>
+        );
+      }
+      const isExpanded = expandedDirs.has(fullPath);
+      return (
+        <div key={fullPath}>
+          <button
+            onClick={() => toggleDir(fullPath)}
+            className="w-full flex items-center gap-2 px-2 py-1.5 text-left text-sm font-medium text-[#2D2D2D] hover:bg-[#F5F5F0] rounded-lg"
+            style={{ paddingLeft }}
+          >
+            {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            <Folder className="w-4 h-4 shrink-0" style={{ color: '#fff34d' }} />
+            <span className="truncate">{name}</span>
+          </button>
+          {isExpanded && (
+            <div>{renderTree(info.children, depth + 1)}</div>
+          )}
+        </div>
+      );
+    });
+  };
+
+  const filePaths = files.map((f: any) => f.path || f);
+  const tree = buildTree(filePaths);
 
   if (isLoading) {
     return <PageLoader />;
@@ -185,6 +276,64 @@ export const RepoDetail = () => {
           删除仓库
         </button>
       </div>
+
+      {/* File Tree & Symbols */}
+      {repo.status === 'indexed' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <section
+            className="lg:col-span-1 bg-white rounded-2xl p-4"
+            style={{ border: '2px solid #2D2D2D', boxShadow: '6px 6px 0 #2D2D2D' }}
+          >
+            <h3 className="text-lg font-black mb-3 flex items-center gap-2">
+              <Folder className="w-5 h-5" style={{ color: '#fff34d' }} />
+              文件树
+            </h3>
+            <div className="max-h-[500px] overflow-y-auto space-y-1">
+              {filePaths.length === 0 ? (
+                <p className="text-sm text-[#666]">暂无文件</p>
+              ) : (
+                renderTree(tree)
+              )}
+            </div>
+          </section>
+
+          <section
+            className="lg:col-span-2 bg-white rounded-2xl p-4"
+            style={{ border: '2px solid #2D2D2D', boxShadow: '6px 6px 0 #2D2D2D' }}
+          >
+            <h3 className="text-lg font-black mb-3 flex items-center gap-2">
+              <Code className="w-5 h-5" style={{ color: '#2ad4ff' }} />
+              {selectedFile ? `符号：${selectedFile}` : '文件符号'}
+            </h3>
+            {!selectedFile ? (
+              <p className="text-sm text-[#666]">点击左侧文件查看符号列表</p>
+            ) : symbols.length === 0 ? (
+              <p className="text-sm text-[#666]">该文件暂无符号</p>
+            ) : (
+              <div className="space-y-2 max-h-[500px] overflow-y-auto">
+                {symbols.map((s: any) => (
+                  <div
+                    key={s.id}
+                    className="flex items-center justify-between p-3 rounded-xl"
+                    style={{ background: '#F5F5F0' }}
+                  >
+                    <div>
+                      <p className="font-bold text-sm">{s.name}</p>
+                      <p className="text-xs text-[#666]">{s.type} · 第 {s.line} 行</p>
+                    </div>
+                    <span
+                      className="px-2 py-1 rounded text-xs font-bold"
+                      style={{ background: '#2ad4ff20', color: '#2D2D2D' }}
+                    >
+                      {s.kind}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 };

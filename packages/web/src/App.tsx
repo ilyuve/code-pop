@@ -6,6 +6,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Repos } from './pages/Repos';
 import { RepoDetail } from './pages/RepoDetail';
 import { Search } from './pages/Search';
+import { Benchmark } from './pages/Benchmark';
 import { Settings } from './pages/Settings';
 import { useStore } from './store';
 import { clsx } from 'clsx';
@@ -30,6 +31,7 @@ function App() {
               <Route path="/repos" element={<Repos />} />
               <Route path="/repos/:id" element={<RepoDetail />} />
               <Route path="/search" element={<Search />} />
+              <Route path="/benchmark" element={<Benchmark />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </main>

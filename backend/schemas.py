@@ -78,10 +78,53 @@ class SearchHistoryResponse(BaseModel):
     mode: str
     results_count: int
     latency_ms: int
+    input_tokens: int
+    output_tokens: int
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class BenchmarkCreate(BaseModel):
+    query: str = Field(..., min_length=1)
+    repo_id: Optional[UUID] = None
+    mode: str = "with_codepop"
+    expected_files: List[str] = Field(default_factory=list)
+    expected_lines: List[int] = Field(default_factory=list)
+
+
+class BenchmarkResponse(BaseModel):
+    id: UUID
+    query: str
+    repo_id: Optional[UUID]
+    mode: str
+    latency_ms: int
+    results_count: int
+    relevant_results_count: int
+    token_consumed: int
+    accuracy_score: float
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BenchmarkSummary(BaseModel):
+    total_runs: int
+    avg_latency_ms: float
+    avg_token_consumed: float
+    avg_accuracy_score: float
+    latency_trend: List[Dict[str, Any]]
+    savings_vs_baseline: Dict[str, float]
+
+
+class SearchHistoryStats(BaseModel):
+    total_queries: int
+    avg_latency_ms: float
+    total_input_tokens: int
+    total_output_tokens: int
+    estimated_tokens_saved: int
 
 
 class WebhookPayload(BaseModel):

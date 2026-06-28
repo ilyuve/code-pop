@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   FolderGit2,
   Search,
+  BarChart3,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -15,6 +16,7 @@ const navItems = [
   { path: '/', icon: LayoutDashboard, label: '仪表盘', color: '#ff3d8a' },
   { path: '/repos', icon: FolderGit2, label: '仓库', color: '#2ad4ff' },
   { path: '/search', icon: Search, label: '搜索', color: '#fff34d' },
+  { path: '/benchmark', icon: BarChart3, label: '评测', color: '#b88dff' },
   { path: '/settings', icon: Settings, label: '设置', color: '#6effb0' },
 ];
 

@@ -10,17 +10,27 @@ import {
   Sparkles,
   Zap,
   ArrowRight,
+  BarChart3,
+  TrendingDown,
 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { useRepos } from '../hooks/useRepos';
 import { useSearch } from '../hooks/useSearch';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStore } from '../store';
+import { fetchSearchHistoryStats } from '../api';
 
 export const Dashboard = () => {
   const { repos, isLoading: reposLoading } = useRepos();
   const { recentSearches } = useSearch();
   const { wsUrl, setWsStatus, addRealTimeUpdate, updateRepo } = useStore();
   const [animated, setAnimated] = useState(false);
+
+  const { data: searchStats } = useQuery({
+    queryKey: ['searchHistoryStats'],
+    queryFn: fetchSearchHistoryStats,
+    refetchInterval: 30000,
+  });
 
   // WebSocket connection for real-time updates
   const { status, lastMessage, send } = useWebSocket(wsUrl, {
@@ -87,6 +97,27 @@ export const Dashboard = () => {
       icon: TrendingUp,
       color: '#6effb0',
       bgColor: '#6effb020',
+    },
+    {
+      label: '今日查询',
+      value: searchStats?.totalQueries ?? 0,
+      icon: BarChart3,
+      color: '#b88dff',
+      bgColor: '#b88dff20',
+    },
+    {
+      label: '平均响应时间',
+      value: searchStats?.avgLatencyMs ? `${searchStats.avgLatencyMs.toFixed(0)}ms` : '-',
+      icon: Clock,
+      color: '#ff8a3d',
+      bgColor: '#ff8a3d20',
+    },
+    {
+      label: '今日节省 token',
+      value: searchStats?.estimatedTokensSaved ?? 0,
+      icon: TrendingDown,
+      color: '#2ad4ff',
+      bgColor: '#2ad4ff20',
     },
   ];
 
@@ -172,7 +203,7 @@ export const Dashboard = () => {
       </section>
 
       {/* Stats Grid */}
-      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {stats.map((stat, index) => (
           <div
             key={stat.label}
