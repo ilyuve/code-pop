@@ -2,7 +2,8 @@ version: '3.8'
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Mirrored from pgvector/pgvector:pg16 so all images come from GHCR.
+    image: ghcr.io/ilyuve/codepop-postgres:pg16
     container_name: codepop-postgres
     environment:
       POSTGRES_DB: codepop
@@ -21,10 +22,12 @@ services:
       - codepop-network
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    image: codepop-backend:latest
+    # Pre-built image for "docker compose up" without local build.
+    image: ghcr.io/ilyuve/codepop-backend:latest
+    # Uncomment to build locally instead of pulling the pre-built image.
+    # build:
+    #   context: ./backend
+    #   dockerfile: Dockerfile
     container_name: codepop-backend
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-codepop123}@postgres:5432/codepop
@@ -45,10 +48,12 @@ services:
       - codepop-network
 
   web:
-    build:
-      context: ./packages/web
-      dockerfile: Dockerfile
-    image: codepop-web:latest
+    # Pre-built image for "docker compose up" without local build.
+    image: ghcr.io/ilyuve/codepop-web:latest
+    # Uncomment to build locally instead of pulling the pre-built image.
+    # build:
+    #   context: ./packages/web
+    #   dockerfile: Dockerfile
     container_name: codepop-web
     ports:
       - "3000:3000"
