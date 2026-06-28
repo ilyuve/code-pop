@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db
+from exceptions import RepoAlreadyExistsException, RepoNotFoundException, ValidationException
 from models import CodeFile, RepoStatus, Repository, Symbol
 from schemas import RepoCreate, RepoResponse
 from services.indexer import index_repo
@@ -16,10 +17,6 @@ from services.repo_sync import is_valid_git_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/repos", tags=["repos"])
-
-
-def _repo_not_found() -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
 
 def _attach_counts(db: Session, repo: Repository) -> Repository:
@@ -32,7 +29,7 @@ def _attach_counts(db: Session, repo: Repository) -> Repository:
 def _get_repo(db: Session, repo_id: UUID) -> Repository:
     repo = db.query(Repository).filter(Repository.id == repo_id).first()
     if not repo:
-        raise _repo_not_found()
+        raise RepoNotFoundException(str(repo_id))
     return repo
 
 
@@ -43,11 +40,11 @@ def create_repo(
     db: Session = Depends(get_db),
 ) -> Repository:
     if not is_valid_git_url(payload.git_url):
-        raise HTTPException(status_code=400, detail="Invalid git URL")
+        raise ValidationException("Invalid git URL")
 
     existing = db.query(Repository).filter(Repository.git_url == payload.git_url).first()
     if existing:
-        raise HTTPException(status_code=409, detail="Repository already exists")
+        raise RepoAlreadyExistsException(payload.git_url)
 
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in payload.name).lower()
     repo = Repository(

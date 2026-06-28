@@ -38,7 +38,7 @@ export const Search = () => {
     let filtered = [...results];
     if (selectedLanguage) {
       filtered = filtered.filter((r) =>
-        (r as any).language?.toLowerCase().includes(selectedLanguage.toLowerCase())
+        r.language?.toLowerCase().includes(selectedLanguage.toLowerCase())
       );
     }
     if (selectedSymbol) {

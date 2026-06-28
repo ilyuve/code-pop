@@ -4,8 +4,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ if _backend_dir not in sys.path:
 
 from api import repos, search, webhook, ws
 from config import settings
+from exceptions import CodePopException
 from mcp_server.server import mcp_sse_endpoint
 from scripts.init_db import init_db
 from services.indexer import shutdown_indexer
@@ -48,6 +50,15 @@ app = FastAPI(
     version=settings.api_version,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(CodePopException)
+async def codepop_exception_handler(request: Request, exc: CodePopException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,

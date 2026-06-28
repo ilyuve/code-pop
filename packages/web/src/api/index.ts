@@ -50,6 +50,7 @@ const mapSearchResult = (data: any): SearchResult => ({
   filePath: data.file_path,
   lineNumber: data.line,
   code: data.content,
+  language: data.language || '',
   score: data.score,
   scoreBreakdown: data.score_breakdown || {},
 });

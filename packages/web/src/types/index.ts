@@ -29,6 +29,7 @@ export interface SearchResult {
   filePath: string;
   lineNumber: number;
   code: string;
+  language: string;
   score: number;
   scoreBreakdown: ScoreBreakdown;
 }

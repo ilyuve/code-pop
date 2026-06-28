@@ -121,6 +121,8 @@ cd backend
 python -m scripts.benchmark ../benchmark_queries.json --repo-id <uuid> --k 10 --output report.json
 ```
 
+**Baseline 说明**：`without_codepop` 模式采用朴素关键词匹配（扫描文件内容中的关键词）作为代理基准，用于对比检索效率。它不代表真实 LLM 直接读取整个代码库的 token 消耗，但能有效反映 CodePop 对检索质量和速度的提升。
+
 `benchmark_queries.json` 示例：
 
 ```json

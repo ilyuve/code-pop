@@ -9,7 +9,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import CallGraphEdge, CodeFile, Embedding, Symbol
+from models import Embedding, Symbol
+from repositories import EmbeddingRepository, SymbolRepository
 from schemas import SearchResultItem
 from services.embedder import Embedder
 
@@ -89,6 +90,8 @@ class Searcher:
     def __init__(self, db: Session):
         self.db = db
         self.embedder = Embedder()
+        self.embedding_repo = EmbeddingRepository(db)
+        self.symbol_repo = SymbolRepository(db)
 
     def hybrid_search(
         self,
@@ -131,51 +134,24 @@ class Searcher:
         repo_id: Optional[UUID],
         top_k: int = 50,
     ) -> List[_Hit]:
-        sql = text(
-            """
-            SELECT e.id AS embedding_id,
-                   e.file_id,
-                   e.repo_id,
-                   r.name AS repo_name,
-                   e.content,
-                   e.start_line,
-                   e.end_line,
-                   f.path AS file_path,
-                   f.language,
-                   e.embedding <=> (:embedding)::vector AS distance
-            FROM embeddings e
-            JOIN code_files f ON f.id = e.file_id
-            JOIN repositories r ON r.id = e.repo_id
-            WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
-            ORDER BY e.embedding <=> (:embedding)::vector
-            LIMIT :limit
-            """
-        )
-        rows = self.db.execute(
-            sql,
-            {
-                "embedding": query_embedding,
-                "repo_id": str(repo_id) if repo_id else None,
-                "limit": top_k,
-            },
-        ).fetchall()
+        rows = self.embedding_repo.vector_search(query_embedding, repo_id, top_k)
 
         hits: List[_Hit] = []
         for row in rows:
-            distance = row.distance
+            distance = row.get("distance")
             if isinstance(distance, str):
                 distance = float(distance)
             score = max(0.0, 1.0 - distance)
             hits.append(
                 _Hit(
-                    result_id=row.embedding_id,
-                    file_id=row.file_id,
-                    repo_id=row.repo_id,
-                    repo_name=row.repo_name,
-                    file_path=row.file_path,
-                    language=row.language,
-                    content=row.content,
-                    line=row.start_line,
+                    result_id=row["embedding_id"],
+                    file_id=row["file_id"],
+                    repo_id=row["repo_id"],
+                    repo_name=row["repo_name"],
+                    file_path=row["file_path"],
+                    language=row["language"],
+                    content=row["content"],
+                    line=row["start_line"],
                     vector_score=score,
                     sources={"vector"},
                 )
@@ -188,35 +164,7 @@ class Searcher:
         repo_id: Optional[UUID],
         limit: int = 50,
     ) -> List[Symbol]:
-        q = self.db.query(Symbol).join(CodeFile, Symbol.file_id == CodeFile.id)
-        if repo_id:
-            q = q.filter(Symbol.repo_id == repo_id)
-
-        prefix = query.lower()
-        exact = q.filter(Symbol.name == query).all()
-        prefix_matches = (
-            q.filter(Symbol.name.ilike(f"{prefix}%"))
-            .filter(Symbol.name != query)
-            .limit(limit)
-            .all()
-        )
-        contains_matches = (
-            q.filter(Symbol.name.ilike(f"%{prefix}%"))
-            .filter(~Symbol.name.ilike(f"{prefix}%"))
-            .limit(limit)
-            .all()
-        )
-
-        seen: set = set()
-        results: List[Symbol] = []
-        for sym in exact + prefix_matches + contains_matches:
-            if sym.id in seen:
-                continue
-            seen.add(sym.id)
-            results.append(sym)
-            if len(results) >= limit:
-                break
-        return results
+        return self.symbol_repo.search_by_name(query, repo_id, limit)
 
     def _symbol_search(
         self,
@@ -312,33 +260,12 @@ class Searcher:
         if not symbol_hits:
             return []
 
-        symbol_ids = {h.result_id for h in symbol_hits if h.sources == {"symbol"}}
-        if not symbol_ids:
-            # Symbol hits may have been mapped to embeddings; fall back to file ids.
-            file_ids = {h.file_id for h in symbol_hits}
-            related_symbols = (
-                self.db.query(Symbol)
-                .filter(Symbol.file_id.in_(file_ids))
-                .limit(top_k)
-                .all()
-            )
+        symbol_ids = [h.result_id for h in symbol_hits if h.sources == {"symbol"}]
+        if symbol_ids:
+            related_symbols = self.symbol_repo.get_related_by_edges(symbol_ids, top_k)
         else:
-            edges = (
-                self.db.query(CallGraphEdge)
-                .filter(
-                    (CallGraphEdge.source_symbol_id.in_(symbol_ids))
-                    | (CallGraphEdge.target_symbol_id.in_(symbol_ids))
-                )
-                .limit(top_k * 2)
-                .all()
-            )
-            related_ids: set = set()
-            for edge in edges:
-                related_ids.add(edge.source_symbol_id)
-                related_ids.add(edge.target_symbol_id)
-            related_symbols = (
-                self.db.query(Symbol).filter(Symbol.id.in_(related_ids)).limit(top_k).all()
-            )
+            file_ids = list({h.file_id for h in symbol_hits})
+            related_symbols = self.symbol_repo.get_by_file_ids(file_ids, top_k)
 
         hits: List[_Hit] = []
         for sym in related_symbols:
@@ -354,12 +281,7 @@ class Searcher:
     # ------------------------------------------------------------------
 
     def _file_embeddings(self, file_id: UUID) -> List[Embedding]:
-        return (
-            self.db.query(Embedding)
-            .filter(Embedding.file_id == file_id)
-            .order_by(Embedding.start_line)
-            .all()
-        )
+        return self.embedding_repo.get_by_file_id(file_id)
 
     def _fuse(
         self,
