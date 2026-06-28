@@ -256,16 +256,16 @@ export const RepoDetail = () => {
       <div className="flex gap-3">
         <button
           onClick={handleReindex}
-          disabled={isReindexing || repo.status === 'indexing'}
+          disabled={isReindexing}
           className={clsx(
             'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors',
-            isReindexing || repo.status === 'indexing'
+            isReindexing
               ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
               : 'bg-indigo-500 hover:bg-indigo-600 text-white'
           )}
         >
           <RefreshCw className={clsx('w-5 h-5', isReindexing && 'animate-spin')} />
-          重新索引
+          {repo.status === 'indexing' ? '强制重新索引' : '重新索引'}
         </button>
         <button
           onClick={handleDelete}
