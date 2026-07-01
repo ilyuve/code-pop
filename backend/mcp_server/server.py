@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 from uuid import UUID
 
 from fastapi import Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent, Tool
@@ -152,17 +152,14 @@ def _tool_codepop_symbols(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         ]
 
 
-async def mcp_sse_endpoint(request: Request) -> StreamingResponse:
-    """FastAPI-compatible SSE endpoint without private attributes."""
-    async def event_generator():
-        send = request.scope.get("asgi", {}).get("send") or request._send
-        async with sse_transport.connect_session(
-            request.scope, request.receive, send
-        ) as (read_stream, write_stream):
-            await mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp_server.create_initialization_options(),
-            )
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+async def mcp_sse_endpoint(request: Request):
+    """FastAPI-compatible SSE endpoint for the MCP server."""
+    async with sse_transport.connect_sse(
+        request.scope, request.receive, request._send
+    ) as (read_stream, write_stream):
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options(),
+        )
+    return Response()
