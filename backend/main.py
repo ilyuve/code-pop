@@ -20,7 +20,7 @@ if _backend_dir not in sys.path:
 from api import repos, search, webhook, ws
 from config import settings
 from exceptions import CodePopException
-from mcp_server.server import mcp_sse_endpoint
+from mcp_server.server import mcp_sse_endpoint, sse_transport
 from scripts.init_db import init_db
 from services.indexer import shutdown_indexer
 
@@ -75,6 +75,7 @@ app.include_router(ws.router)
 
 # MCP SSE endpoint
 app.add_api_route("/mcp/sse", mcp_sse_endpoint, methods=["GET"])
+app.add_api_route("/mcp/messages/", sse_transport.handle_post_message, methods=["POST"])
 
 
 @app.get("/health")
