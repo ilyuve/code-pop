@@ -8,6 +8,7 @@ import { RepoDetail } from './pages/RepoDetail';
 import { Search } from './pages/Search';
 import { Benchmark } from './pages/Benchmark';
 import { Settings } from './pages/Settings';
+import { Monitor } from './pages/Monitor';
 import { useStore } from './store';
 import { clsx } from 'clsx';
 
@@ -33,6 +34,7 @@ function App() {
               <Route path="/search" element={<Search />} />
               <Route path="/benchmark" element={<Benchmark />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="/monitor" element={<Monitor />} />
             </Routes>
           </main>
           <Footer />

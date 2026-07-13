@@ -1,29 +1,24 @@
-"""MCP Server exposing CodePop tools via SSE transport."""
+"""MCP Server exposing CodePop tools via streamable HTTP transport."""
 
 import json
 import logging
+import time
 from contextlib import contextmanager
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import Request
-from fastapi.responses import Response
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-from mcp.types import TextContent, Tool
+from mcp.server.fastmcp import FastMCP
 
 from database import SessionLocal
-from models import CodeFile, Repository, Symbol
+from models import CodeFile, Repository, SearchHistory, Symbol
 from schemas import SearchResultItem
+from services.embedder import Embedder
 from services.searcher import Searcher
 
 logger = logging.getLogger(__name__)
 
-# MCP server instance
-mcp_server = Server("codepop")
-
-# SSE transport endpoint; message posting path is internal.
-sse_transport = SseServerTransport("/mcp/messages/")
+mcp = FastMCP("codepop", streamable_http_path="/sse")
+embedder = Embedder()
 
 
 @contextmanager
@@ -35,79 +30,119 @@ def _db_session():
         db.close()
 
 
-@mcp_server.list_tools()
-async def list_tools() -> List[Tool]:
-    return [
-        Tool(
-            name="codepop_search",
-            description="Hybrid code search across indexed repositories using vector, symbol, BM25 and call graph signals.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Natural language or keyword query"},
-                    "repo_id": {"type": "string", "description": "Optional repository UUID to restrict search"},
-                    "limit": {"type": "integer", "default": 10, "description": "Maximum number of results"},
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="codepop_repos",
-            description="List all indexed repositories.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="codepop_symbols",
-            description="List symbols for a given file in a repository.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "repo_id": {"type": "string", "description": "Repository UUID"},
-                    "file_path": {"type": "string", "description": "Relative file path within the repository"},
-                },
-                "required": ["repo_id", "file_path"],
-            },
-        ),
-    ]
+def _estimate_output_tokens(results: List[SearchResultItem]) -> int:
+    total_chars = sum(len(r.content) for r in results)
+    return max(0, total_chars // 4)
 
 
-@mcp_server.call_tool()
-async def call_tool(name: str, arguments: Any | None) -> List[TextContent]:
-    arguments = arguments or {}
-    try:
-        if name == "codepop_search":
-            results = _tool_codepop_search(arguments)
-        elif name == "codepop_repos":
-            results = _tool_codepop_repos()
-        elif name == "codepop_symbols":
-            results = _tool_codepop_symbols(arguments)
-        else:
-            return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
-        return [TextContent(type="text", text=json.dumps(results, ensure_ascii=False, default=str))]
-    except Exception as exc:
-        logger.exception("MCP tool %s failed: %s", name, exc)
-        return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+def _record_mcp_search(db, query: str, repo_id: Optional[UUID], mode: str, results_count: int, latency_ms: int, output_tokens: int):
+    input_tokens = embedder.count_tokens(query)
+    history = SearchHistory(
+        query=query,
+        repo_id=repo_id,
+        mode=mode,
+        results_count=results_count,
+        latency_ms=latency_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+    db.add(history)
+    db.commit()
 
 
-def _tool_codepop_search(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
-    query = arguments["query"]
-    repo_id = arguments.get("repo_id")
-    limit = int(arguments.get("limit", 10))
+@mcp.tool()
+def search_code(
+    query: str,
+    repo_id: Optional[str] = None,
+    limit: int = 10,
+) -> str:
+    """
+    搜索代码库中的函数、类、实现逻辑或代码位置。
 
+    当用户询问以下任何问题时，请立即调用此工具：
+    - "xxx 在哪" / "where is xxx"
+    - "xxx 怎么实现的" / "how does xxx work"
+    - "搜一下 xxx" / "find xxx"
+    - "登录流程" / "authentication flow"
+    - "改了 xxx 会影响哪里" / "impact of changing xxx"
+    - "为什么报错" / "why does it fail"
+    - 任何关于代码位置、实现逻辑、调用关系的自然语言问题
+
+    支持中文和英文自然语言查询。直接传入用户的原话，不需要翻译。
+    返回结构化结果：入口点、调用链上下游、涉及文件、代码片段。
+
+    Args:
+        query: Natural language query in Chinese or English.
+            Examples: '登录流程在哪', 'how does authentication work', '改了 UserService 会影响哪里'
+        repo_id: Optional repository UUID to restrict search
+        limit: Maximum number of code snippets (default: 10)
+    """
     with _db_session() as db:
         repo_uuid = UUID(repo_id) if repo_id else None
         searcher = Searcher(db)
-        results: List[SearchResultItem] = searcher.hybrid_search(query, repo_uuid, limit)
-        return [r.model_dump() for r in results]
+
+        start = time.time()
+        context = searcher.search_with_context(query, repo_uuid, limit)
+        latency_ms = int((time.time() - start) * 1000)
+        context.search_latency_ms = latency_ms
+
+        output_tokens = 0
+        if context.code_snippets:
+            output_tokens = _estimate_output_tokens(context.code_snippets)
+
+        _record_mcp_search(db, query, repo_uuid, "mcp_search", len(context.code_snippets), latency_ms, output_tokens)
+
+        return json.dumps(context.model_dump(), ensure_ascii=False, default=str)
 
 
-def _tool_codepop_repos() -> List[Dict[str, Any]]:
+@mcp.tool()
+def analyze_impact(
+    query: str,
+    repo_id: Optional[str] = None,
+    depth: int = 3,
+) -> str:
+    """
+    Analyze impact of modifying a symbol: who depends on it, what files are affected.
+
+    Use this when the user asks about changing, refactoring, or deleting a function/class.
+    当用户说"改了 xxx"、"删掉 xxx 会怎样"、"重构 xxx"时调用。
+
+    Args:
+        query: Symbol name or description.
+            Examples: 'UserService.findById', '如果改了登录接口'
+        repo_id: Optional repository UUID
+        depth: Call chain depth for impact analysis (default: 3)
+    """
+    with _db_session() as db:
+        repo_uuid = UUID(repo_id) if repo_id else None
+        searcher = Searcher(db)
+
+        intent = searcher.intent_analyzer.analyze(query)
+        intent.intent_type = "impact_analysis"
+        intent.search_strategy = searcher.intent_analyzer._build_strategy("impact_analysis", intent.is_chinese)
+        intent.search_strategy.call_depth = depth
+
+        start = time.time()
+        context = searcher.search_with_context(query, repo_uuid, 20, intent=intent)
+        latency_ms = int((time.time() - start) * 1000)
+        context.search_latency_ms = latency_ms
+        context.query_intent = "impact_analysis"
+
+        output_tokens = 0
+        if context.code_snippets:
+            output_tokens = _estimate_output_tokens(context.code_snippets)
+
+        _record_mcp_search(db, query, repo_uuid, "mcp_impact", len(context.code_snippets), latency_ms, output_tokens)
+
+        return json.dumps(context.model_dump(), ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+def list_repositories() -> str:
+    """List all indexed code repositories."""
     with _db_session() as db:
         repos = db.query(Repository).order_by(Repository.created_at.desc()).all()
-        return [
+        result = [
             {
                 "id": str(r.id),
                 "name": r.name,
@@ -117,27 +152,33 @@ def _tool_codepop_repos() -> List[Dict[str, Any]]:
             }
             for r in repos
         ]
+        return json.dumps(result, ensure_ascii=False, default=str)
 
 
-def _tool_codepop_symbols(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
-    repo_id = UUID(arguments["repo_id"])
-    file_path = arguments["file_path"]
+@mcp.tool()
+def list_file_symbols(repo_id: str, file_path: str) -> str:
+    """
+    List symbols (functions, classes, methods) for a given file.
 
+    Args:
+        repo_id: Repository UUID
+        file_path: Relative file path
+    """
     with _db_session() as db:
         code_file = (
             db.query(CodeFile)
-            .filter(CodeFile.repo_id == repo_id, CodeFile.path == file_path)
+            .filter(CodeFile.repo_id == UUID(repo_id), CodeFile.path == file_path)
             .first()
         )
         if not code_file:
-            return []
+            return json.dumps([], ensure_ascii=False)
         symbols = (
             db.query(Symbol)
             .filter(Symbol.file_id == code_file.id)
             .order_by(Symbol.line)
             .all()
         )
-        return [
+        result = [
             {
                 "id": str(s.id),
                 "name": s.name,
@@ -150,16 +191,16 @@ def _tool_codepop_symbols(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
             for s in symbols
         ]
+        return json.dumps(result, ensure_ascii=False, default=str)
 
 
-async def mcp_sse_endpoint(request: Request):
-    """FastAPI-compatible SSE endpoint for the MCP server."""
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options(),
-        )
-    return Response()
+def get_mcp_app():
+    """Get the streamable HTTP ASGI app for mounting in FastAPI."""
+    return mcp.streamable_http_app()
+
+
+def get_mcp_session_manager():
+    """Get the MCP session manager for lifespan management."""
+    # 触发 session manager 的创建
+    _ = mcp.streamable_http_app()
+    return mcp._session_manager

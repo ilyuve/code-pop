@@ -18,7 +18,7 @@ import json
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -47,7 +47,7 @@ def _is_relevant(result: Any, expected_files: List[str], expected_lines: List[in
     return False
 
 
-def _baseline_keyword_search(db: Session, query: str, repo_id: UUID | None, limit: int = 20):
+def _baseline_keyword_search(db: Session, query: str, repo_id: Optional[UUID], limit: int = 20):
     """Naive baseline: keyword AND scan over all file contents."""
     start = time.perf_counter()
     q = db.query(CodeFile)
@@ -70,7 +70,7 @@ def _baseline_keyword_search(db: Session, query: str, repo_id: UUID | None, limi
 def run_benchmark(
     db: Session,
     queries: List[Dict[str, Any]],
-    repo_id: UUID | None,
+    repo_id: Optional[UUID],
     k: int = 10,
 ) -> Dict[str, Any]:
     searcher = Searcher(db)

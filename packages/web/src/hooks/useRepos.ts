@@ -5,7 +5,7 @@ import type { AddRepoForm } from '../types';
 
 export const useRepos = () => {
   const queryClient = useQueryClient();
-  const { repos, setRepos, addRepo: addRepoToStore, removeRepo } = useStore();
+  const { repos, setRepos, addRepo: addRepoToStore, removeRepo, clearIndexingLogs } = useStore();
 
   const reposQuery = useQuery({
     queryKey: ['repos'],
@@ -14,10 +14,15 @@ export const useRepos = () => {
   });
 
   const addRepoMutation = useMutation({
-    mutationFn: (data: AddRepoForm) => addRepo(data),
-    onSuccess: (newRepo) => {
+    mutationFn: (data: { form: AddRepoForm; onSuccess?: () => void; onError?: (error: any) => void }) => 
+      addRepo(data.form),
+    onSuccess: (newRepo, variables) => {
       addRepoToStore(newRepo);
       queryClient.invalidateQueries({ queryKey: ['repos'] });
+      variables.onSuccess?.();
+    },
+    onError: (error, variables) => {
+      variables.onError?.(error);
     },
   });
 
@@ -25,23 +30,31 @@ export const useRepos = () => {
     mutationFn: (id: string) => deleteRepo(id),
     onSuccess: (_, id) => {
       removeRepo(id);
+      clearIndexingLogs(id);
       queryClient.invalidateQueries({ queryKey: ['repos'] });
     },
   });
 
   const reindexMutation = useMutation({
     mutationFn: (id: string) => reindexRepo(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      clearIndexingLogs(id);
       queryClient.invalidateQueries({ queryKey: ['repos'] });
+      queryClient.invalidateQueries({ queryKey: ['repo', id, 'indexing'] });
+      queryClient.invalidateQueries({ queryKey: ['indexingLogs', id] });
     },
   });
+
+  const addRepoWithCallbacks = (form: AddRepoForm, options?: { onSuccess?: () => void; onError?: (error: any) => void }) => {
+    addRepoMutation.mutate({ form, ...options });
+  };
 
   return {
     repos: reposQuery.data || repos,
     isLoading: reposQuery.isLoading,
     error: reposQuery.error,
     refetch: reposQuery.refetch,
-    addRepo: addRepoMutation.mutate,
+    addRepo: addRepoWithCallbacks,
     deleteRepo: deleteRepoMutation.mutate,
     reindex: reindexMutation.mutate,
     isAdding: addRepoMutation.isPending,

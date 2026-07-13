@@ -19,6 +19,7 @@ import { useSearch } from '../hooks/useSearch';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStore } from '../store';
 import { fetchSearchHistoryStats } from '../api';
+import { ServiceStatus } from '../components/ServiceStatus';
 
 export const Dashboard = () => {
   const { repos, isLoading: reposLoading } = useRepos();
@@ -242,6 +243,9 @@ export const Dashboard = () => {
           </div>
         ))}
       </section>
+
+      {/* Service Status */}
+      <ServiceStatus />
 
       {/* Two Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">

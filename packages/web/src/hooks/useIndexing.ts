@@ -1,7 +1,6 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { fetchRepo } from '../api';
-import { useStore } from '../store';
+import { fetchIndexingLogs, fetchIndexingProgress } from '../api';
 
 export interface StageProgress {
   stage: string;
@@ -16,44 +15,61 @@ export interface IndexingProgress {
   percentage: number;
 }
 
+export interface LogEntry {
+  timestamp: string;
+  level: string;
+  message: string;
+  stage: string | null;
+}
+
 const STAGE_LABELS: Record<string, string> = {
+  git_sync: '代码同步',
   scan: '文件扫描',
   symbols: '符号解析',
   embeddings: '向量生成',
   call_graph: '调用图构建',
 };
 
-export const useIndexing = (repoId: string) => {
-  const { data: repo, refetch } = useQuery({
-    queryKey: ['repo', repoId, 'indexing'],
-    queryFn: () => fetchRepo(repoId),
-    enabled: !!repoId,
-    refetchInterval: (query) => {
-      const repo = query.state.data;
-      if (repo?.status === 'indexing') {
-        return 2000; // Poll every 2 seconds while indexing
-      }
-      return false;
-    },
+export interface RepoData {
+  status: string;
+  indexedFiles: number;
+  totalFiles: number;
+  errorMessage?: string;
+}
+
+export const useIndexing = (repoId: string, repo: RepoData | undefined) => {
+  const isIndexing = repo?.status === 'indexing';
+
+  const { data: progressData } = useQuery({
+    queryKey: ['indexingProgress', repoId],
+    queryFn: () => fetchIndexingProgress(repoId),
+    enabled: !!repoId && isIndexing,
+    refetchInterval: isIndexing ? 2000 : false,
   });
 
-  const realTimeUpdate = useStore(
-    (state) => state.realTimeUpdates[`repo_${repoId}`] as
-      | { progress?: number; stage?: string; stage_progress?: StageProgress; error?: string }
-      | undefined
-  );
-
-  const isIndexing = repo?.status === 'indexing';
+  const { data: logs } = useQuery({
+    queryKey: ['indexingLogs', repoId],
+    queryFn: () => fetchIndexingLogs(repoId),
+    enabled: !!repoId && (isIndexing || repo?.status === 'error'),
+    refetchInterval: isIndexing ? 2000 : false,
+  });
 
   const progress: IndexingProgress | null = useMemo(() => {
     if (!repo) return null;
 
-    // Prefer live WebSocket data when available.
-    if (isIndexing && realTimeUpdate?.progress !== undefined) {
+    if (isIndexing && progressData?.overall_progress !== undefined) {
       return {
-        current: realTimeUpdate.stage_progress?.current ?? repo.indexedFiles,
-        total: realTimeUpdate.stage_progress?.total ?? repo.totalFiles,
-        percentage: Math.round(realTimeUpdate.progress),
+        current: 0,
+        total: 100,
+        percentage: Math.round(progressData.overall_progress),
+      };
+    }
+
+    if (isIndexing) {
+      return {
+        current: 0,
+        total: 100,
+        percentage: 0,
       };
     }
 
@@ -64,29 +80,39 @@ export const useIndexing = (repoId: string) => {
         ? Math.round((repo.indexedFiles / repo.totalFiles) * 100)
         : 0,
     };
-  }, [repo, realTimeUpdate, isIndexing]);
+  }, [repo, isIndexing, progressData]);
 
   const stageProgress: StageProgress | null = useMemo(() => {
-    if (!isIndexing || !realTimeUpdate?.stage_progress) return null;
-    return {
-      ...realTimeUpdate.stage_progress,
-      stage: realTimeUpdate.stage_progress.stage,
-    };
-  }, [realTimeUpdate, isIndexing]);
+    if (!isIndexing) return null;
 
-  const currentStageLabel = stageProgress
-    ? STAGE_LABELS[stageProgress.stage] ?? stageProgress.stage
-    : isIndexing
-      ? '索引中'
-      : null;
+    if (progressData?.current_stage && progressData.stage_progress) {
+      const stage = progressData.stage_progress[progressData.current_stage];
+      if (stage) {
+        return {
+          stage: progressData.current_stage,
+          current: stage.current,
+          total: stage.total,
+          percentage: stage.progress,
+        };
+      }
+    }
+
+    return null;
+  }, [isIndexing, progressData]);
+
+  const currentStageLabel = useMemo(() => {
+    if (!stageProgress) {
+      return isIndexing ? '索引中' : null;
+    }
+    return STAGE_LABELS[stageProgress.stage] ?? stageProgress.stage;
+  }, [stageProgress, isIndexing]);
 
   return {
-    repo,
     isIndexing,
     progress,
     stageProgress,
     currentStageLabel,
-    error: realTimeUpdate?.error,
-    refetch,
+    error: repo?.errorMessage,
+    logs: logs || [],
   };
 };

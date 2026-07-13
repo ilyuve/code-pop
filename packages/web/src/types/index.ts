@@ -5,6 +5,7 @@ export interface Repo {
   path: string;
   gitUrl?: string;
   status: 'indexing' | 'indexed' | 'completed' | 'error';
+  errorMessage?: string;
   totalFiles: number;
   indexedFiles: number;
   fileCount?: number;
@@ -90,4 +91,47 @@ export interface AddRepoForm {
   name?: string;
   path?: string;
   gitUrl?: string;
+}
+
+// CodeContext types
+export interface SymbolEntry {
+  id: string;
+  name: string;
+  type: string;
+  file_path: string;
+  line: number;
+  relevance_score: number;
+}
+
+export interface CallChain {
+  root: SymbolEntry;
+  upstream: SymbolEntry[];
+  downstream: SymbolEntry[];
+  depth: number;
+}
+
+export interface FileSummary {
+  path: string;
+  role: string;
+  relevance_score: number;
+  key_symbols: string[];
+}
+
+export interface CodeContext {
+  query: string;
+  query_intent: string;
+  matched_concepts: string[];
+  entry_points: SymbolEntry[];
+  call_chain: CallChain | null;
+  related_files: FileSummary[];
+  code_snippets: SearchResult[];
+  total_files: number;
+  total_symbols: number;
+  search_latency_ms: number;
+}
+
+export interface CodeContextResponse {
+  context: CodeContext;
+  success: boolean;
+  error?: string;
 }

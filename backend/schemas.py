@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 
 class RepoCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    git_url: str = Field(..., min_length=1)
+    git_url: Optional[str] = None
+    path: Optional[str] = None
 
 
 class RepoResponse(BaseModel):
@@ -18,6 +19,7 @@ class RepoResponse(BaseModel):
     git_url: str
     local_path: str
     status: str
+    error_message: Optional[str] = None
     last_indexed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -138,4 +140,58 @@ class WSMessage(BaseModel):
     repo_id: Optional[str] = None
     progress: Optional[float] = None
     status: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SymbolEntry(BaseModel):
+    id: str
+    name: str
+    type: str
+    file_path: str
+    line: int
+    relevance_score: float = 0.0
+
+
+class CallChain(BaseModel):
+    root: SymbolEntry
+    upstream: List[SymbolEntry] = []
+    downstream: List[SymbolEntry] = []
+    depth: int = 0
+
+
+class FileRole(str):
+    CONTROLLER = "controller"
+    SERVICE = "service"
+    REPOSITORY = "repository"
+    MODEL = "model"
+    CONFIG = "config"
+    MIDDLEWARE = "middleware"
+    UTILITY = "utility"
+    TEST = "test"
+    OTHER = "other"
+
+
+class FileSummary(BaseModel):
+    path: str
+    role: str = "other"
+    relevance_score: float = 0.0
+    key_symbols: List[str] = []
+
+
+class CodeContext(BaseModel):
+    query: str
+    query_intent: str
+    matched_concepts: List[str] = []
+    entry_points: List[SymbolEntry] = []
+    call_chain: Optional[CallChain] = None
+    related_files: List[FileSummary] = []
+    code_snippets: List[SearchResultItem] = []
+    total_files: int = 0
+    total_symbols: int = 0
+    search_latency_ms: int = 0
+
+
+class CodeContextResponse(BaseModel):
+    context: Optional[CodeContext] = None
+    success: bool = True
     error: Optional[str] = None

@@ -3,6 +3,13 @@ import { persist } from 'zustand/middleware';
 import type { Repo, SearchResult, Settings } from '../types';
 import type { WebSocketStatus } from '../hooks/useWebSocket';
 
+interface LogEntry {
+  timestamp: string;
+  level: string;
+  message: string;
+  stage: string | null;
+}
+
 interface AppStore {
   // Repository State
   repos: Repo[];
@@ -33,6 +40,12 @@ interface AppStore {
   realTimeUpdates: Record<string, unknown>;
   addRealTimeUpdate: (key: string, data: unknown) => void;
   clearRealTimeUpdates: () => void;
+
+  // Indexing Logs State
+  indexingLogs: Record<string, LogEntry[]>;
+  addIndexingLog: (repoId: string, log: LogEntry) => void;
+  setIndexingLogs: (repoId: string, logs: LogEntry[]) => void;
+  clearIndexingLogs: (repoId: string) => void;
 }
 
 export const useStore = create<AppStore>()(
@@ -88,6 +101,29 @@ export const useStore = create<AppStore>()(
           realTimeUpdates: { ...state.realTimeUpdates, [key]: data },
         })),
       clearRealTimeUpdates: () => set({ realTimeUpdates: {} }),
+
+      // Indexing Logs State
+      indexingLogs: {},
+      addIndexingLog: (repoId, log) =>
+        set((state) => ({
+          indexingLogs: {
+            ...state.indexingLogs,
+            [repoId]: [...(state.indexingLogs[repoId] || []), log],
+          },
+        })),
+      setIndexingLogs: (repoId, logs) =>
+        set((state) => ({
+          indexingLogs: {
+            ...state.indexingLogs,
+            [repoId]: logs,
+          },
+        })),
+      clearIndexingLogs: (repoId) =>
+        set((state) => {
+          const newLogs = { ...state.indexingLogs };
+          delete newLogs[repoId];
+          return { indexingLogs: newLogs };
+        }),
     }),
     {
       name: 'codepop-storage',

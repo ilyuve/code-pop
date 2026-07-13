@@ -37,9 +37,10 @@ class Repository(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
-    git_url = Column(String(512), nullable=False)
+    git_url = Column(String(512), nullable=True)
     local_path = Column(String(512), nullable=False)
     status = Column(String(32), default=RepoStatus.pending.value, nullable=False)
+    error_message = Column(Text, nullable=True)
     last_indexed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -153,3 +154,32 @@ class BenchmarkRun(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     repo = relationship("Repository")
+
+
+class IndexingProgress(Base):
+    __tablename__ = "indexing_progress"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    stage = Column(String(32), nullable=False)
+    progress = Column(Integer, default=0, nullable=False)
+    current = Column(Integer, default=0, nullable=False)
+    total = Column(Integer, default=0, nullable=False)
+    status = Column(String(32), nullable=False)
+    message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("repo_id", "stage", name="uix_repo_stage"),
+    )
+
+
+class IndexingLog(Base):
+    __tablename__ = "indexing_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    level = Column(String(16), default="info", nullable=False)
+    stage = Column(String(32), nullable=True)
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

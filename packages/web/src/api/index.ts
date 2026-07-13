@@ -1,14 +1,8 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats } from '../types';
-
-const DEFAULT_API_ENDPOINT = 'http://localhost:8080/api';
-
-const getApiEndpoint = () => {
-  return localStorage.getItem('codepop-api-endpoint') || DEFAULT_API_ENDPOINT;
-};
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, CodeContext } from '../types';
 
 const apiClient = axios.create({
-  baseURL: getApiEndpoint(),
+  baseURL: '/api',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -36,6 +30,7 @@ const mapRepo = (data: any): Repo => ({
   path: data.local_path || data.path || '',
   gitUrl: data.git_url || data.gitUrl,
   status: mapStatus(data.status),
+  errorMessage: data.error_message || data.errorMessage,
   totalFiles: data.total_files || 0,
   indexedFiles: data.indexed_files || 0,
   fileCount: data.total_files || 0,
@@ -67,10 +62,16 @@ export const fetchRepo = async (id: string): Promise<Repo> => {
 };
 
 export const addRepo = async (data: AddRepoForm): Promise<Repo> => {
-  const response = await apiClient.post('/repos', {
-    name: data.name || data.gitUrl?.split('/').pop()?.replace(/\.git$/, '') || 'repo',
-    git_url: data.gitUrl,
-  });
+  const payload: any = {
+    name: data.name || data.gitUrl?.split('/').pop()?.replace(/\.git$/, '') || data.path?.split('/').pop() || 'repo',
+  };
+  if (data.gitUrl) {
+    payload.git_url = data.gitUrl;
+  }
+  if (data.path) {
+    payload.path = data.path;
+  }
+  const response = await apiClient.post('/repos', payload);
   return mapRepo(response.data);
 };
 
@@ -98,6 +99,20 @@ export const fetchRepoSymbols = async (id: string, filePath?: string): Promise<a
   return response.data;
 };
 
+export const fetchIndexingLogs = async (id: string): Promise<any[]> => {
+  const response = await apiClient.get(`/repos/${id}/logs`);
+  return response.data.logs;
+};
+
+export const fetchIndexingProgress = async (id: string): Promise<any> => {
+  const response = await apiClient.get(`/repos/${id}/progress`);
+  return response.data;
+};
+
+export const cancelIndexing = async (id: string): Promise<void> => {
+  await apiClient.post(`/repos/${id}/cancel`);
+};
+
 // Search APIs
 export const searchCode = async (query: string, repoId?: string, limit: number = 20): Promise<SearchResult[]> => {
   const response = await apiClient.post('/search', { query, repo_id: repoId, limit });
@@ -109,6 +124,15 @@ export const searchSymbol = async (query: string, repoId?: string): Promise<any[
   return response.data;
 };
 
+export const searchContext = async (query: string, repoId?: string, limit: number = 20): Promise<CodeContext> => {
+  const response = await apiClient.post('/search/context', { query, repo_id: repoId, limit });
+  const context = response.data.context;
+  
+  context.code_snippets = context.code_snippets.map((snippet: any) => mapSearchResult(snippet));
+  
+  return context;
+};
+
 export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => {
   const response = await apiClient.get(`/search/history?limit=${limit}`);
   return response.data;
@@ -116,7 +140,14 @@ export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => 
 
 export const fetchSearchHistoryStats = async (): Promise<SearchHistoryStats> => {
   const response = await apiClient.get('/search/history/stats');
-  return response.data;
+  const data = response.data;
+  return {
+    totalQueries: data.total_queries || 0,
+    avgLatencyMs: data.avg_latency_ms || 0,
+    totalInputTokens: data.total_input_tokens || 0,
+    totalOutputTokens: data.total_output_tokens || 0,
+    estimatedTokensSaved: data.estimated_tokens_saved || 0,
+  };
 };
 
 // Benchmark APIs

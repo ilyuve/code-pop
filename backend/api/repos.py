@@ -1,7 +1,7 @@
 """Repository management endpoints."""
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -12,7 +12,8 @@ from database import get_db
 from exceptions import RepoAlreadyExistsException, RepoNotFoundException, ValidationException
 from models import CodeFile, RepoStatus, Repository, Symbol
 from schemas import RepoCreate, RepoResponse
-from services.indexer import index_repo
+from services.indexer import index_repo, _get_indexing_logs, _cancel_indexing
+from models import IndexingLog, IndexingProgress
 from services.repo_sync import is_valid_git_url
 
 logger = logging.getLogger(__name__)
@@ -39,18 +40,28 @@ def create_repo(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> Repository:
-    if not is_valid_git_url(payload.git_url):
+    if not payload.git_url and not payload.path:
+        raise ValidationException("Must provide either git_url or path")
+
+    if payload.git_url and not is_valid_git_url(payload.git_url):
         raise ValidationException("Invalid git URL")
 
-    existing = db.query(Repository).filter(Repository.git_url == payload.git_url).first()
-    if existing:
-        raise RepoAlreadyExistsException(payload.git_url)
+    if payload.git_url:
+        existing = db.query(Repository).filter(Repository.git_url == payload.git_url).first()
+        if existing:
+            raise RepoAlreadyExistsException(payload.git_url)
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in payload.name).lower()
+        local_path = str(settings.repos_dir / safe_name)
+    else:
+        existing = db.query(Repository).filter(Repository.local_path == payload.path).first()
+        if existing:
+            raise RepoAlreadyExistsException(payload.path)
+        local_path = payload.path
 
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in payload.name).lower()
     repo = Repository(
         name=payload.name,
-        git_url=payload.git_url,
-        local_path=str(settings.repos_dir / safe_name),
+        git_url=payload.git_url or "",
+        local_path=local_path,
         status=RepoStatus.pending.value,
     )
     db.add(repo)
@@ -113,7 +124,7 @@ def list_repo_files(repo_id: UUID, db: Session = Depends(get_db)) -> List[Dict[s
 @router.get("/{repo_id}/symbols")
 def list_repo_symbols(
     repo_id: UUID,
-    file_path: str | None = None,
+    file_path: Optional[str] = None,
     db: Session = Depends(get_db),
 ) -> List[Dict[str, Any]]:
     repo = _get_repo(db, repo_id)
@@ -137,3 +148,99 @@ def list_repo_symbols(
         }
         for s in symbols
     ]
+
+
+@router.get("/{repo_id}/logs")
+def get_indexing_logs(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    repo_id_str = str(repo_id)
+    in_memory_logs = _get_indexing_logs(repo_id_str)
+    
+    db_logs = db.query(IndexingLog).filter(
+        IndexingLog.repo_id == repo_id
+    ).order_by(IndexingLog.created_at).all()
+    
+    db_logs_list = [
+        {
+            "timestamp": log.created_at.isoformat(),
+            "level": log.level,
+            "message": log.message,
+            "stage": log.stage,
+        }
+        for log in db_logs
+    ]
+    
+    seen = set()
+    all_logs = []
+    for log in db_logs_list + in_memory_logs:
+        key = f"{log['timestamp']}-{log['message']}"
+        if key not in seen:
+            seen.add(key)
+            all_logs.append(log)
+    
+    return {
+        "repo_id": repo_id_str,
+        "logs": sorted(all_logs, key=lambda x: x["timestamp"]),
+        "count": len(all_logs),
+    }
+
+
+@router.get("/{repo_id}/progress")
+def get_indexing_progress(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    repo = _get_repo(db, repo_id)
+    
+    stages = db.query(IndexingProgress).filter(
+        IndexingProgress.repo_id == repo_id
+    ).order_by(IndexingProgress.created_at).all()
+    
+    stage_progress = {
+        stage.stage: {
+            "progress": stage.progress,
+            "current": stage.current,
+            "total": stage.total,
+            "status": stage.status,
+            "message": stage.message,
+        }
+        for stage in stages
+    }
+    
+    current_stage = None
+    overall_progress = 0
+    if stages:
+        latest_stages = {}
+        for stage in stages:
+            latest_stages[stage.stage] = stage
+        
+        stage_order = ["git_sync", "scan", "symbols", "embeddings", "call_graph"]
+        
+        max_progress_stage = None
+        max_progress = -1
+        for stage_name in stage_order:
+            if stage_name in latest_stages and latest_stages[stage_name].progress > max_progress:
+                max_progress = latest_stages[stage_name].progress
+                max_progress_stage = stage_name
+        
+        current_stage = max_progress_stage
+        overall_progress = max_progress if max_progress_stage else 0
+    
+    return {
+        "repo_id": str(repo_id),
+        "status": repo.status,
+        "overall_progress": round(overall_progress, 2),
+        "current_stage": current_stage,
+        "stage_progress": stage_progress,
+        "last_indexed_at": repo.last_indexed_at.isoformat() if repo.last_indexed_at else None,
+    }
+
+
+@router.post("/{repo_id}/cancel")
+def cancel_indexing(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    repo = _get_repo(db, repo_id)
+    repo_id_str = str(repo_id)
+    cancelled = _cancel_indexing(repo_id_str)
+    
+    if cancelled:
+        repo.status = RepoStatus.pending.value
+        db.commit()
+        return {"status": "cancelled", "repo_id": repo_id_str}
+    
+    return {"status": "not_running", "repo_id": repo_id_str}

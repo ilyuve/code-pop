@@ -1,7 +1,7 @@
 """Search endpoints."""
 
 import time
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +13,7 @@ from schemas import (
     BenchmarkCreate,
     BenchmarkResponse,
     BenchmarkSummary,
+    CodeContextResponse,
     SearchHistoryResponse,
     SearchHistoryStats,
     SearchQuery,
@@ -36,7 +37,7 @@ def _estimate_output_tokens(results: List[SearchResultItem]) -> int:
 def _record_history(
     db: Session,
     query: str,
-    repo_id: UUID | None,
+    repo_id: Optional[UUID],
     mode: str,
     results_count: int,
     latency_ms: int,
@@ -87,9 +88,33 @@ def symbol_search(
     return results
 
 
+@router.post("/context", response_model=CodeContextResponse)
+def search_context(
+    query: SearchQuery,
+    db: Session = Depends(get_db),
+):
+    if query.limit > settings.search_max_limit:
+        raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
+
+    try:
+        searcher = Searcher(db)
+        context = searcher.search_with_context(
+            query=query.query,
+            repo_id=query.repo_id,
+            limit=query.limit,
+        )
+        return CodeContextResponse(context=context, success=True)
+    except Exception as exc:
+        return CodeContextResponse(
+            context=None,
+            success=False,
+            error=str(exc),
+        )
+
+
 @router.get("/history", response_model=List[SearchHistoryResponse])
 def search_history(
-    repo_id: UUID | None = None,
+    repo_id: Optional[UUID] = None,
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> List[SearchHistory]:
@@ -109,8 +134,8 @@ def create_benchmark(
 
 @router.get("/benchmark", response_model=List[BenchmarkResponse])
 def list_benchmarks(
-    repo_id: UUID | None = None,
-    mode: str | None = None,
+    repo_id: Optional[UUID] = None,
+    mode: Optional[str] = None,
     limit: int = 100,
     db: Session = Depends(get_db),
 ) -> List[BenchmarkResponse]:
@@ -120,7 +145,7 @@ def list_benchmarks(
 
 @router.get("/benchmark/summary", response_model=BenchmarkSummary)
 def benchmark_summary(
-    repo_id: UUID | None = None,
+    repo_id: Optional[UUID] = None,
     days: int = 7,
     db: Session = Depends(get_db),
 ) -> dict:
@@ -130,15 +155,17 @@ def benchmark_summary(
 
 @router.get("/history/stats", response_model=SearchHistoryStats)
 def search_history_stats(
-    repo_id: UUID | None = None,
+    repo_id: Optional[UUID] = None,
     db: Session = Depends(get_db),
 ) -> dict:
     """Aggregated search history stats for the current day."""
-    from datetime import date, datetime
+    from datetime import date, datetime, timezone, timedelta
 
     today = date.today()
-    start = datetime.combine(today, datetime.min.time())
-    q = db.query(SearchHistory).filter(SearchHistory.created_at >= start)
+    local_start = datetime.combine(today, datetime.min.time())
+    utc_offset = datetime.now(timezone.utc).astimezone().utcoffset() or timedelta(0)
+    utc_start = (local_start - utc_offset).replace(tzinfo=timezone.utc)
+    q = db.query(SearchHistory).filter(SearchHistory.created_at >= utc_start)
     if repo_id:
         q = q.filter(SearchHistory.repo_id == repo_id)
 

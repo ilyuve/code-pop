@@ -1,22 +1,21 @@
-"""Hybrid search engine: vector + symbol + BM25 + call graph fusion."""
+"""Hybrid search engine with intent-aware retrieval."""
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import Embedding, Symbol
-from repositories import EmbeddingRepository, SymbolRepository
+from models import CallGraphEdge, CodeFile, Embedding, Symbol
 from schemas import SearchResultItem
 from services.embedder import Embedder
+from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
 
 logger = logging.getLogger(__name__)
 
-# Fusion weights aligned with product spec.
 WEIGHT_VECTOR = 0.4
 WEIGHT_SYMBOL = 0.3
 WEIGHT_BM25 = 0.2
@@ -25,7 +24,6 @@ BONUS_VECTOR_SYMBOL = 0.1
 
 
 def _min_max_normalize(scores: List[float]) -> List[float]:
-    """Normalize scores to [0, 1] using min-max scaling."""
     if not scores:
         return scores
     min_score = min(scores)
@@ -50,10 +48,11 @@ class _Hit:
     bm25_score: float = 0.0
     graph_score: float = 0.0
     sources: set = field(default_factory=set)
+    symbol_id: Optional[UUID] = None
+    symbol_name: Optional[str] = None
 
 
 def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
-    """Map a symbol result to a hit, preferring an embedding chunk covering the symbol line."""
     repo_name = symbol.repo.name if symbol.repo else ""
     for emb in embeddings:
         if emb.start_line <= symbol.line <= emb.end_line:
@@ -68,8 +67,9 @@ def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
                 line=symbol.line,
                 symbol_score=1.0,
                 sources={"symbol"},
+                symbol_id=symbol.id,
+                symbol_name=symbol.name,
             )
-    # Fallback: symbol only, no chunk coverage.
     return _Hit(
         result_id=symbol.id,
         file_id=symbol.file_id,
@@ -81,17 +81,345 @@ def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
         line=symbol.line,
         symbol_score=1.0,
         sources={"symbol"},
+        symbol_id=symbol.id,
+        symbol_name=symbol.name,
     )
 
 
 class Searcher:
-    """Hybrid code search over pgvector, symbols, full text and call graph."""
+    """Intent-aware hybrid code search."""
 
     def __init__(self, db: Session):
         self.db = db
         self.embedder = Embedder()
         self.embedding_repo = EmbeddingRepository(db)
         self.symbol_repo = SymbolRepository(db)
+        self.intent_analyzer = get_intent_analyzer()
+
+    def search_with_context(
+        self,
+        query: str,
+        repo_id: Optional[UUID] = None,
+        limit: int = 20,
+        intent=None,
+    ) -> "CodeContext":
+        from schemas import CallChain, CodeContext, FileSummary, SymbolEntry
+
+        if intent is None:
+            intent = self.intent_analyzer.analyze(query)
+        logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
+
+        strategy = intent.search_strategy
+        hits = self._execute_strategy(intent, repo_id, limit)
+
+        entry_points = []
+        call_chain = None
+        related_files = []
+        code_snippets = []
+
+        seen_symbols = set()
+        for hit in hits[:5]:
+            if hit.symbol_id and hit.symbol_id not in seen_symbols:
+                seen_symbols.add(hit.symbol_id)
+                entry_points.append(SymbolEntry(
+                    id=str(hit.symbol_id),
+                    name=hit.symbol_name or "",
+                    type="function",
+                    file_path=hit.file_path,
+                    line=hit.line,
+                    relevance_score=hit.vector_score + hit.symbol_score,
+                ))
+
+        if strategy.include_callers or strategy.include_callees:
+            if entry_points:
+                root_symbol_id = UUID(entry_points[0].id)
+                chain = self._build_call_chain(
+                    root_symbol_id,
+                    strategy.call_depth,
+                    strategy.include_callers,
+                    strategy.include_callees,
+                )
+                call_chain = chain
+                chain_files = self._collect_chain_files(chain)
+                related_files.extend(chain_files)
+
+        seen_files = set()
+        for hit in hits[:limit]:
+            if hit.file_path not in seen_files:
+                seen_files.add(hit.file_path)
+                code_snippets.append(SearchResultItem(
+                    id=hit.result_id,
+                    file_id=hit.file_id,
+                    repo_id=hit.repo_id,
+                    repo_name=hit.repo_name,
+                    file_path=hit.file_path,
+                    language=hit.language,
+                    content=hit.content,
+                    line=hit.line,
+                    score=self._final_score(hit),
+                    score_breakdown={
+                        "vector": round(hit.vector_score, 4),
+                        "symbol": round(hit.symbol_score, 4),
+                        "bm25": round(hit.bm25_score, 4),
+                        "graph": round(hit.graph_score, 4),
+                        "final": round(self._final_score(hit), 4),
+                    },
+                ))
+
+        if not related_files:
+            for snippet in code_snippets[:8]:
+                role = self._infer_file_role(snippet.file_path)
+                related_files.append(FileSummary(
+                    path=snippet.file_path,
+                    role=role,
+                    relevance_score=snippet.score,
+                    key_symbols=[s.name for s in entry_points if s.file_path == snippet.file_path],
+                ))
+
+        return CodeContext(
+            query=query,
+            query_intent=intent.intent_type,
+            matched_concepts=intent.expanded_terms[:10],
+            entry_points=entry_points,
+            call_chain=call_chain,
+            related_files=related_files,
+            code_snippets=code_snippets,
+            total_files=len(related_files),
+            total_symbols=len(entry_points),
+            search_latency_ms=0,
+        )
+
+    def _execute_strategy(
+        self,
+        intent,
+        repo_id: Optional[UUID],
+        limit: int,
+    ) -> List[_Hit]:
+        strategy = intent.search_strategy
+        all_hits: List[_Hit] = []
+
+        search_terms = intent.expanded_terms if strategy.expand_synonyms else [intent.original]
+
+        for term in search_terms[:5]:
+            query_embedding = self.embedder.encode_query(term)
+            hits: List[_Hit] = []
+
+            if strategy.primary == "vector":
+                hits = self._vector_search(query_embedding, repo_id, limit=30)
+            elif strategy.primary == "symbol":
+                hits = self._symbol_search(term, repo_id, top_k=30)
+            elif strategy.primary == "call_graph":
+                sym_hits = self._symbol_search(term, repo_id, top_k=10)
+                hits = sym_hits
+                if strategy.include_callers or strategy.include_callees:
+                    for h in sym_hits[:3]:
+                        if h.symbol_id:
+                            graph_hits = self._graph_search_from_symbol(
+                                h.symbol_id, repo_id, strategy.call_depth
+                            )
+                            hits.extend(graph_hits)
+            elif strategy.primary == "bm25":
+                hits = self._bm25_search(term, repo_id, limit=30)
+
+            all_hits.extend(hits)
+
+        return self._fuse_multiple(all_hits)
+
+    def _build_call_chain(
+        self,
+        root_symbol_id: UUID,
+        depth: int,
+        include_callers: bool,
+        include_callees: bool,
+    ) -> "CallChain":
+        from schemas import CallChain, SymbolEntry
+
+        root = self.db.query(Symbol).filter(Symbol.id == root_symbol_id).first()
+        if not root:
+            return CallChain(
+                root=SymbolEntry(id=str(root_symbol_id), name="", type="", file_path="", line=0),
+                upstream=[], downstream=[], depth=0,
+            )
+
+        root_entry = SymbolEntry(
+            id=str(root.id),
+            name=root.name,
+            type=root.type,
+            file_path=root.file.path if root.file else "",
+            line=root.line,
+        )
+
+        upstream = []
+        downstream = []
+
+        if include_callers:
+            caller_ids = self._query_callers(root_symbol_id, depth)
+            for cid in caller_ids:
+                sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
+                if sym:
+                    upstream.append(SymbolEntry(
+                        id=str(sym.id),
+                        name=sym.name,
+                        type=sym.type,
+                        file_path=sym.file.path if sym.file else "",
+                        line=sym.line,
+                    ))
+
+        if include_callees:
+            callee_ids = self._query_callees(root_symbol_id, depth)
+            for cid in callee_ids:
+                sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
+                if sym:
+                    downstream.append(SymbolEntry(
+                        id=str(sym.id),
+                        name=sym.name,
+                        type=sym.type,
+                        file_path=sym.file.path if sym.file else "",
+                        line=sym.line,
+                    ))
+
+        return CallChain(
+            root=root_entry,
+            upstream=upstream,
+            downstream=downstream,
+            depth=depth,
+        )
+
+    def _query_callers(self, symbol_id: UUID, depth: int) -> List[UUID]:
+        results = []
+        current = {symbol_id}
+        visited = {symbol_id}
+
+        for _ in range(depth):
+            next_level = set()
+            for sid in current:
+                edges = self.db.query(CallGraphEdge).filter(
+                    CallGraphEdge.target_symbol_id == sid
+                ).all()
+                for edge in edges:
+                    if edge.source_symbol_id not in visited:
+                        visited.add(edge.source_symbol_id)
+                        next_level.add(edge.source_symbol_id)
+                        results.append(edge.source_symbol_id)
+            current = next_level
+            if not current:
+                break
+
+        return results
+
+    def _query_callees(self, symbol_id: UUID, depth: int) -> List[UUID]:
+        results = []
+        current = {symbol_id}
+        visited = {symbol_id}
+
+        for _ in range(depth):
+            next_level = set()
+            for sid in current:
+                edges = self.db.query(CallGraphEdge).filter(
+                    CallGraphEdge.source_symbol_id == sid
+                ).all()
+                for edge in edges:
+                    if edge.target_symbol_id not in visited:
+                        visited.add(edge.target_symbol_id)
+                        next_level.add(edge.target_symbol_id)
+                        results.append(edge.target_symbol_id)
+            current = next_level
+            if not current:
+                break
+
+        return results
+
+    def _graph_search_from_symbol(
+        self,
+        symbol_id: UUID,
+        repo_id: Optional[UUID],
+        depth: int,
+    ) -> List[_Hit]:
+        related_ids = set()
+        related_ids.update(self._query_callers(symbol_id, depth))
+        related_ids.update(self._query_callees(symbol_id, depth))
+
+        if not related_ids:
+            return []
+
+        symbols = self.db.query(Symbol).filter(Symbol.id.in_(list(related_ids)))
+        if repo_id:
+            symbols = symbols.filter(Symbol.repo_id == repo_id)
+        symbols = symbols.all()
+
+        hits = []
+        for sym in symbols:
+            embeddings = self._file_embeddings(sym.file_id)
+            hit = _symbol_to_hit(sym, embeddings)
+            hit.graph_score = 0.7
+            hit.sources.add("graph")
+            hits.append(hit)
+
+        return hits
+
+    def _collect_chain_files(self, chain) -> List["FileSummary"]:
+        from schemas import FileSummary
+
+        file_scores: Dict[str, float] = {}
+        file_symbols: Dict[str, List[str]] = {}
+
+        for sym in [chain.root] + chain.upstream + chain.downstream:
+            path = sym.file_path
+            if path not in file_scores:
+                file_scores[path] = 0.0
+                file_symbols[path] = []
+            file_scores[path] += 1.0
+            file_symbols[path].append(sym.name)
+
+        results = []
+        for path, score in sorted(file_scores.items(), key=lambda x: -x[1]):
+            role = self._infer_file_role(path)
+            results.append(FileSummary(
+                path=path,
+                role=role,
+                relevance_score=min(score / 5.0, 1.0),
+                key_symbols=file_symbols.get(path, [])[:5],
+            ))
+
+        return results
+
+    def _infer_file_role(self, file_path: str) -> str:
+        path_lower = file_path.lower()
+        name = file_path.split("/")[-1].lower()
+
+        if "test" in path_lower or "spec" in name:
+            return "test"
+        if "controller" in name or "handler" in name or "route" in name:
+            return "controller"
+        if "service" in name or "biz" in name or "business" in name:
+            return "service"
+        if "repository" in name or "dao" in name or "mapper" in name or "data" in name:
+            return "repository"
+        if "config" in name or "settings" in name or "properties" in name:
+            return "config"
+        if "model" in name or "entity" in name or "domain" in name or "po" in name:
+            return "model"
+        if "util" in name or "helper" in name or "common" in name:
+            return "utility"
+        if "middleware" in name or "interceptor" in name or "filter" in name:
+            return "middleware"
+        return "other"
+
+    def _fuse_multiple(self, hits: List[_Hit]) -> List[_Hit]:
+        by_id: Dict[UUID, _Hit] = {}
+
+        for hit in hits:
+            if hit.result_id in by_id:
+                existing = by_id[hit.result_id]
+                existing.vector_score = max(existing.vector_score, hit.vector_score)
+                existing.symbol_score = max(existing.symbol_score, hit.symbol_score)
+                existing.bm25_score = max(existing.bm25_score, hit.bm25_score)
+                existing.graph_score = max(existing.graph_score, hit.graph_score)
+                existing.sources.update(hit.sources)
+            else:
+                by_id[hit.result_id] = hit
+
+        return list(by_id.values())
 
     def hybrid_search(
         self,
@@ -124,15 +452,12 @@ class Searcher:
         hits.sort(key=lambda h: h.symbol_score, reverse=True)
         return [self._to_schema(hit) for hit in hits[:limit]]
 
-    # ------------------------------------------------------------------
-    # Recall paths
-    # ------------------------------------------------------------------
-
     def _vector_search(
         self,
         query_embedding: List[float],
         repo_id: Optional[UUID],
         top_k: int = 50,
+        limit: int = 50,
     ) -> List[_Hit]:
         rows = self.embedding_repo.vector_search(query_embedding, repo_id, top_k)
 
@@ -177,7 +502,6 @@ class Searcher:
         for sym in symbols:
             embeddings = self._file_embeddings(sym.file_id)
             hit = _symbol_to_hit(sym, embeddings)
-            # Score by match quality: exact > prefix > contains.
             if sym.name == query:
                 hit.symbol_score = 1.0
             elif sym.name.lower().startswith(query.lower()):
@@ -193,7 +517,6 @@ class Searcher:
         repo_id: Optional[UUID],
         top_k: int = 50,
     ) -> List[_Hit]:
-        # Use PostgreSQL full-text ranking. Try english then simple for code mixed text.
         sql = text(
             """
             SELECT e.id AS embedding_id,
@@ -276,10 +599,6 @@ class Searcher:
             hits.append(hit)
         return hits
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _file_embeddings(self, file_id: UUID) -> List[Embedding]:
         return self.embedding_repo.get_by_file_id(file_id)
 
@@ -310,7 +629,6 @@ class Searcher:
         for hit in graph_results:
             merge(hit, "graph_score")
 
-        # Normalize each signal across the candidate pool.
         hits = list(by_id.values())
         for attr in ("vector_score", "symbol_score", "bm25_score", "graph_score"):
             scores = [getattr(h, attr) for h in hits]
@@ -350,3 +668,6 @@ class Searcher:
                 "final": round(self._final_score(hit), 4),
             },
         )
+
+
+from repositories import EmbeddingRepository, SymbolRepository

@@ -11,13 +11,17 @@ from tree_sitter import Language, Parser
 
 logger = logging.getLogger(__name__)
 
+# Cache language and parser objects to avoid repeated C-level allocations
+# that can cause memory corruption.
+_language_cache: Dict[str, Optional[Language]] = {}
+_parser_cache: Dict[str, Optional["Parser"]] = {}
+
 
 def _load_language(language: str) -> Optional[Language]:
-    """Lazy load tree-sitter language binding.
+    """Lazy load tree-sitter language binding with caching."""
+    if language in _language_cache:
+        return _language_cache[language]
 
-    tree-sitter 0.24+ language bindings return Language objects directly,
-    while older bindings return function pointers that need wrapping.
-    """
     binding = None
     try:
         if language == "python":
@@ -47,24 +51,49 @@ def _load_language(language: str) -> Optional[Language]:
             binding = cpp_language
     except Exception as exc:
         logger.warning("Language binding unavailable for %s: %s", language, exc)
+        _language_cache[language] = None
         return None
 
     if binding is None:
+        _language_cache[language] = None
         return None
 
     # tree-sitter 0.24 bindings: language is already a Language object
     if isinstance(binding, Language):
+        _language_cache[language] = binding
         return binding
 
     # Older bindings: language is a callable returning the language pointer
     try:
         if callable(binding):
-            return Language(binding())
+            lang = Language(binding())
+            _language_cache[language] = lang
+            return lang
     except Exception as exc:
         logger.warning("Failed to wrap language binding for %s: %s", language, exc)
+        _language_cache[language] = None
         return None
 
+    _language_cache[language] = None
     return None
+
+
+def _get_parser(language: str) -> Optional[Parser]:
+    """Get a cached parser for the given language."""
+    if language in _parser_cache:
+        return _parser_cache[language]
+    lang = _load_language(language)
+    if lang is None:
+        _parser_cache[language] = None
+        return None
+    try:
+        parser = Parser(lang)
+        _parser_cache[language] = parser
+        return parser
+    except Exception as exc:
+        logger.warning("Failed to create parser for %s: %s", language, exc)
+        _parser_cache[language] = None
+        return None
 
 
 LANGUAGE_BY_EXTENSION: Dict[str, str] = {
@@ -331,38 +360,53 @@ def _chunk_by_lines(lines: List[str], max_lines: int) -> List[Chunk]:
 
 
 def parse_file(file_path: str, content: str, max_chunk_lines: int = 200) -> Optional[ParseResult]:
-    """Parse source code and extract symbols, chunks and call edges."""
+    """Parse source code and extract symbols, chunks and call edges.
+
+    Python files use the stdlib `ast` module (no C-level crash, full Unicode
+    support). Other languages use tree-sitter in-process; on parse failure we
+    log and return None so the indexer can skip the file -- we do NOT silently
+    degrade to line-only chunks, which would lose symbols and call edges.
+    """
     language = detect_language(file_path)
     if language is None:
         return None
 
-    lang = _load_language(language)
-    if lang is None:
-        logger.warning("Language binding unavailable: %s", language)
+    content_bytes = content.encode("utf-8")
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    size_bytes = len(content_bytes)
+    lines = content.split("\n")
+
+    if language == "python":
+        # Stdlib ast: pure Python, never crashes the interpreter, handles UTF-8 natively.
+        from services.py_parser import parse_python
+
+        return parse_python(file_path, content, max_chunk_lines)
+
+    parser = _get_parser(language)
+    if parser is None:
+        logger.warning("No tree-sitter parser available for language %s (%s)", language, file_path)
         return None
 
     try:
-        parser = Parser(lang)
-        tree = parser.parse(content.encode("utf-8"))
-        root = tree.root_node
-
-        symbols = _extract_symbols(root, language)
-        calls = _extract_calls(root, symbols)
-        lines = content.split("\n")
-        chunks = _chunk_by_symbols(lines, symbols, max_chunk_lines)
-
-        return ParseResult(
-            file_path=file_path,
-            language=language,
-            symbols=symbols,
-            chunks=chunks,
-            size_bytes=len(content.encode("utf-8")),
-            content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
-            calls=calls,
-        )
+        tree = parser.parse(content_bytes)
     except Exception as exc:
-        logger.warning("Failed to parse %s: %s", file_path, exc)
+        logger.warning("tree-sitter failed to parse %s: %s", file_path, exc)
         return None
+
+    root = tree.root_node
+    symbols = _extract_symbols(root, language)
+    calls = _extract_calls(root, symbols)
+    chunks = _chunk_by_symbols(lines, symbols, max_chunk_lines)
+
+    return ParseResult(
+        file_path=file_path,
+        language=language,
+        symbols=symbols,
+        chunks=chunks,
+        size_bytes=size_bytes,
+        content_hash=content_hash,
+        calls=calls,
+    )
 
 
 def list_source_files(repo_path: Path) -> List[Path]:

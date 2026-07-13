@@ -12,23 +12,73 @@ import {
   ChevronDown,
   Folder,
   Code,
+  LogOut,
+  XCircle,
+  Info,
+  AlertTriangle,
+  Terminal,
+  ChevronUp,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
-import { fetchRepoFiles, fetchRepoSymbols } from '../api';
+import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing } from '../api';
 import { clsx } from 'clsx';
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 export const RepoDetail = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { deleteRepo, reindex, isDeleting, isReindexing } = useRepos();
   const { data: repo, isLoading, error } = useRepo(id!);
-  const { isIndexing, progress, stageProgress, currentStageLabel, error: indexingError } = useIndexing(id!);
+  const { isIndexing, progress, stageProgress, currentStageLabel, error: indexingError, logs } = useIndexing(id!, repo);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [showLogs, setShowLogs] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (showLogs && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
+  }, [logs, showLogs]);
+
+  const handleCancel = async () => {
+    if (window.confirm('确定要取消当前索引进程吗？')) {
+      setIsCanceling(true);
+      try {
+        await cancelIndexing(id!);
+        setIsCanceling(false);
+      } catch (err) {
+        console.error('Failed to cancel indexing:', err);
+        setIsCanceling(false);
+      }
+    }
+  };
+
+  const getLogIcon = (level: string) => {
+    switch (level) {
+      case 'error':
+        return <XCircle className="w-4 h-4 text-red-500" />;
+      case 'warning':
+        return <AlertTriangle className="w-4 h-4 text-yellow-500" />;
+      default:
+        return <Info className="w-4 h-4 text-blue-500" />;
+    }
+  };
+
+  const getLogLevelColor = (level: string) => {
+    switch (level) {
+      case 'error':
+        return 'text-red-600 dark:text-red-400';
+      case 'warning':
+        return 'text-yellow-600 dark:text-yellow-400';
+      default:
+        return 'text-slate-600 dark:text-slate-400';
+    }
+  };
 
   const { data: files = [] } = useQuery({
     queryKey: ['repoFiles', id],
@@ -231,14 +281,30 @@ export const RepoDetail = () => {
       {(isIndexing || repo.status === 'indexing') && progress && (
         <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
-              索引进度
-            </h3>
-            {currentStageLabel && (
-              <span className="text-sm font-medium px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400">
-                {currentStageLabel}
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
+                索引进度
+              </h3>
+              <span className="flex items-center gap-1 text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-full">
+                <div className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse" />
+                进行中
               </span>
-            )}
+            </div>
+            <div className="flex items-center gap-3">
+              {currentStageLabel && (
+                <span className="text-sm font-medium px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400">
+                  {currentStageLabel}
+                </span>
+              )}
+              <button
+                onClick={handleCancel}
+                disabled={isCanceling}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+              >
+                {isCanceling ? <LoadingSpinner size="sm" /> : <LogOut className="w-4 h-4" />}
+                取消索引
+              </button>
+            </div>
           </div>
 
           {/* Overall progress */}
@@ -251,7 +317,7 @@ export const RepoDetail = () => {
             </div>
             <div className="h-3 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
-                className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-500"
                 style={{ width: `${progress.percentage}%` }}
               />
             </div>
@@ -281,6 +347,148 @@ export const RepoDetail = () => {
             <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg">
               <AlertCircle className="w-5 h-5 shrink-0" />
               <span>{indexingError}</span>
+            </div>
+          )}
+
+          {/* Logs Section */}
+          <div className="border-t border-slate-200 dark:border-slate-700 pt-4">
+            <button
+              onClick={() => setShowLogs(!showLogs)}
+              className="flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
+            >
+              <Terminal className="w-4 h-4" />
+              索引日志
+              {logs.length > 0 && (
+                <span className="px-2 py-0.5 text-xs bg-slate-100 dark:bg-slate-700 rounded-full">
+                  {logs.length}
+                </span>
+              )}
+              {showLogs ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {showLogs && (
+              <div
+                ref={logsContainerRef}
+                className="mt-3 h-48 overflow-y-auto bg-slate-50 dark:bg-slate-900 rounded-lg p-4 font-mono text-xs space-y-2"
+              >
+                {logs.length === 0 ? (
+                  <p className="text-slate-500 dark:text-slate-400">暂无日志信息</p>
+                ) : (
+                  logs.map((log, idx) => (
+                    <div key={idx} className="flex items-start gap-2">
+                      {getLogIcon(log.level)}
+                      <div className="flex-1">
+                        <span className="text-slate-400 mr-2">
+                          {new Date(log.timestamp).toLocaleTimeString()}
+                        </span>
+                        <span className={getLogLevelColor(log.level)}>
+                          {log.message}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Error Message */}
+      {repo.status === 'error' && repo.errorMessage && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6">
+          <div className="flex items-start gap-4">
+            <div className="p-2 bg-red-100 dark:bg-red-800 rounded-lg">
+              <AlertCircle className="w-6 h-6 text-red-600 dark:text-red-400" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-red-800 dark:text-red-300 mb-2">
+                索引失败
+              </h3>
+              <p className="text-sm text-red-700 dark:text-red-400 leading-relaxed mb-4">
+                {repo.errorMessage}
+              </p>
+
+              <div className="bg-white/50 dark:bg-slate-800/50 rounded-lg p-4 mb-4">
+                <h4 className="text-sm font-semibold text-red-800 dark:text-red-300 mb-2 flex items-center gap-2">
+                  <Info className="w-4 h-4" />
+                  可能的解决方案
+                </h4>
+                <ul className="text-xs text-red-600 dark:text-red-400 space-y-1.5">
+                  {repo.errorMessage?.includes('git') && (
+                    <li className="flex items-start gap-2">
+                      <span className="text-red-500">•</span>
+                      检查 Git 仓库 URL 是否正确，网络是否可以访问
+                    </li>
+                  )}
+                  {repo.errorMessage?.includes('embed') || repo.errorMessage?.includes('vector') ? (
+                    <li className="flex items-start gap-2">
+                      <span className="text-red-500">•</span>
+                      检查模型文件是否已正确下载，尝试重新运行 scripts/download_models.py
+                    </li>
+                  ) : null}
+                  {repo.errorMessage?.includes('memory') || repo.errorMessage?.includes('OOM') ? (
+                    <li className="flex items-start gap-2">
+                      <span className="text-red-500">•</span>
+                      当前可用内存不足，尝试关闭其他应用或增加系统内存
+                    </li>
+                  ) : null}
+                  {repo.errorMessage?.includes('database') || repo.errorMessage?.includes('sqlite') ? (
+                    <li className="flex items-start gap-2">
+                      <span className="text-red-500">•</span>
+                      检查数据库文件权限，确保有读写权限
+                    </li>
+                  ) : null}
+                  <li className="flex items-start gap-2">
+                    <span className="text-red-500">•</span>
+                    查看下方索引日志获取详细错误信息
+                  </li>
+                </ul>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={handleReindex}
+                  disabled={isReindexing}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
+                >
+                  <RefreshCw className={clsx('w-4 h-4', isReindexing && 'animate-spin')} />
+                  重新索引
+                </button>
+                <button
+                  onClick={() => setShowLogs(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-700 text-red-600 dark:text-red-400 rounded-lg font-medium transition-colors border border-red-200 dark:border-red-700"
+                >
+                  <Terminal className="w-4 h-4" />
+                  查看日志
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {showLogs && (
+            <div className="mt-4 border-t border-red-200 dark:border-red-800 pt-4">
+              <div
+                ref={logsContainerRef}
+                className="h-48 overflow-y-auto bg-slate-50 dark:bg-slate-900 rounded-lg p-4 font-mono text-xs space-y-2"
+              >
+                {logs.length === 0 ? (
+                  <p className="text-slate-500 dark:text-slate-400">暂无日志信息</p>
+                ) : (
+                  logs.map((log, idx) => (
+                    <div key={idx} className="flex items-start gap-2">
+                      {getLogIcon(log.level)}
+                      <div className="flex-1">
+                        <span className="text-slate-400 mr-2">
+                          {new Date(log.timestamp).toLocaleTimeString()}
+                        </span>
+                        <span className={getLogLevelColor(log.level)}>
+                          {log.message}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 
@@ -49,9 +49,11 @@ class WSNotifier:
         repo_id: str,
         status: str,
         progress: float,
-        error: str | None = None,
-        stage: str | None = None,
-        stage_progress: dict | None = None,
+        error: Optional[str] = None,
+        stage: Optional[str] = None,
+        stage_progress: Optional[dict] = None,
+        log_message: Optional[str] = None,
+        log_level: str = "info",
     ) -> None:
         payload: dict = {
             "type": "repo_update",
@@ -62,8 +64,27 @@ class WSNotifier:
             "stage_progress": stage_progress,
             "error": error,
         }
-        # Keep the wire format compact by omitting empty optional fields.
+        
+        if log_message:
+            payload["log"] = {
+                "message": log_message,
+                "level": log_level,
+                "timestamp": json.dumps({"__type__": "datetime", "value": None}),
+            }
+        
         await self.broadcast({k: v for k, v in payload.items() if v is not None})
+
+    async def send_indexing_log(
+        self,
+        repo_id: str,
+        logs: List[Dict[str, str]],
+    ) -> None:
+        payload: dict = {
+            "type": "indexing_logs",
+            "repoId": repo_id,
+            "logs": logs,
+        }
+        await self.broadcast(payload)
 
 
 notifier = WSNotifier()

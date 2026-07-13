@@ -18,15 +18,8 @@ def init_db() -> None:
     logger.info("Creating tables...")
     Base.metadata.create_all(bind=engine)
 
-    logger.info("Creating HNSW vector index...")
+    logger.info("Creating indexes...")
     with engine.connect() as conn:
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS idx_embeddings_vector "
-                "ON embeddings USING hnsw (embedding vector_cosine_ops) "
-                "WITH (m = 16, ef_construction = 64)"
-            )
-        )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS idx_symbols_name "
@@ -47,6 +40,22 @@ def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS idx_embeddings_content_fts "
                 "ON embeddings USING GIN (to_tsvector('english', content))"
+            )
+        )
+        conn.commit()
+
+    logger.info("Adding missing columns to repositories table...")
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS repositories "
+                "ADD COLUMN IF NOT EXISTS error_message TEXT"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS repositories "
+                "ALTER COLUMN git_url DROP NOT NULL"
             )
         )
         conn.commit()

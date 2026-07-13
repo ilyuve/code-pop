@@ -36,9 +36,13 @@ services:
       API_PORT: 8080
       LOG_LEVEL: INFO
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-16}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
     volumes:
       - ./repos:/app/repos
+      - hf_cache:/root/.cache/huggingface
     ports:
       - "8080:8080"
     depends_on:
@@ -64,6 +68,7 @@ services:
 
 volumes:
   pgdata:
+  hf_cache:
 
 networks:
   codepop-network:

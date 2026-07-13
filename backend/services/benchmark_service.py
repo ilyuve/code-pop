@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import func
@@ -17,7 +17,7 @@ from services.searcher import Searcher
 class BenchmarkService:
     """Handles benchmark execution and reporting."""
 
-    def __init__(self, db: Session, searcher: Searcher | None = None):
+    def __init__(self, db: Session, searcher: Optional[Searcher] = None):
         self.db = db
         self.searcher = searcher or Searcher(db)
         self.embedder = Embedder()
@@ -27,7 +27,7 @@ class BenchmarkService:
         total_chars = sum(len(getattr(r, "content", "")) for r in results)
         return max(0, total_chars // 4)
 
-    def _baseline_keyword_search(self, query: str, repo_id: UUID | None, limit: int = 20):
+    def _baseline_keyword_search(self, query: str, repo_id: Optional[UUID], limit: int = 20):
         """Naive baseline: keyword AND scan over file contents."""
         start = time.perf_counter()
         q = self.db.query(CodeFile)
@@ -103,7 +103,7 @@ class BenchmarkService:
         return run
 
     def list_benchmarks(
-        self, repo_id: UUID | None = None, mode: str | None = None, limit: int = 100
+        self, repo_id: Optional[UUID] = None, mode: Optional[str] = None, limit: int = 100
     ) -> List[BenchmarkRun]:
         q = self.db.query(BenchmarkRun)
         if repo_id:
@@ -112,7 +112,7 @@ class BenchmarkService:
             q = q.filter(BenchmarkRun.mode == mode)
         return q.order_by(BenchmarkRun.created_at.desc()).limit(limit).all()
 
-    def get_summary(self, repo_id: UUID | None = None, days: int = 7) -> BenchmarkSummary:
+    def get_summary(self, repo_id: Optional[UUID] = None, days: int = 7) -> BenchmarkSummary:
         q = self.db.query(BenchmarkRun)
         if repo_id:
             q = q.filter(BenchmarkRun.repo_id == repo_id)

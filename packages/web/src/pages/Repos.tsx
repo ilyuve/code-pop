@@ -1,10 +1,22 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Plus, X, FolderGit2, GitBranch } from 'lucide-react';
 import { useRepos } from '../hooks/useRepos';
 import { RepoCard } from '../components/RepoCard';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
+import { useStore } from '../store';
 
 type AddType = 'path' | 'git';
+
+interface IndexingProgress {
+  progress: number;
+  stage: string;
+  stageProgress: {
+    stage: string;
+    current: number;
+    total: number;
+    percentage: number;
+  } | null;
+}
 
 export const Repos = () => {
   const {
@@ -18,22 +30,97 @@ export const Repos = () => {
     isReindexing,
   } = useRepos();
 
+  const addRealTimeUpdate = useStore((state) => state.addRealTimeUpdate);
+
   const [showAddModal, setShowAddModal] = useState(false);
   const [addType, setAddType] = useState<AddType>('path');
   const [pathInput, setPathInput] = useState('');
   const [gitUrlInput, setGitUrlInput] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [indexingProgress, setIndexingProgress] = useState<Record<string, IndexingProgress>>({});
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectDelayRef = useRef(1000);
+
+  const connectWebSocket = () => {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    
+    wsRef.current = new WebSocket(wsUrl);
+
+    wsRef.current.onopen = () => {
+      console.log('WebSocket connected');
+      reconnectDelayRef.current = 1000;
+    };
+
+    wsRef.current.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'repo_update') {
+          const { repoId, progress, stage, stage_progress, error, log } = data;
+          setIndexingProgress(prev => ({
+            ...prev,
+            [repoId]: {
+              progress: progress || 0,
+              stage: stage || '',
+              stageProgress: stage_progress || null,
+            },
+          }));
+          addRealTimeUpdate(`repo_${repoId}`, {
+            progress,
+            stage,
+            stage_progress,
+            error,
+            log,
+          });
+        }
+      } catch (e) {
+        console.error('Failed to parse WebSocket message:', e);
+      }
+    };
+
+    wsRef.current.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    wsRef.current.onclose = (event) => {
+      console.log('WebSocket disconnected, reconnecting in', reconnectDelayRef.current, 'ms');
+      setTimeout(() => {
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          connectWebSocket();
+        }
+      }, reconnectDelayRef.current);
+      reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, 30000);
+    };
+  };
+
+  useEffect(() => {
+    connectWebSocket();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Component unmount');
+      }
+    };
+  }, [addRealTimeUpdate]);
 
   const handleAdd = () => {
     if (addType === 'path' && pathInput.trim()) {
-      addRepo({ path: pathInput.trim() });
-      setPathInput('');
-      setShowAddModal(false);
+      addRepo({ path: pathInput.trim() }, { onSuccess: handleAddSuccess, onError: handleAddError });
     } else if (addType === 'git' && gitUrlInput.trim()) {
-      addRepo({ gitUrl: gitUrlInput.trim() });
-      setGitUrlInput('');
-      setShowAddModal(false);
+      addRepo({ gitUrl: gitUrlInput.trim() }, { onSuccess: handleAddSuccess, onError: handleAddError });
     }
+  };
+
+  const handleAddSuccess = () => {
+    setPathInput('');
+    setGitUrlInput('');
+    setShowAddModal(false);
+  };
+
+  const handleAddError = (error: any) => {
+    console.error('Add repo error:', error);
+    const detail = error?.response?.data?.detail || error?.message || '添加仓库失败';
+    alert(`添加失败: ${detail}`);
   };
 
   const filteredRepos = repos.filter((repo) => {
@@ -96,16 +183,22 @@ export const Repos = () => {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {filteredRepos.map((repo) => (
-            <RepoCard
-              key={repo.id}
-              repo={repo}
-              onDelete={deleteRepo}
-              onReindex={reindex}
-              isDeleting={isDeleting}
-              isReindexing={isReindexing}
-            />
-          ))}
+          {filteredRepos.map((repo) => {
+            const progress = indexingProgress[repo.id];
+            return (
+              <RepoCard
+                key={repo.id}
+                repo={repo}
+                onDelete={deleteRepo}
+                onReindex={reindex}
+                isDeleting={isDeleting}
+                isReindexing={isReindexing}
+                indexingProgress={progress?.progress || 0}
+                indexingStage={progress?.stage || ''}
+                stageProgress={progress?.stageProgress || undefined}
+              />
+            );
+          })}
         </div>
       )}
 

@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Sparkles,
+  Activity,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { clsx } from 'clsx';
@@ -17,6 +18,7 @@ const navItems = [
   { path: '/repos', icon: FolderGit2, label: '仓库', color: '#2ad4ff' },
   { path: '/search', icon: Search, label: '搜索', color: '#fff34d' },
   { path: '/benchmark', icon: BarChart3, label: '评测', color: '#b88dff' },
+  { path: '/monitor', icon: Activity, label: '监控', color: '#ff6b6b' },
   { path: '/settings', icon: Settings, label: '设置', color: '#6effb0' },
 ];
 

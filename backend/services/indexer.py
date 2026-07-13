@@ -1,7 +1,9 @@
 """Repository indexing orchestration: git -> parse -> embed -> store."""
 
 import asyncio
+import gc
 import logging
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal
-from models import CallGraphEdge, CodeFile, Embedding, RepoStatus, Repository, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, IndexingLog, IndexingProgress, RepoStatus, Repository, Symbol
 from services.embedder import Embedder
 from services.notifier import notifier
 from services.parser import (
@@ -28,7 +30,115 @@ from services.repo_sync import clone_or_pull
 logger = logging.getLogger(__name__)
 
 # Isolated executor for CPU-bound parsing and embedding.
-_index_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="indexer-")
+_index_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indexer-")
+
+# Track active indexing tasks per repository.
+_active_indexing_tasks: Dict[str, asyncio.Future] = {}
+_indexing_locks: Dict[str, asyncio.Lock] = {}
+
+# Store indexing logs per repository.
+_indexing_logs: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _get_indexing_lock(repo_id: str) -> asyncio.Lock:
+    """Get or create a lock for a repository's indexing task."""
+    if repo_id not in _indexing_locks:
+        _indexing_locks[repo_id] = asyncio.Lock()
+    return _indexing_locks[repo_id]
+
+
+def _cancel_indexing(repo_id: str) -> bool:
+    """Cancel an ongoing indexing task for a repository."""
+    task = _active_indexing_tasks.get(repo_id)
+    if task and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
+def _clear_indexing_state(repo_id: str) -> None:
+    """Clean up indexing state for a repository."""
+    if repo_id in _active_indexing_tasks:
+        del _active_indexing_tasks[repo_id]
+
+
+def _get_indexing_logs(repo_id: str) -> List[Dict[str, Any]]:
+    """Get indexing logs for a repository."""
+    return _indexing_logs.get(repo_id, [])
+
+
+def _clear_indexing_logs(repo_id: str) -> None:
+    """Clear indexing logs for a repository."""
+    if repo_id in _indexing_logs:
+        del _indexing_logs[repo_id]
+
+
+def _add_log(db: Optional[Session], repo_id: str, level: str, message: str, stage: Optional[str] = None) -> None:
+    """Add an indexing log entry for a repository (both in-memory and database)."""
+    if repo_id not in _indexing_logs:
+        _indexing_logs[repo_id] = []
+    log_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "level": level,
+        "message": message,
+        "stage": stage,
+    }
+    _indexing_logs[repo_id].append(log_entry)
+    print(f"[INDEXER LOG] {level.upper()} [{stage}] {message}", flush=True)
+    
+    if db:
+        try:
+            db_log = IndexingLog(
+                repo_id=UUID(repo_id),
+                level=level,
+                stage=stage,
+                message=message,
+            )
+            db.add(db_log)
+            db.flush()
+            db.commit()
+        except Exception as exc:
+            logger.warning("Failed to write log to database: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+
+def _update_progress(db: Session, repo_id: str, stage: str, progress: int, current: int, total: int, status: str, message: Optional[str] = None) -> None:
+    """Update indexing progress in the database."""
+    try:
+        existing = db.query(IndexingProgress).filter(
+            IndexingProgress.repo_id == UUID(repo_id),
+            IndexingProgress.stage == stage
+        ).first()
+        
+        if existing:
+            existing.progress = progress
+            existing.current = current
+            existing.total = total
+            existing.status = status
+            if message:
+                existing.message = message
+        else:
+            db.add(IndexingProgress(
+                repo_id=UUID(repo_id),
+                stage=stage,
+                progress=progress,
+                current=current,
+                total=total,
+                status=status,
+                message=message,
+            ))
+        db.flush()
+        db.commit()
+        logger.info(f"Progress updated: {repo_id} - {stage}: {progress}%")
+    except Exception as exc:
+        logger.warning("Failed to update progress: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _notify(
@@ -36,15 +146,34 @@ def _notify(
     repo_id: str,
     status: str,
     progress: float,
-    error: str | None = None,
-    stage: str | None = None,
-    stage_progress: dict | None = None,
+    error: Optional[str] = None,
+    stage: Optional[str] = None,
+    stage_progress: Optional[dict] = None,
+    log_message: Optional[str] = None,
+    log_level: str = "info",
+    db: Optional[Session] = None,
 ) -> None:
     """Schedule a WebSocket notification on the main event loop from a worker thread."""
+    if log_message:
+        _add_log(db, repo_id, log_level, log_message, stage)
+    
+    if db and stage:
+        _update_progress(
+            db,
+            repo_id,
+            stage,
+            int(progress),
+            stage_progress.get("current", 0) if stage_progress else 0,
+            stage_progress.get("total", 0) if stage_progress else 0,
+            status,
+            log_message,
+        )
+    
     try:
         asyncio.run_coroutine_threadsafe(
             notifier.send_repo_update(
-                repo_id, status, progress, error, stage=stage, stage_progress=stage_progress
+                repo_id, status, progress, error, stage=stage, stage_progress=stage_progress,
+                log_message=log_message, log_level=log_level
             ),
             loop,
         )
@@ -150,7 +279,7 @@ def _bulk_insert_symbols_and_embeddings(
 
     batch_size = settings.index_batch_size
 
-    # ---- Stage 2: symbol parsing (30% -> 50%) ----
+    # ---- Stage 2: symbol parsing (35% -> 55%) ----
     symbol_mappings: List[Dict[str, Any]] = []
     for code_file, parsed in file_records:
         for sym in parsed.symbols:
@@ -173,18 +302,19 @@ def _bulk_insert_symbols_and_embeddings(
     logger.info("Inserting %d symbols", total_symbols)
     if not symbol_mappings:
         _notify(
-            loop,
-            repo_id_str,
-            RepoStatus.indexing.value,
-            50.0,
-            stage="symbols",
-            stage_progress={
-                "stage": "symbols",
-                "current": 0,
-                "total": 0,
-                "percentage": 100.0,
-            },
-        )
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                55.0,
+                stage="symbols",
+                stage_progress={
+                    "stage": "symbols",
+                    "current": 0,
+                    "total": 0,
+                    "percentage": 100.0,
+                },
+                db=db,
+            )
     else:
         for i in range(0, total_symbols, batch_size):
             batch = symbol_mappings[i : i + batch_size]
@@ -192,7 +322,7 @@ def _bulk_insert_symbols_and_embeddings(
             db.flush()
             inserted = min(i + batch_size, total_symbols)
             pct = (inserted / total_symbols * 100.0) if total_symbols else 100.0
-            overall = 30.0 + (inserted / total_symbols * 20.0) if total_symbols else 50.0
+            overall = 35.0 + (inserted / total_symbols * 20.0) if total_symbols else 55.0
             _notify(
                 loop,
                 repo_id_str,
@@ -205,9 +335,10 @@ def _bulk_insert_symbols_and_embeddings(
                     "total": total_symbols,
                     "percentage": round(pct, 2),
                 },
+                db=db,
             )
 
-    # ---- Stage 3: vector generation (50% -> 75%) ----
+    # ---- Stage 3: vector generation (55% -> 80%) ----
     embedding_mappings: List[Dict[str, Any]] = []
     texts_to_embed: List[str] = []
     meta: List[Tuple[UUID, int, int, int, int]] = []  # (file_id, chunk_index, start_line, end_line, token_count)
@@ -219,12 +350,28 @@ def _bulk_insert_symbols_and_embeddings(
 
     total_chunks = len(texts_to_embed)
     logger.info("Encoding %d chunks", total_chunks)
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        55.0,
+        stage="embeddings",
+        stage_progress={
+            "stage": "embeddings",
+            "current": 0,
+            "total": total_chunks,
+            "percentage": 0.0,
+        },
+        log_message=f"开始生成向量，共 {total_chunks} 个 chunks",
+        db=db,
+    )
+
     if not texts_to_embed:
         _notify(
             loop,
             repo_id_str,
             RepoStatus.indexing.value,
-            75.0,
+            80.0,
             stage="embeddings",
             stage_progress={
                 "stage": "embeddings",
@@ -232,11 +379,39 @@ def _bulk_insert_symbols_and_embeddings(
                 "total": 0,
                 "percentage": 100.0,
             },
+            log_message="无 chunks 需要编码",
+            db=db,
         )
         return
 
     embedder = Embedder()
-    vectors = embedder.encode(texts_to_embed)
+    encode_batch_size = min(64, total_chunks)
+    vectors: List[Any] = []
+    
+    for i in range(0, total_chunks, encode_batch_size):
+        batch_texts = texts_to_embed[i : i + encode_batch_size]
+        batch_vectors = embedder.encode(batch_texts)
+        vectors.extend(batch_vectors)
+        
+        encoded = min(i + encode_batch_size, total_chunks)
+        encode_pct = (encoded / total_chunks * 100.0) if total_chunks else 100.0
+        encode_overall = 55.0 + (encoded / total_chunks * 12.5)
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            encode_overall,
+            stage="embeddings",
+            stage_progress={
+                "stage": "embeddings",
+                "current": encoded,
+                "total": total_chunks,
+                "percentage": round(encode_pct, 2),
+            },
+            log_message=f"已编码 {encoded}/{total_chunks} chunks",
+            db=db,
+        )
+
     for text_idx, (vector, mapping_meta) in enumerate(zip(vectors, meta)):
         file_id, chunk_index, start_line, end_line, token_count = mapping_meta
         embedding_mappings.append(
@@ -254,13 +429,29 @@ def _bulk_insert_symbols_and_embeddings(
 
     # Batch insert embeddings.
     total_embeddings = len(embedding_mappings)
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        67.5,
+        stage="embeddings",
+        stage_progress={
+            "stage": "embeddings",
+            "current": 0,
+            "total": total_embeddings,
+            "percentage": 0.0,
+        },
+        log_message=f"开始插入向量，共 {total_embeddings} 条",
+        db=db,
+    )
+
     for i in range(0, total_embeddings, batch_size):
         batch = embedding_mappings[i : i + batch_size]
         db.bulk_insert_mappings(Embedding, batch)
         db.flush()
         inserted = min(i + batch_size, total_embeddings)
         pct = (inserted / total_embeddings * 100.0) if total_embeddings else 100.0
-        overall = 50.0 + (inserted / total_embeddings * 25.0) if total_embeddings else 75.0
+        overall = 67.5 + (inserted / total_embeddings * 12.5) if total_embeddings else 80.0
         _notify(
             loop,
             repo_id_str,
@@ -273,7 +464,25 @@ def _bulk_insert_symbols_and_embeddings(
                 "total": total_embeddings,
                 "percentage": round(pct, 2),
             },
+            log_message=f"已插入 {inserted}/{total_embeddings} 条向量",
+            db=db,
         )
+
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        80.0,
+        stage="embeddings",
+        stage_progress={
+            "stage": "embeddings",
+            "current": total_embeddings,
+            "total": total_embeddings,
+            "percentage": 100.0,
+        },
+        log_message="向量生成完成",
+        db=db,
+    )
 
 
 def _rebuild_call_graph(
@@ -320,6 +529,7 @@ def _rebuild_call_graph(
                 "total": 0,
                 "percentage": 100.0,
             },
+            db=db,
         )
         return
 
@@ -367,7 +577,7 @@ def _rebuild_call_graph(
             db.flush()
             inserted = min(i + batch_size, total_edges)
             pct = (inserted / total_edges * 100.0) if total_edges else 100.0
-            overall = 75.0 + (inserted / total_edges * 25.0) if total_edges else 100.0
+            overall = 80.0 + (inserted / total_edges * 20.0) if total_edges else 100.0
             _notify(
                 loop,
                 repo_id_str,
@@ -380,6 +590,7 @@ def _rebuild_call_graph(
                     "total": total_edges,
                     "percentage": round(pct, 2),
                 },
+                db=db,
             )
     else:
         _notify(
@@ -394,6 +605,7 @@ def _rebuild_call_graph(
                 "total": 0,
                 "percentage": 100.0,
             },
+            db=db,
         )
 
 
@@ -402,42 +614,104 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
     db = SessionLocal()
     repo_id_str = str(repo_id)
     file_records: List[Tuple[CodeFile, ParseResult]] = []
+    all_file_records: List[Tuple[CodeFile, ParseResult]] = []
+    total_inserted = 0
 
     try:
+        _clear_indexing_logs(repo_id_str)
+        _add_log(db, repo_id_str, "info", "开始索引流程", "init")
+
         repo = db.query(Repository).filter(Repository.id == repo_id).first()
         if not repo:
-            logger.error("Repository %s not found", repo_id)
+            error_msg = f"Repository {repo_id} not found"
+            logger.error(error_msg)
+            _add_log(db, repo_id_str, "error", error_msg, "init")
             return
 
         repo.status = RepoStatus.indexing.value
+        repo.error_message = None
         db.commit()
-        _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0)
+        _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0, log_message="初始化索引状态", db=db)
 
-        local_path = clone_or_pull(repo.name, repo.git_url)
-        repo.local_path = str(local_path)
-        db.commit()
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            5.0,
+            stage="git_sync",
+            stage_progress={
+                "stage": "git_sync",
+                "current": 0,
+                "total": 1,
+                "percentage": 0.0,
+            },
+            log_message="开始同步代码仓库",
+            db=db,
+        )
+
+        try:
+            local_path = clone_or_pull(repo.name, repo.git_url, repo.local_path)
+            repo.local_path = str(local_path)
+            db.commit()
+            _notify(
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                10.0,
+                stage="git_sync",
+                stage_progress={
+                    "stage": "git_sync",
+                    "current": 1,
+                    "total": 1,
+                    "percentage": 100.0,
+                },
+                log_message=f"代码同步完成，本地路径: {local_path}",
+                db=db,
+            )
+        except Exception as sync_exc:
+            error_msg = f"代码同步失败: {str(sync_exc)}"
+            _add_log(db, repo_id_str, "error", error_msg, "git_sync")
+            raise
 
         source_files = list_source_files(local_path)
         total = len(source_files)
         processed = 0
         skipped = 0
 
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            10.0,
+            stage="scan",
+            stage_progress={
+                "stage": "scan",
+                "current": 0,
+                "total": total,
+                "percentage": 0.0,
+            },
+            log_message=f"开始扫描文件，共发现 {total} 个源文件",
+            db=db,
+        )
+
         for file_path in source_files:
             try:
                 result = _index_file(db, repo_id, local_path, file_path)
                 if result:
                     file_records.append(result)
+                    all_file_records.append(result)
                 else:
                     skipped += 1
             except Exception as exc:
                 logger.warning("Failed to index %s: %s", file_path.relative_to(local_path), exc)
+                _add_log(db, repo_id_str, "warning", f"文件索引失败 {file_path.relative_to(local_path)}: {str(exc)}", "scan")
                 skipped += 1
 
             processed += 1
+
             if processed % 10 == 0 or processed == total:
                 scan_pct = (processed / total * 100.0) if total else 100.0
-                # File scanning is the first stage and accounts for 0% -> 30%.
-                overall = (processed / total * 30.0) if total else 30.0
+                overall = 10.0 + (processed / total * 25.0) if total else 35.0
                 _notify(
                     loop,
                     repo_id_str,
@@ -450,53 +724,113 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                         "total": total,
                         "percentage": round(scan_pct, 2),
                     },
+                    log_message=f"文件扫描进度: {processed}/{total}",
+                    db=db,
                 )
 
-        # Keep file_records and their children in a single transaction so an
-        # interrupted run cannot leave orphaned code_files rows.
-        print(f"[INDEXER] file_records={len(file_records)} for repo {repo_id}", flush=True)
-        _bulk_insert_symbols_and_embeddings(db, repo_id, repo_id_str, file_records, loop)
-        _rebuild_call_graph(db, repo_id, repo_id_str, file_records, loop)
+        _add_log(db, repo_id_str, "info", f"文件扫描完成，共处理 {processed} 个文件，跳过 {skipped} 个", "scan")
+
+        if all_file_records:
+            print(f"[INDEXER] flushing {len(all_file_records)} records for repo {repo_id}", flush=True)
+            _bulk_insert_symbols_and_embeddings(db, repo_id, repo_id_str, all_file_records, loop)
+            total_inserted += len(all_file_records)
+            db.commit()
+            db.expire_all()
+            gc.collect()
+
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            80.0,
+            stage="call_graph",
+            stage_progress={
+                "stage": "call_graph",
+                "current": 0,
+                "total": 1,
+                "percentage": 0.0,
+            },
+            log_message="开始构建调用图",
+            db=db,
+        )
+
+        _rebuild_call_graph(db, repo_id, repo_id_str, all_file_records, loop)
         db.commit()
+
+        _add_log(db, repo_id_str, "info", "调用图构建完成", "call_graph")
 
         repo.status = RepoStatus.indexed.value
         repo.last_indexed_at = datetime.utcnow()
         db.commit()
 
-        _notify(loop, repo_id_str, RepoStatus.indexed.value, 100.0)
+        _notify(loop, repo_id_str, RepoStatus.indexed.value, 100.0, log_message="索引完成", db=db)
+        _add_log(db, repo_id_str, "info", f"索引完成: {total} 个文件处理，{total_inserted} 个插入/更新，{skipped} 个跳过", "complete")
+
         logger.info(
             "Indexed repository %s: %d files processed, %d inserted/updated, %d skipped",
             repo_id,
             total,
-            len(file_records),
+            total_inserted,
             skipped,
         )
 
     except Exception as exc:
         logger.exception("Failed to index repository %s: %s", repo_id, exc)
+        full_traceback = traceback.format_exc()
+        error_msg = str(exc)
+        _add_log(db, repo_id_str, "error", f"索引失败: {error_msg}", "error")
+        _add_log(db, repo_id_str, "error", f"详细堆栈:\n{full_traceback}", "error")
+        
         try:
             repo = db.query(Repository).filter(Repository.id == repo_id).first()
             if repo:
                 repo.status = RepoStatus.error.value
+                repo.error_message = error_msg
                 db.commit()
-            _notify(loop, repo_id_str, RepoStatus.error.value, 0.0, str(exc))
+            _notify(loop, repo_id_str, RepoStatus.error.value, 0.0, error_msg, db=db)
         except Exception:
             pass
     finally:
+        _clear_indexing_state(repo_id_str)
         db.close()
 
 
 async def index_repo(repo_id: UUID) -> None:
     """Public async entry point to index a repository in the background."""
+    repo_id_str = str(repo_id)
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        _index_executor,
-        _sync_index_repo,
-        repo_id,
-        loop,
-    )
+    
+    lock = _get_indexing_lock(repo_id_str)
+    
+    async with lock:
+        if _cancel_indexing(repo_id_str):
+            logger.info("Cancelled existing indexing task for repo %s", repo_id_str)
+        
+        def _run_index():
+            _sync_index_repo(repo_id, loop)
+        
+        task = loop.run_in_executor(
+            _index_executor,
+            _run_index,
+        )
+        _active_indexing_tasks[repo_id_str] = task
+        
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("Indexing task cancelled for repo %s", repo_id_str)
+        except Exception as exc:
+            logger.exception("Indexing task failed for repo %s: %s", repo_id_str, exc)
+        finally:
+            _clear_indexing_state(repo_id_str)
 
 
 def shutdown_indexer() -> None:
     """Gracefully shut down the background indexing executor."""
+    for repo_id, task in list(_active_indexing_tasks.items()):
+        if not task.done():
+            task.cancel()
     _index_executor.shutdown(wait=True)
+
+
+__all__ = ["index_repo", "shutdown_indexer", "_get_indexing_logs", "_cancel_indexing"]

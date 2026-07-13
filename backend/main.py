@@ -19,10 +19,12 @@ if _backend_dir not in sys.path:
 
 from api import repos, search, webhook, ws
 from config import settings
+from mcp_server.server import get_mcp_app, get_mcp_session_manager
+from database import SessionLocal
 from exceptions import CodePopException
-from mcp_server.server import mcp_sse_endpoint, sse_transport
+from models import RepoStatus, Repository
 from scripts.init_db import init_db
-from services.indexer import shutdown_indexer
+from services.indexer import index_repo, shutdown_indexer
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
@@ -33,15 +35,36 @@ def _init_db_sync() -> None:
     init_db()
 
 
+async def _recover_indexing_repos() -> None:
+    """Recover repos that were in indexing state when server crashed."""
+    db = SessionLocal()
+    try:
+        indexing_repos = db.query(Repository).filter(
+            Repository.status == RepoStatus.indexing.value
+        ).all()
+        if indexing_repos:
+            logger.info("Found %d repos in indexing state, resetting to pending...", len(indexing_repos))
+            for repo in indexing_repos:
+                repo.status = RepoStatus.pending.value
+            db.commit()
+        else:
+            logger.info("No repos to recover from indexing state")
+    finally:
+        db.close()
+
+
+logger.info("Initializing database...")
+init_db()
+logger.info("CodePop backend ready")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop = asyncio.get_running_loop()
-    logger.info("Initializing database...")
-    await loop.run_in_executor(None, _init_db_sync)
-    logger.info("CodePop backend ready")
-    yield
-    logger.info("Shutting down indexer executor...")
-    shutdown_indexer()
+    mcp_session_manager = get_mcp_session_manager()
+    async with mcp_session_manager.run():
+        logger.info("MCP session manager started")
+        yield
+        logger.info("MCP session manager shutting down")
 
 
 app = FastAPI(
@@ -50,6 +73,12 @@ app = FastAPI(
     version=settings.api_version,
     lifespan=lifespan,
 )
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    logger.info("Shutting down indexer executor...")
+    shutdown_indexer()
 
 
 @app.exception_handler(CodePopException)
@@ -73,11 +102,25 @@ app.include_router(search.router)
 app.include_router(webhook.router)
 app.include_router(ws.router)
 
-# MCP SSE endpoint
-app.add_api_route("/mcp/sse", mcp_sse_endpoint, methods=["GET"])
-app.add_api_route("/mcp/messages/", sse_transport.handle_post_message, methods=["POST"])
+mcp_app = get_mcp_app()
+app.mount("/mcp", mcp_app)
 
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": settings.api_version}
+
+
+@app.get("/test-db")
+def test_db():
+    import os
+    db_path = "./codepop.db"
+    exists = os.path.exists(db_path)
+    size = os.path.getsize(db_path) if exists else 0
+    
+    try:
+        db = SessionLocal()
+        repos = db.query(Repository).all()
+        return {"count": len(repos), "db_exists": exists, "db_size": size}
+    except Exception as e:
+        return {"error": str(e), "db_exists": exists, "db_size": size}

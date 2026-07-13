@@ -1,9 +1,14 @@
 import { useState, useMemo } from 'react';
 import { SearchBox } from '../components/SearchBox';
 import { SearchResults } from '../components/SearchResults';
+import { FlowView } from '../components/FlowView';
 import { useSearch } from '../hooks/useSearch';
 import { useRepos } from '../hooks/useRepos';
-import { Filter, Code2, Layers, ArrowUpDown } from 'lucide-react';
+import { Filter, Code2, Layers, ArrowUpDown, GitBranch } from 'lucide-react';
+import { useMutation } from '@tanstack/react-query';
+import { searchContext } from '../api';
+import { useStore } from '../store';
+import type { CodeContext } from '../types';
 
 const LANGUAGE_OPTIONS = ['python', 'typescript', 'javascript', 'go', 'java', 'rust', 'cpp'];
 const SYMBOL_OPTIONS = ['function', 'class', 'interface', 'variable'];
@@ -20,10 +25,23 @@ export const Search = () => {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('');
   const [sortBy, setSortBy] = useState<string>('relevance');
+  const [viewMode, setViewMode] = useState<'simple' | 'smart'>('smart');
+  const [contextResults, setContextResults] = useState<CodeContext | null>(null);
+
+  const contextSearchMutation = useMutation({
+    mutationFn: ({ query, repoId }: { query: string; repoId?: string }) =>
+      searchContext(query, repoId),
+    onSuccess: (context) => {
+      setContextResults(context);
+    },
+  });
 
   const handleSearch = (searchQuery: string) => {
     if (searchQuery.trim()) {
       search(searchQuery, selectedRepoId || undefined);
+      if (viewMode === 'smart') {
+        contextSearchMutation.mutate({ query: searchQuery, repoId: selectedRepoId || undefined });
+      }
     }
   };
 
@@ -31,6 +49,16 @@ export const Search = () => {
     setSelectedRepoId(repoId);
     if (query.trim()) {
       search(query, repoId || undefined);
+      if (viewMode === 'smart') {
+        contextSearchMutation.mutate({ query, repoId });
+      }
+    }
+  };
+
+  const handleViewModeChange = (mode: 'simple' | 'smart') => {
+    setViewMode(mode);
+    if (mode === 'smart' && query.trim()) {
+      contextSearchMutation.mutate({ query, repoId: selectedRepoId || undefined });
     }
   };
 
@@ -88,6 +116,29 @@ export const Search = () => {
         </div>
 
         <div className="flex flex-wrap gap-3">
+          <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-700 rounded-lg p-1">
+            <button
+              onClick={() => handleViewModeChange('simple')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                viewMode === 'simple'
+                  ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+              }`}
+            >
+              简单模式
+            </button>
+            <button
+              onClick={() => handleViewModeChange('smart')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1 ${
+                viewMode === 'smart'
+                  ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+              }`}
+            >
+              <GitBranch className="w-3 h-3" />
+              智能模式
+            </button>
+          </div>
           <div className="flex items-center gap-2">
             <Code2 className="w-4 h-4 text-slate-400" />
             <select
@@ -138,7 +189,23 @@ export const Search = () => {
       </div>
 
       {/* Search Results */}
-      <SearchResults results={filteredResults} isLoading={isSearching} />
+      {viewMode === 'simple' ? (
+        <SearchResults results={filteredResults} isLoading={isSearching} />
+      ) : (
+        contextResults ? (
+          <FlowView context={contextResults} />
+        ) : isSearching ? (
+          <div className="text-center py-12 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500 mx-auto mb-4"></div>
+            <p className="text-slate-500 dark:text-slate-400">智能分析中...</p>
+          </div>
+        ) : (
+          <div className="text-center py-12 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+            <Code2 className="w-16 h-16 text-slate-300 mx-auto mb-4" />
+            <p className="text-slate-500 dark:text-slate-400">在上方输入搜索关键词开始智能分析</p>
+          </div>
+        )
+      )}
 
       {/* Search Tips */}
       {results.length === 0 && !isSearching && !query && (

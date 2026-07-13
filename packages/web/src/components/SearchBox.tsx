@@ -55,7 +55,7 @@ export const SearchBox = ({
         >
           <Search
             className={clsx(
-              'absolute left-4 w-5 h-5 transition-colors',
+              'absolute left-4 w-5 h-5 transition-colors z-10',
               isFocused ? 'text-indigo-500' : 'text-slate-400'
             )}
           />
@@ -67,7 +67,7 @@ export const SearchBox = ({
             onBlur={() => setIsFocused(false)}
             placeholder={placeholder}
             className={clsx(
-              'w-full pl-12 pr-12 py-3 bg-white dark:bg-slate-800 border-2 rounded-xl',
+              'flex-1 pl-12 pr-20 py-3 bg-white dark:bg-slate-800 border-2 rounded-l-xl',
               'text-slate-900 dark:text-white placeholder-slate-400',
               'transition-all duration-200',
               isFocused
@@ -79,11 +79,27 @@ export const SearchBox = ({
             <button
               type="button"
               onClick={handleClear}
-              className="absolute right-4 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"
+              className="absolute right-18 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"
             >
               <X className="w-4 h-4 text-slate-400" />
             </button>
           )}
+          <button
+            type="submit"
+            disabled={isSearching || !value.trim()}
+            className={clsx(
+              'px-6 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400',
+              'text-white font-medium rounded-r-xl transition-colors',
+              'border-2 border-indigo-600 border-l-0',
+              isFocused && !isSearching && value.trim() && 'shadow-lg shadow-indigo-500/20'
+            )}
+          >
+            {isSearching ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+            ) : (
+              <Search className="w-5 h-5" />
+            )}
+          </button>
         </div>
       </form>
 

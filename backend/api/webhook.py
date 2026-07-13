@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["webhook"])
 
 
-def _verify_signature(payload: bytes, signature: str | None) -> bool:
+def _verify_signature(payload: bytes, signature: Optional[str]) -> bool:
     secret = settings.github_webhook_secret
     if not secret:
         return True
@@ -28,7 +29,7 @@ def _verify_signature(payload: bytes, signature: str | None) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def _find_repo(db: Session, clone_url: str) -> Repository | None:
+def _find_repo(db: Session, clone_url: str) -> Optional[Repository]:
     return db.query(Repository).filter(Repository.git_url == clone_url).first()
 
 
@@ -37,7 +38,7 @@ async def github_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    x_hub_signature_256: str | None = Header(None),
+    x_hub_signature_256: Optional[str] = Header(None),
 ) -> dict:
     payload = await request.body()
     if not _verify_signature(payload, x_hub_signature_256):
@@ -73,7 +74,7 @@ async def github_webhook_by_repo_id(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    x_hub_signature_256: str | None = Header(None),
+    x_hub_signature_256: Optional[str] = Header(None),
 ) -> dict:
     """Alternative webhook URL that triggers indexing for a known repo_id."""
     payload = await request.body()

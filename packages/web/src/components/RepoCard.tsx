@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { FolderGit2, RefreshCw, Trash2, Clock } from 'lucide-react';
+import { FolderGit2, RefreshCw, Trash2, Clock, GitBranch, Search, Hash, Layers, Network } from 'lucide-react';
 import type { Repo } from '../types';
 import { StatusBadge } from './StatusBadge';
 import { clsx } from 'clsx';
@@ -10,6 +10,14 @@ interface RepoCardProps {
   onReindex?: (id: string) => void;
   isDeleting?: boolean;
   isReindexing?: boolean;
+  indexingProgress?: number;
+  indexingStage?: string;
+  stageProgress?: {
+    stage: string;
+    current: number;
+    total: number;
+    percentage: number;
+  };
 }
 
 export const RepoCard = ({
@@ -18,7 +26,31 @@ export const RepoCard = ({
   onReindex,
   isDeleting,
   isReindexing,
+  indexingProgress = 0,
+  indexingStage = '',
+  stageProgress,
 }: RepoCardProps) => {
+  const getStageIcon = (stage: string) => {
+    switch (stage) {
+      case 'git_sync': return <GitBranch className="w-4 h-4" />;
+      case 'scan': return <Search className="w-4 h-4" />;
+      case 'symbols': return <Hash className="w-4 h-4" />;
+      case 'embeddings': return <Layers className="w-4 h-4" />;
+      case 'call_graph': return <Network className="w-4 h-4" />;
+      default: return <RefreshCw className="w-4 h-4" />;
+    }
+  };
+
+  const getStageName = (stage: string) => {
+    switch (stage) {
+      case 'git_sync': return '同步代码';
+      case 'scan': return '扫描文件';
+      case 'symbols': return '提取符号';
+      case 'embeddings': return '生成向量';
+      case 'call_graph': return '构建调用图';
+      default: return '索引中';
+    }
+  };
   return (
     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 hover:shadow-lg transition-all duration-200 hover:border-indigo-200 dark:hover:border-indigo-700">
       <div className="flex items-start justify-between mb-4">
@@ -66,27 +98,32 @@ export const RepoCard = ({
       </div>
 
       {repo.status === 'indexing' && (
-        <div className="mb-4">
-          <div className="flex justify-between text-sm mb-1">
-            <span className="text-slate-500 dark:text-slate-400">索引进度</span>
-            <span className="text-indigo-600 dark:text-indigo-400">
-              {repo.totalFiles > 0
-                ? Math.round((repo.indexedFiles / repo.totalFiles) * 100)
-                : 0}%
+        <div className="mb-4 space-y-2">
+          <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-500 dark:text-slate-400">索引阶段</span>
+              <span className="flex items-center gap-1 text-indigo-600 dark:text-indigo-400">
+                {getStageIcon(indexingStage)}
+                {getStageName(indexingStage)}
+              </span>
+            </div>
+            <span className="font-medium text-indigo-600 dark:text-indigo-400">
+              {Math.round(indexingProgress)}%
             </span>
           </div>
           <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
             <div
               className="h-full bg-indigo-500 rounded-full transition-all duration-300"
               style={{
-                width: `${
-                  repo.totalFiles > 0
-                    ? (repo.indexedFiles / repo.totalFiles) * 100
-                    : 0
-                }%`,
+                width: `${indexingProgress}%`,
               }}
             />
           </div>
+          {stageProgress && stageProgress.total > 0 && (
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              {stageProgress.current}/{stageProgress.total} ({Math.round(stageProgress.percentage)}%)
+            </div>
+          )}
         </div>
       )}
 
