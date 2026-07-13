@@ -1,5 +1,6 @@
 """Hybrid search engine with intent-aware retrieval and degradation fallback."""
 
+import collections
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
@@ -15,7 +16,7 @@ from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
 from services.query_normalizer import SymbolNormalizer
-from services.reranker import CodeReranker, M3Reranker
+from services.reranker import CodeReranker, M3Reranker, get_m3_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,9 @@ def _rrf_fuse(results_by_source: Dict[str, List[_Hit]]) -> List[_Hit]:
 
     for source_name, hits in results_by_source.items():
         for rank, hit in enumerate(hits, start=1):
-            key = (hit.file_id, hit.start_line if hasattr(hit, 'start_line') else hit.line)
+            key = (hit.file_id, hit.line)
             rrf_scores[key] += 1.0 / (RRF_K + rank)
-            if key not in hit_by_key or hit.score > hit_by_key[key].score:
+            if key not in hit_by_key or hit.vector_score > hit_by_key[key].vector_score:
                 hit_by_key[key] = hit
 
     sorted_keys = sorted(rrf_scores.keys(), key=lambda k: -rrf_scores[k])
@@ -563,7 +564,7 @@ class Searcher:
         schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
         reranked = CodeReranker().rerank(query, schema_results)
 
-        m3_reranker = M3Reranker(self.embedder)
+        m3_reranker = get_m3_reranker()
         final = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
 
         return final

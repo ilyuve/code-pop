@@ -549,15 +549,15 @@ def _bulk_insert_symbols_and_embeddings(
 
     sparse_vectors = embedder.encode_sparse(texts_to_embed)
 
-    content_to_embedding_id = {
-        emb.content: emb.id
+    embedding_meta = {
+        (emb.file_id, emb.chunk_index): emb.id
         for emb in db.query(Embedding).filter(Embedding.repo_id == repo_id).all()
     }
     
     for text_idx, sparse_vector in enumerate(sparse_vectors):
         if sparse_vector:
-            content = texts_to_embed[text_idx]
-            embedding_id = content_to_embedding_id.get(content)
+            file_id, chunk_index, _, _, _ = meta[text_idx]
+            embedding_id = embedding_meta.get((file_id, chunk_index))
             if embedding_id:
                 for token_id, weight in sparse_vector.items():
                     if weight > 0.1:

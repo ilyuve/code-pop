@@ -3,16 +3,32 @@ import re
 import collections
 from typing import List
 
+from sentence_transformers import CrossEncoder
+from config import settings
 from schemas import SearchResultItem
 
 logger = logging.getLogger(__name__)
 
 
+_m3_reranker_instance = None
+
+
 class M3Reranker:
     """用 bge-m3 做交叉编码重排序。"""
 
-    def __init__(self, embedder):
-        self.embedder = embedder
+    def __init__(self):
+        if not hasattr(self, '_model') or self._model is None:
+            model_name = settings.embedding_model
+            self._model = CrossEncoder(
+                model_name,
+                max_length=512,
+                device='cpu',
+            )
+
+    @property
+    def model(self):
+        return self._model
+
 
     def rerank(self, query: str, results: List[SearchResultItem], top_k: int = 10) -> List[SearchResultItem]:
         if not results:
@@ -24,14 +40,10 @@ class M3Reranker:
         ]
 
         try:
-            scores = self.embedder.model.compute_score(
-                pairs,
-                batch_size=8,
-                max_length=512,
-            )
+            scores = self.model.predict(pairs, batch_size=8)
 
             for r, score in zip(results, scores):
-                r.score = score
+                r.score = float(score)
 
             results.sort(key=lambda x: -x.score)
             return results[:top_k]
@@ -40,20 +52,18 @@ class M3Reranker:
             return results[:top_k]
 
 
+def get_m3_reranker() -> M3Reranker:
+    """返回 M3Reranker 单例实例，避免每次搜索重新加载模型。"""
+    global _m3_reranker_instance
+    if _m3_reranker_instance is None:
+        _m3_reranker_instance = M3Reranker()
+    return _m3_reranker_instance
+
+
 class CodeReranker:
     """基于代码特征的轻量 reranker，纯规则，不依赖 LLM。"""
 
     def rerank(self, query: str, results: List[SearchResultItem]) -> List[SearchResultItem]:
-        """
-        对搜索结果应用 code-aware 信号，调整分数后重排序。
-
-        Args:
-            query: 用户查询词
-            results: RRF 融合后的结果列表（已去重）
-
-        Returns:
-            调整分数后降序排列的结果
-        """
         file_counts = collections.Counter(r.file_path for r in results)
 
         for r in results:
@@ -80,7 +90,6 @@ class CodeReranker:
         return results
 
     def _is_definition(self, content: str, query: str) -> bool:
-        """检查 content 是否包含 query 的定义语句。"""
         escaped = re.escape(query)
         patterns = [
             rf'\bclass\s+{escaped}\b',
@@ -92,7 +101,6 @@ class CodeReranker:
         return any(re.search(p, content, re.IGNORECASE) for p in patterns)
 
     def _is_test_file(self, path: str) -> bool:
-        """判断路径是否为测试文件。"""
         path_lower = path.lower()
         test_indicators = [
             'test', '__tests__', '_test.', '.test.',
@@ -102,7 +110,6 @@ class CodeReranker:
         return any(indicator in path_lower for indicator in test_indicators)
 
     def _is_config_file(self, path: str) -> bool:
-        """判断路径是否为配置文件。"""
         path_lower = path.lower()
         config_indicators = [
             'config', 'settings', 'constants',
