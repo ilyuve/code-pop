@@ -6,7 +6,7 @@
   "scripts": {
     "build": "pnpm --filter @codepop/web build",
     "dev": "pnpm --filter @codepop/web dev",
-    "test": "vitest run",
+    "test": "pnpm --filter @codepop/core test",
     "lint": "pnpm --filter @codepop/web lint"
   },
   "keywords": [
