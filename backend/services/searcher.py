@@ -9,13 +9,13 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import CallGraphEdge, CodeFile, Embedding, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol
 from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
 from services.query_normalizer import SymbolNormalizer
-from services.reranker import CodeReranker
+from services.reranker import CodeReranker, M3Reranker
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ class _Hit:
     symbol_score: float = 0.0
     bm25_score: float = 0.0
     graph_score: float = 0.0
+    sparse_score: float = 0.0
     sources: set = field(default_factory=set)
     symbol_id: Optional[UUID] = None
     symbol_name: Optional[str] = None
@@ -505,10 +506,13 @@ class Searcher:
         self._degraded_components = set()
         self._degradation_reasons = []
 
+        self.db.execute(text("SET hnsw.ef_search = 128"))
+
         vector_results: List[_Hit] = []
         symbol_results: List[_Hit] = []
         bm25_results: List[_Hit] = []
         graph_results: List[_Hit] = []
+        sparse_results: List[_Hit] = []
 
         try:
             query_embedding = self.embedder.encode_query(query)
@@ -516,6 +520,13 @@ class Searcher:
         except Exception as e:
             logger.warning("Vector search degraded: %s", e)
             self._record_degradation("vector_search", str(e), "Skipping vector search")
+
+        try:
+            query_sparse = self.embedder.encode_query_sparse(query)
+            sparse_results = self._sparse_search(query_sparse, repo_id)
+        except Exception as e:
+            logger.warning("Sparse search degraded: %s", e)
+            self._record_degradation("sparse_search", str(e), "Skipping sparse search")
 
         try:
             symbol_results = self._symbol_search(query, repo_id)
@@ -542,6 +553,7 @@ class Searcher:
 
         results_by_source = {
             "vector": vector_results,
+            "sparse": sparse_results,
             "symbol": symbol_results,
             "bm25": bm25_results,
             "graph": graph_results,
@@ -551,7 +563,10 @@ class Searcher:
         schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
         reranked = CodeReranker().rerank(query, schema_results)
 
-        return reranked[:limit]
+        m3_reranker = M3Reranker(self.embedder)
+        final = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
+
+        return final
 
     def symbol_search(
         self,
@@ -771,6 +786,67 @@ class Searcher:
     def _file_embeddings(self, file_id: UUID) -> List[Embedding]:
         return self.embedding_repo.get_by_file_id(file_id)
 
+    def _sparse_search(
+        self,
+        query_sparse: Dict[int, float],
+        repo_id: Optional[UUID],
+        top_k: int = 50,
+    ) -> List[_Hit]:
+        if not query_sparse:
+            return []
+
+        query_tokens = list(query_sparse.keys())
+
+        rows = self.db.query(
+            SparseEmbedding.embedding_id,
+            SparseEmbedding.token_id,
+            SparseEmbedding.weight,
+        ).filter(
+            SparseEmbedding.token_id.in_(query_tokens),
+        )
+
+        if repo_id:
+            rows = rows.join(
+                Embedding,
+                Embedding.id == SparseEmbedding.embedding_id,
+            ).filter(Embedding.repo_id == repo_id)
+
+        rows = rows.all()
+
+        scores = {}
+        for row in rows:
+            eid = row.embedding_id
+            tid = row.token_id
+            doc_weight = row.weight
+            query_weight = query_sparse.get(tid, 0)
+
+            if eid not in scores:
+                scores[eid] = 0
+            scores[eid] += query_weight * doc_weight
+
+        sorted_eids = sorted(scores.keys(), key=lambda eid: -scores[eid])[:top_k]
+
+        embeddings = self.db.query(Embedding).filter(
+            Embedding.id.in_(sorted_eids)
+        ).all()
+
+        hits = []
+        for emb in embeddings:
+            score = scores.get(emb.id, 0)
+            hits.append(_Hit(
+                result_id=emb.id,
+                file_id=emb.file_id,
+                repo_id=emb.repo_id,
+                repo_name=emb.repo.name if emb.repo else "",
+                file_path=emb.file_path,
+                language=emb.file.language if emb.file else "",
+                content=emb.content,
+                line=emb.start_line,
+                sparse_score=score,
+                sources={"sparse"},
+            ))
+        return hits
+
     def _fuse(
         self,
         vector_results: List[_Hit],
@@ -813,6 +889,7 @@ class Searcher:
             + WEIGHT_SYMBOL * hit.symbol_score
             + WEIGHT_BM25 * hit.bm25_score
             + WEIGHT_GRAPH * hit.graph_score
+            + hit.sparse_score * 0.1
         )
         if "vector" in hit.sources and "symbol" in hit.sources:
             score += BONUS_VECTOR_SYMBOL
@@ -835,6 +912,7 @@ class Searcher:
                 "symbol": round(hit.symbol_score, 4),
                 "bm25": round(hit.bm25_score, 4),
                 "graph": round(hit.graph_score, 4),
+                "sparse": round(hit.sparse_score, 4),
                 "rrf": round(getattr(hit, 'rrf_score', 0), 4),
                 "final": round(final_score, 4),
             },

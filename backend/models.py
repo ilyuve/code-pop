@@ -8,6 +8,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -105,6 +106,24 @@ class Embedding(Base):
 
     file = relationship("CodeFile", back_populates="embeddings")
     repo = relationship("Repository", back_populates="embeddings")
+
+
+class SparseEmbedding(Base):
+    __tablename__ = "sparse_embeddings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    embedding_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("embeddings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    token_id = Column(Integer, nullable=False)
+    weight = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("idx_sparse_embedding_token", "embedding_id", "token_id"),
+        Index("idx_sparse_token_weight", "token_id", "weight"),
+    )
 
 
 class CallGraphEdge(Base):

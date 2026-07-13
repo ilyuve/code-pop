@@ -89,6 +89,11 @@ class Embedder:
                 f"Represent this sentence for searching relevant passages: {t}"
                 for t in texts
             ]
+        else:
+            texts = [
+                f"Represent this document for retrieval: {t}"
+                for t in texts
+            ]
 
         try:
             embeddings = self.model.encode(
@@ -110,6 +115,30 @@ class Embedder:
                 fallback_action="Using hash-based pseudo vectors",
             )
             return self._degraded_encode(texts)
+
+    def encode_sparse(self, texts: List[str]) -> List[dict]:
+        """Return sparse embeddings (lexical weights)."""
+        if not texts:
+            return []
+
+        if self._degraded:
+            return [{} for _ in texts]
+
+        try:
+            results = self.model.encode(
+                texts,
+                batch_size=settings.embedding_batch_size,
+                show_progress_bar=False,
+                return_sparse=True,
+            )
+            return results
+        except Exception as exc:
+            logger.warning("Sparse embedding encode failed: %s", exc)
+            return [{} for _ in texts]
+
+    def encode_query_sparse(self, text: str) -> dict:
+        """Return sparse embedding for a query."""
+        return self.encode_sparse([text])[0]
 
     def encode_query(self, text: str) -> List[float]:
         """Encode a search query."""

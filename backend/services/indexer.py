@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal
-from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, SparseEmbedding, Symbol
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.notifier import notifier
@@ -472,6 +472,8 @@ def _bulk_insert_symbols_and_embeddings(
             db=db,
         )
 
+    sparse_embeddings_data: List[Dict[str, Any]] = []
+
     for text_idx, (vector, mapping_meta) in enumerate(zip(vectors, meta)):
         file_id, chunk_index, start_line, end_line, token_count = mapping_meta
         embedding_mappings.append(
@@ -509,6 +511,7 @@ def _bulk_insert_symbols_and_embeddings(
         batch = embedding_mappings[i : i + batch_size]
         db.bulk_insert_mappings(Embedding, batch)
         db.flush()
+        
         inserted = min(i + batch_size, total_embeddings)
         pct = (inserted / total_embeddings * 100.0) if total_embeddings else 100.0
         overall = 67.5 + (inserted / total_embeddings * 12.5) if total_embeddings else 80.0
@@ -527,6 +530,67 @@ def _bulk_insert_symbols_and_embeddings(
             log_message=f"已插入 {inserted}/{total_embeddings} 条向量",
             db=db,
         )
+
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        75.0,
+        stage="embeddings",
+        stage_progress={
+            "stage": "embeddings",
+            "current": 0,
+            "total": total_chunks,
+            "percentage": 0.0,
+        },
+        log_message=f"开始生成稀疏向量，共 {total_chunks} 个 chunks",
+        db=db,
+    )
+
+    sparse_vectors = embedder.encode_sparse(texts_to_embed)
+
+    content_to_embedding_id = {
+        emb.content: emb.id
+        for emb in db.query(Embedding).filter(Embedding.repo_id == repo_id).all()
+    }
+    
+    for text_idx, sparse_vector in enumerate(sparse_vectors):
+        if sparse_vector:
+            content = texts_to_embed[text_idx]
+            embedding_id = content_to_embedding_id.get(content)
+            if embedding_id:
+                for token_id, weight in sparse_vector.items():
+                    if weight > 0.1:
+                        sparse_embeddings_data.append({
+                            "embedding_id": embedding_id,
+                            "token_id": token_id,
+                            "weight": weight,
+                        })
+
+    if sparse_embeddings_data:
+        total_sparse = len(sparse_embeddings_data)
+        for i in range(0, total_sparse, batch_size):
+            batch = sparse_embeddings_data[i : i + batch_size]
+            db.bulk_insert_mappings(SparseEmbedding, batch)
+            db.flush()
+            inserted = min(i + batch_size, total_sparse)
+            pct = (inserted / total_sparse * 100.0) if total_sparse else 100.0
+            overall = 75.0 + (inserted / total_sparse * 5.0) if total_sparse else 80.0
+            _notify(
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                overall,
+                stage="embeddings",
+                stage_progress={
+                    "stage": "embeddings",
+                    "current": inserted,
+                    "total": total_sparse,
+                    "percentage": round(pct, 2),
+                },
+                log_message=f"已插入 {inserted}/{total_sparse} 条稀疏向量",
+                db=db,
+            )
 
     _notify(
         loop,

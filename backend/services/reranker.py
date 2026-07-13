@@ -1,8 +1,43 @@
+import logging
 import re
 import collections
 from typing import List
 
 from schemas import SearchResultItem
+
+logger = logging.getLogger(__name__)
+
+
+class M3Reranker:
+    """用 bge-m3 做交叉编码重排序。"""
+
+    def __init__(self, embedder):
+        self.embedder = embedder
+
+    def rerank(self, query: str, results: List[SearchResultItem], top_k: int = 10) -> List[SearchResultItem]:
+        if not results:
+            return results
+
+        pairs = [
+            [query, f"{r.file_path}: {r.content[:500]}"]
+            for r in results
+        ]
+
+        try:
+            scores = self.embedder.model.compute_score(
+                pairs,
+                batch_size=8,
+                max_length=512,
+            )
+
+            for r, score in zip(results, scores):
+                r.score = score
+
+            results.sort(key=lambda x: -x.score)
+            return results[:top_k]
+        except Exception as e:
+            logger.warning("M3 reranker failed: %s", e)
+            return results[:top_k]
 
 
 class CodeReranker:
