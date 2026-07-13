@@ -198,3 +198,34 @@ class CodeContextResponse(BaseModel):
     context: Optional[CodeContext] = None
     success: bool = True
     error: Optional[str] = None
+
+
+class RouteSearchRequest(BaseModel):
+    path_pattern: Optional[str] = None
+    handler_name: Optional[str] = None
+    http_method: Optional[str] = None
+    repo_id: str
+
+
+class RouteResponse(BaseModel):
+    framework: str
+    method: str
+    path: str
+    handler: str
+    file_path: str
+    line: int
+
+
+class ImpactRequest(BaseModel):
+    symbol_name: str
+    repo_id: Optional[str] = None
+
+
+class ImpactResponse(BaseModel):
+    symbol: str
+    file_path: str
+    line: int
+    affected_routes: List[Dict]
+    upstream_chain: List[str]
+    depth: int
+    risk_level: str

@@ -14,6 +14,8 @@ from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
+from services.query_normalizer import SymbolNormalizer
+from services.reranker import CodeReranker
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ WEIGHT_SYMBOL = 0.3
 WEIGHT_BM25 = 0.2
 WEIGHT_GRAPH = 0.1
 BONUS_VECTOR_SYMBOL = 0.1
+
+RRF_K = 60
 
 
 def _min_max_normalize(scores: List[float]) -> List[float]:
@@ -51,6 +55,29 @@ class _Hit:
     sources: set = field(default_factory=set)
     symbol_id: Optional[UUID] = None
     symbol_name: Optional[str] = None
+    rrf_score: float = 0.0
+
+
+def _rrf_fuse(results_by_source: Dict[str, List[_Hit]]) -> List[_Hit]:
+    rrf_scores = collections.defaultdict(float)
+    hit_by_key = {}
+
+    for source_name, hits in results_by_source.items():
+        for rank, hit in enumerate(hits, start=1):
+            key = (hit.file_id, hit.start_line if hasattr(hit, 'start_line') else hit.line)
+            rrf_scores[key] += 1.0 / (RRF_K + rank)
+            if key not in hit_by_key or hit.score > hit_by_key[key].score:
+                hit_by_key[key] = hit
+
+    sorted_keys = sorted(rrf_scores.keys(), key=lambda k: -rrf_scores[k])
+
+    merged = []
+    for key in sorted_keys:
+        hit = hit_by_key[key]
+        hit.rrf_score = rrf_scores[key]
+        merged.append(hit)
+
+    return merged
 
 
 def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
@@ -513,10 +540,18 @@ class Searcher:
             logger.warning("Graph search degraded: %s", e)
             self._record_degradation("graph_search", str(e), "Skipping graph search")
 
-        hits = self._fuse(vector_results, symbol_results, bm25_results, graph_results)
-        hits.sort(key=lambda h: self._final_score(h), reverse=True)
+        results_by_source = {
+            "vector": vector_results,
+            "symbol": symbol_results,
+            "bm25": bm25_results,
+            "graph": graph_results,
+        }
+        hits = _rrf_fuse(results_by_source)
 
-        return [self._to_schema(hit) for hit in hits[:limit]]
+        schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
+        reranked = CodeReranker().rerank(query, schema_results)
+
+        return reranked[:limit]
 
     def symbol_search(
         self,
@@ -579,10 +614,13 @@ class Searcher:
         for sym in symbols:
             embeddings = self._file_embeddings(sym.file_id)
             hit = _symbol_to_hit(sym, embeddings)
-            if sym.name == query:
-                hit.symbol_score = 1.0
-            elif sym.name.lower().startswith(query.lower()):
-                hit.symbol_score = 0.8
+            if SymbolNormalizer.match(query, sym.name):
+                if SymbolNormalizer.normalize(query) == SymbolNormalizer.normalize(sym.name):
+                    hit.symbol_score = 1.0
+                elif SymbolNormalizer.normalize(query) in SymbolNormalizer.normalize(sym.name):
+                    hit.symbol_score = 0.9
+                else:
+                    hit.symbol_score = 0.7
             else:
                 hit.symbol_score = 0.5
             hits.append(hit)
@@ -781,6 +819,7 @@ class Searcher:
         return score
 
     def _to_schema(self, hit: _Hit) -> SearchResultItem:
+        final_score = getattr(hit, 'rrf_score', self._final_score(hit))
         return SearchResultItem(
             id=hit.result_id,
             file_id=hit.file_id,
@@ -790,13 +829,14 @@ class Searcher:
             language=hit.language,
             content=hit.content,
             line=hit.line,
-            score=self._final_score(hit),
+            score=final_score,
             score_breakdown={
                 "vector": round(hit.vector_score, 4),
                 "symbol": round(hit.symbol_score, 4),
                 "bm25": round(hit.bm25_score, 4),
                 "graph": round(hit.graph_score, 4),
-                "final": round(self._final_score(hit), 4),
+                "rrf": round(getattr(hit, 'rrf_score', 0), 4),
+                "final": round(final_score, 4),
             },
         )
 

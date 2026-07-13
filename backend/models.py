@@ -9,6 +9,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -183,3 +184,33 @@ class IndexingLog(Base):
     stage = Column(String(32), nullable=True)
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class FrameworkRoute(Base):
+    __tablename__ = "framework_routes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("repositories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    file_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("code_files.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    framework = Column(String(32), nullable=False)
+    http_method = Column(String(16), nullable=False)
+    path = Column(Text, nullable=False)
+    handler_symbol = Column(Text, nullable=False)
+    line_number = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index("idx_routes_repo_path", "repo_id", "path"),
+        Index("idx_routes_handler", "repo_id", "handler_symbol"),
+    )
+
+    repo = relationship("Repository")
+    file = relationship("CodeFile")

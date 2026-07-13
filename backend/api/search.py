@@ -14,6 +14,10 @@ from schemas import (
     BenchmarkResponse,
     BenchmarkSummary,
     CodeContextResponse,
+    ImpactRequest,
+    ImpactResponse,
+    RouteSearchRequest,
+    RouteResponse,
     SearchHistoryResponse,
     SearchHistoryStats,
     SearchQuery,
@@ -187,3 +191,53 @@ def search_history_stats(
         "total_output_tokens": total_output,
         "estimated_tokens_saved": estimated_tokens_saved,
     }
+
+
+@router.post("/routes", response_model=List[RouteResponse])
+def search_routes(request: RouteSearchRequest, db: Session = Depends(get_db)):
+    """搜索框架路由。"""
+    from models import FrameworkRoute
+
+    query = db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == request.repo_id)
+
+    if request.path_pattern:
+        query = query.filter(FrameworkRoute.path.like(request.path_pattern.replace('*', '%')))
+    if request.handler_name:
+        query = query.filter(FrameworkRoute.handler_symbol == request.handler_name)
+    if request.http_method:
+        query = query.filter(FrameworkRoute.http_method == request.http_method.upper())
+
+    routes = query.all()
+    return [
+        RouteResponse(
+            framework=r.framework,
+            method=r.http_method,
+            path=r.path,
+            handler=r.handler_symbol,
+            file_path=r.file.path,
+            line=r.line_number,
+        )
+        for r in routes
+    ]
+
+
+@router.post("/impact", response_model=ImpactResponse)
+def analyze_impact(
+    request: ImpactRequest,
+    db: Session = Depends(get_db),
+):
+    """分析代码变更的影响面。"""
+    from services.impact_analyzer import ImpactAnalyzer
+
+    analyzer = ImpactAnalyzer(db)
+    repo_id = UUID(request.repo_id) if request.repo_id else None
+    result = analyzer.analyze(request.symbol_name, repo_id)
+    return ImpactResponse(
+        symbol=result.symbol,
+        file_path=result.file_path,
+        line=result.line,
+        affected_routes=result.affected_routes,
+        upstream_chain=result.upstream_chain,
+        depth=result.depth,
+        risk_level=result.risk_level,
+    )

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal
-from models import CallGraphEdge, CodeFile, Embedding, IndexingLog, IndexingProgress, RepoStatus, Repository, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, Symbol
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.notifier import notifier
@@ -26,6 +26,7 @@ from services.parser import (
     parse_file,
     should_skip_path,
 )
+from services.router_parser import RouterParser
 from services.repo_sync import clone_or_pull
 
 logger = logging.getLogger(__name__)
@@ -818,6 +819,11 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
 
         _add_log(db, repo_id_str, "info", "调用图构建完成", "call_graph")
 
+        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop)
+        db.commit()
+
+        _add_log(db, repo_id_str, "info", "框架路由解析完成", "routes")
+
         repo.status = RepoStatus.indexed.value
         repo.last_indexed_at = datetime.utcnow()
         db.commit()
@@ -890,6 +896,47 @@ def shutdown_indexer() -> None:
         if not task.done():
             task.cancel()
     _index_executor.shutdown(wait=True)
+
+
+def _parse_framework_routes(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """解析框架路由并写入数据库。"""
+    router_parser = RouterParser()
+    total_routes = 0
+
+    db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == repo_id).delete(synchronize_session=False)
+
+    for code_file, parsed in file_records:
+        if parsed.language in ("python", "javascript", "typescript", "java"):
+            try:
+                routes = router_parser.parse(parsed.content, parsed.language)
+                for route in routes:
+                    db_route = FrameworkRoute(
+                        repo_id=repo_id,
+                        file_id=code_file.id,
+                        framework=route.framework,
+                        http_method=route.method,
+                        path=route.path,
+                        handler_symbol=route.handler,
+                        line_number=route.line,
+                    )
+                    db.add(db_route)
+                    total_routes += 1
+            except Exception as e:
+                logger.warning("Route parsing failed for %s: %s", code_file.path, e)
+                get_degradation_tracker().record(
+                    component="indexer",
+                    error_type="RouteParseError",
+                    error_message=str(e),
+                    fallback_action="Skipping route parsing for this file",
+                )
+
+    logger.info("Parsed %d framework routes for repo %s", total_routes, repo_id)
 
 
 __all__ = ["index_repo", "shutdown_indexer", "_get_indexing_logs", "_cancel_indexing"]

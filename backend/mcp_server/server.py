@@ -236,6 +236,63 @@ def list_file_symbols(repo_id: str, file_path: str) -> str:
         return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
 
 
+@mcp.tool()
+def codepop_impact(
+    symbol_name: str,
+    repo_id: str = None,
+) -> str:
+    """
+    分析修改某个函数的影响面。
+
+    Args:
+        symbol_name: 要分析的函数/方法名
+        repo_id: 仓库 ID，默认使用配置中的默认仓库
+
+    Returns:
+        影响面分析报告，包括受影响的路由和调用链
+    """
+    try:
+        with _db_session() as db:
+            from services.impact_analyzer import ImpactAnalyzer
+
+            target_repo = UUID(repo_id) if repo_id else None
+            analyzer = ImpactAnalyzer(db)
+            result = analyzer.analyze(symbol_name, target_repo)
+
+            lines = [
+                f"Impact Analysis: `{result.symbol}`",
+                f"Location: {result.file_path}:{result.line}",
+                f"Call depth: {result.depth}",
+                f"Risk level: {result.risk_level.upper()}",
+                "",
+            ]
+
+            if result.affected_routes:
+                lines.append("Affected HTTP routes:")
+                for route in result.affected_routes:
+                    lines.append(
+                        f"  {route['method']} {route['path']} "
+                        f"({route['framework']}) → {route['handler']}"
+                    )
+            else:
+                lines.append("No HTTP routes directly affected.")
+
+            if result.upstream_chain:
+                lines.extend(["", "Upstream call chain:"])
+                lines.append(" → ".join(result.upstream_chain))
+
+            return "\n".join(lines)
+    except Exception as e:
+        logger.error("MCP codepop_impact failed: %s\n%s", e, traceback.format_exc())
+        get_degradation_tracker().record(
+            component="mcp_codepop_impact",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            fallback_action="Returning error response",
+        )
+        return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
+
+
 def get_mcp_app():
     """Get the streamable HTTP ASGI app for mounting in FastAPI."""
     return mcp.streamable_http_app()
