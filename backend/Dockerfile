@@ -18,12 +18,9 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # Copy application code.
 COPY . .
 
-# Pre-download embedding model to avoid runtime downloads on container restart.
-# Default to the HF mirror so builds succeed behind the GFW; override with
-# --build-arg HF_ENDPOINT=https://huggingface.co for direct access.
-ARG HF_ENDPOINT=https://hf-mirror.com
-ENV HF_ENDPOINT=${HF_ENDPOINT}
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3', trust_remote_code=True)"
+# Set HF_ENDPOINT for model downloads (default to mirror for China).
+# Model will be downloaded at runtime on first startup.
+ENV HF_ENDPOINT=https://hf-mirror.com
 
 # Ensure repository storage directory exists.
 RUN mkdir -p /app/repos
