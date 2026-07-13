@@ -2,13 +2,16 @@ FROM node:20-slim AS builder
 
 WORKDIR /app
 
+# Install pnpm.
+RUN npm install -g pnpm
+
 # Install dependencies.
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install
 
 # Build the application.
 COPY . .
-RUN npm run build
+RUN pnpm run build
 
 # Serve with nginx.
 FROM nginx:alpine
