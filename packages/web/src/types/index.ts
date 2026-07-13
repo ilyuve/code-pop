@@ -128,6 +128,9 @@ export interface CodeContext {
   total_files: number;
   total_symbols: number;
   search_latency_ms: number;
+  degraded: boolean;
+  degradation_reason?: string;
+  unavailable_sources: string[];
 }
 
 export interface CodeContextResponse {

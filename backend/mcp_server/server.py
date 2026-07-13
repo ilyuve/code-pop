@@ -1,18 +1,20 @@
-"""MCP Server exposing CodePop tools via streamable HTTP transport."""
+"""MCP Server exposing CodePop tools via streamable HTTP transport with degradation fallback."""
 
 import json
 import logging
 import time
+import traceback
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
-from database import SessionLocal
+from database import get_db_with_retry
 from models import CodeFile, Repository, SearchHistory, Symbol
 from schemas import SearchResultItem
 from services.embedder import Embedder
+from services.degradation_tracker import get_degradation_tracker
 from services.searcher import Searcher
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ embedder = Embedder()
 
 @contextmanager
 def _db_session():
-    db = SessionLocal()
+    db = get_db_with_retry()
     try:
         yield db
     finally:
@@ -77,22 +79,32 @@ def search_code(
         repo_id: Optional repository UUID to restrict search
         limit: Maximum number of code snippets (default: 10)
     """
-    with _db_session() as db:
-        repo_uuid = UUID(repo_id) if repo_id else None
-        searcher = Searcher(db)
+    try:
+        with _db_session() as db:
+            repo_uuid = UUID(repo_id) if repo_id else None
+            searcher = Searcher(db)
 
-        start = time.time()
-        context = searcher.search_with_context(query, repo_uuid, limit)
-        latency_ms = int((time.time() - start) * 1000)
-        context.search_latency_ms = latency_ms
+            start = time.time()
+            context = searcher.search_with_context(query, repo_uuid, limit)
+            latency_ms = int((time.time() - start) * 1000)
+            context.search_latency_ms = latency_ms
 
-        output_tokens = 0
-        if context.code_snippets:
-            output_tokens = _estimate_output_tokens(context.code_snippets)
+            output_tokens = 0
+            if context.code_snippets:
+                output_tokens = _estimate_output_tokens(context.code_snippets)
 
-        _record_mcp_search(db, query, repo_uuid, "mcp_search", len(context.code_snippets), latency_ms, output_tokens)
+            _record_mcp_search(db, query, repo_uuid, "mcp_search", len(context.code_snippets), latency_ms, output_tokens)
 
-        return json.dumps(context.model_dump(), ensure_ascii=False, default=str)
+            return json.dumps(context.model_dump(), ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.error("MCP search_code failed: %s\n%s", e, traceback.format_exc())
+        get_degradation_tracker().record(
+            component="mcp_search_code",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            fallback_action="Returning error response",
+        )
+        return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -113,46 +125,66 @@ def analyze_impact(
         repo_id: Optional repository UUID
         depth: Call chain depth for impact analysis (default: 3)
     """
-    with _db_session() as db:
-        repo_uuid = UUID(repo_id) if repo_id else None
-        searcher = Searcher(db)
+    try:
+        with _db_session() as db:
+            repo_uuid = UUID(repo_id) if repo_id else None
+            searcher = Searcher(db)
 
-        intent = searcher.intent_analyzer.analyze(query)
-        intent.intent_type = "impact_analysis"
-        intent.search_strategy = searcher.intent_analyzer._build_strategy("impact_analysis", intent.is_chinese)
-        intent.search_strategy.call_depth = depth
+            intent = searcher.intent_analyzer.analyze(query)
+            intent.intent_type = "impact_analysis"
+            intent.search_strategy = searcher.intent_analyzer._build_strategy("impact_analysis", intent.is_chinese)
+            intent.search_strategy.call_depth = depth
 
-        start = time.time()
-        context = searcher.search_with_context(query, repo_uuid, 20, intent=intent)
-        latency_ms = int((time.time() - start) * 1000)
-        context.search_latency_ms = latency_ms
-        context.query_intent = "impact_analysis"
+            start = time.time()
+            context = searcher.search_with_context(query, repo_uuid, 20, intent=intent)
+            latency_ms = int((time.time() - start) * 1000)
+            context.search_latency_ms = latency_ms
+            context.query_intent = "impact_analysis"
 
-        output_tokens = 0
-        if context.code_snippets:
-            output_tokens = _estimate_output_tokens(context.code_snippets)
+            output_tokens = 0
+            if context.code_snippets:
+                output_tokens = _estimate_output_tokens(context.code_snippets)
 
-        _record_mcp_search(db, query, repo_uuid, "mcp_impact", len(context.code_snippets), latency_ms, output_tokens)
+            _record_mcp_search(db, query, repo_uuid, "mcp_impact", len(context.code_snippets), latency_ms, output_tokens)
 
-        return json.dumps(context.model_dump(), ensure_ascii=False, default=str)
+            return json.dumps(context.model_dump(), ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.error("MCP analyze_impact failed: %s\n%s", e, traceback.format_exc())
+        get_degradation_tracker().record(
+            component="mcp_analyze_impact",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            fallback_action="Returning error response",
+        )
+        return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
 
 
 @mcp.tool()
 def list_repositories() -> str:
     """List all indexed code repositories."""
-    with _db_session() as db:
-        repos = db.query(Repository).order_by(Repository.created_at.desc()).all()
-        result = [
-            {
-                "id": str(r.id),
-                "name": r.name,
-                "git_url": r.git_url,
-                "status": r.status,
-                "last_indexed_at": r.last_indexed_at.isoformat() if r.last_indexed_at else None,
-            }
-            for r in repos
-        ]
-        return json.dumps(result, ensure_ascii=False, default=str)
+    try:
+        with _db_session() as db:
+            repos = db.query(Repository).order_by(Repository.created_at.desc()).all()
+            result = [
+                {
+                    "id": str(r.id),
+                    "name": r.name,
+                    "git_url": r.git_url,
+                    "status": r.status,
+                    "last_indexed_at": r.last_indexed_at.isoformat() if r.last_indexed_at else None,
+                }
+                for r in repos
+            ]
+            return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.error("MCP list_repositories failed: %s\n%s", e, traceback.format_exc())
+        get_degradation_tracker().record(
+            component="mcp_list_repositories",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            fallback_action="Returning error response",
+        )
+        return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -164,34 +196,44 @@ def list_file_symbols(repo_id: str, file_path: str) -> str:
         repo_id: Repository UUID
         file_path: Relative file path
     """
-    with _db_session() as db:
-        code_file = (
-            db.query(CodeFile)
-            .filter(CodeFile.repo_id == UUID(repo_id), CodeFile.path == file_path)
-            .first()
+    try:
+        with _db_session() as db:
+            code_file = (
+                db.query(CodeFile)
+                .filter(CodeFile.repo_id == UUID(repo_id), CodeFile.path == file_path)
+                .first()
+            )
+            if not code_file:
+                return json.dumps([], ensure_ascii=False)
+            symbols = (
+                db.query(Symbol)
+                .filter(Symbol.file_id == code_file.id)
+                .order_by(Symbol.line)
+                .all()
+            )
+            result = [
+                {
+                    "id": str(s.id),
+                    "name": s.name,
+                    "type": s.type,
+                    "kind": s.kind,
+                    "line": s.line,
+                    "column": s.column,
+                    "end_line": s.end_line,
+                    "is_exported": bool(s.is_exported),
+                }
+                for s in symbols
+            ]
+            return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.error("MCP list_file_symbols failed: %s\n%s", e, traceback.format_exc())
+        get_degradation_tracker().record(
+            component="mcp_list_file_symbols",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            fallback_action="Returning error response",
         )
-        if not code_file:
-            return json.dumps([], ensure_ascii=False)
-        symbols = (
-            db.query(Symbol)
-            .filter(Symbol.file_id == code_file.id)
-            .order_by(Symbol.line)
-            .all()
-        )
-        result = [
-            {
-                "id": str(s.id),
-                "name": s.name,
-                "type": s.type,
-                "kind": s.kind,
-                "line": s.line,
-                "column": s.column,
-                "end_line": s.end_line,
-                "is_exported": bool(s.is_exported),
-            }
-            for s in symbols
-        ]
-        return json.dumps(result, ensure_ascii=False, default=str)
+        return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
 
 
 def get_mcp_app():

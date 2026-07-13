@@ -1,4 +1,4 @@
-"""Repository indexing orchestration: git -> parse -> embed -> store."""
+"""Repository indexing orchestration: git -> parse -> embed -> store with degradation fallback."""
 
 import asyncio
 import gc
@@ -16,6 +16,7 @@ from config import settings
 from database import SessionLocal
 from models import CallGraphEdge, CodeFile, Embedding, IndexingLog, IndexingProgress, RepoStatus, Repository, Symbol
 from services.embedder import Embedder
+from services.degradation_tracker import get_degradation_tracker
 from services.notifier import notifier
 from services.parser import (
     ParseResult,
@@ -202,7 +203,7 @@ def _index_file(
     repo_path: Path,
     file_path: Path,
 ) -> Optional[Tuple[CodeFile, ParseResult]]:
-    """Index a single source file. Returns inserted CodeFile and parse result."""
+    """Index a single source file with degradation fallback. Returns inserted CodeFile and parse result."""
     rel_path = str(file_path.relative_to(repo_path))
 
     if should_skip_path(rel_path):
@@ -219,10 +220,49 @@ def _index_file(
         .first()
     )
 
-    parsed = parse_file(rel_path, content, settings.index_chunk_max_lines)
+    parsed = None
+    try:
+        parsed = parse_file(rel_path, content, settings.index_chunk_max_lines)
+    except Exception as e:
+        logger.warning("Tree-sitter parse failed for %s: %s", rel_path, e)
+        get_degradation_tracker().record(
+            component="indexer",
+            error_type="TreeSitterParseError",
+            error_message=str(e),
+            fallback_action="Trying py_parser fallback",
+        )
+
+    if parsed is None and rel_path.endswith(".py"):
+        try:
+            from services.py_parser import parse_python
+            parsed = parse_python(rel_path, content, settings.index_chunk_max_lines)
+            logger.info("Fallback to py_parser succeeded for %s", rel_path)
+        except Exception as e:
+            logger.warning("py_parser also failed for %s: %s", rel_path, e)
+            get_degradation_tracker().record(
+                component="indexer",
+                error_type="PyParserError",
+                error_message=str(e),
+                fallback_action="Falling back to pure text chunks",
+            )
+
     if parsed is None:
-        print(f"[INDEXER] parse failed {rel_path}", flush=True)
-        return None
+        logger.warning("All parsers failed for %s, storing as text only", rel_path)
+        import hashlib
+        from services.parser import ParseResult, _chunk_by_lines
+        size_bytes = len(content.encode("utf-8"))
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        lines = content.split("\n")
+        chunks = _chunk_by_lines(lines, settings.index_chunk_max_lines)
+        parsed = ParseResult(
+            file_path=rel_path,
+            language=detect_language(rel_path) or "unknown",
+            symbols=[],
+            chunks=chunks,
+            size_bytes=size_bytes,
+            content_hash=content_hash,
+            calls=[],
+        )
 
     # If an existing file has the same hash, we still need to ensure its
     # symbols and embeddings were actually persisted. A previous interrupted
@@ -387,8 +427,27 @@ def _bulk_insert_symbols_and_embeddings(
     embedder = Embedder()
     encode_batch_size = min(64, total_chunks)
     vectors: List[Any] = []
-    
+
     for i in range(0, total_chunks, encode_batch_size):
+        try:
+            import psutil
+            available_mb = psutil.virtual_memory().available / (1024 * 1024)
+            if available_mb < 500 and encode_batch_size > 1:
+                encode_batch_size = max(1, encode_batch_size // 2)
+                logger.warning(
+                    "Low memory detected (%.0f MB available), reducing batch size to %d",
+                    available_mb,
+                    encode_batch_size,
+                )
+                get_degradation_tracker().record(
+                    component="indexer",
+                    error_type="LowMemory",
+                    error_message=f"Available memory {available_mb:.0f} MB < 500 MB",
+                    fallback_action=f"Reducing batch size to {encode_batch_size}",
+                )
+        except ImportError:
+            pass
+
         batch_texts = texts_to_embed[i : i + encode_batch_size]
         batch_vectors = embedder.encode(batch_texts)
         vectors.extend(batch_vectors)

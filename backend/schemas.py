@@ -189,6 +189,9 @@ class CodeContext(BaseModel):
     total_files: int = 0
     total_symbols: int = 0
     search_latency_ms: int = 0
+    degraded: bool = False
+    degradation_reason: Optional[str] = None
+    unavailable_sources: List[str] = []
 
 
 class CodeContextResponse(BaseModel):

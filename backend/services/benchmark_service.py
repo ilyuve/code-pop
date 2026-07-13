@@ -1,5 +1,6 @@
-"""Benchmark service layer."""
+"""Benchmark service layer with degradation fallback."""
 
+import logging
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -11,7 +12,10 @@ from sqlalchemy.orm import Session
 from models import BenchmarkRun, CodeFile
 from schemas import BenchmarkCreate, BenchmarkSummary
 from services.embedder import Embedder
+from services.degradation_tracker import get_degradation_tracker
 from services.searcher import Searcher
+
+logger = logging.getLogger(__name__)
 
 
 class BenchmarkService:
@@ -28,30 +32,54 @@ class BenchmarkService:
         return max(0, total_chars // 4)
 
     def _baseline_keyword_search(self, query: str, repo_id: Optional[UUID], limit: int = 20):
-        """Naive baseline: keyword AND scan over file contents."""
+        """Naive baseline: keyword AND scan over file contents with OOM protection."""
         start = time.perf_counter()
         q = self.db.query(CodeFile)
         if repo_id:
             q = q.filter(CodeFile.repo_id == repo_id)
-        files = q.all()
+
+        MAX_FILES = 1000
+        MAX_TEXT_BYTES = 50 * 1024 * 1024
+        files = q.limit(MAX_FILES).all()
+
         keywords = query.lower().split()
         matches = []
+        total_text_bytes = 0
+        partial = False
+
         for f in files:
+            if total_text_bytes >= MAX_TEXT_BYTES:
+                partial = True
+                logger.warning("Baseline scan truncated due to text size limit (%d bytes)", MAX_TEXT_BYTES)
+                get_degradation_tracker().record(
+                    component="benchmark",
+                    error_type="TextLimitExceeded",
+                    error_message=f"Total text {total_text_bytes} bytes >= {MAX_TEXT_BYTES} limit",
+                    fallback_action="Truncating baseline scan",
+                )
+                break
+
             try:
                 content = Path(f.repo.local_path, f.path).read_text(errors="ignore")
+                total_text_bytes += len(content.encode("utf-8"))
             except Exception:
                 content = ""
+
             if all(kw in content.lower() for kw in keywords):
                 matches.append(f)
+
         latency_ms = int((time.perf_counter() - start) * 1000)
         token_consumed = 0
         for f in matches[:limit]:
             try:
-                token_consumed += self.embedder.count_tokens(
-                    Path(f.repo.local_path, f.path).read_text(errors="ignore") or ""
-                )
+                content = Path(f.repo.local_path, f.path).read_text(errors="ignore") or ""
+                token_consumed += self.embedder.count_tokens(content)
             except Exception:
                 pass
+
+        if partial:
+            logger.info("Baseline search completed with partial results (truncated)")
+
         return matches[:limit], latency_ms, token_consumed
 
     def run_benchmark(self, payload: BenchmarkCreate) -> BenchmarkRun:
@@ -68,17 +96,30 @@ class BenchmarkService:
                 if any(exp in f.path.lower() for exp in expected_files_lower):
                     relevant += 1
         else:
-            search_results = self.searcher.hybrid_search(payload.query, payload.repo_id, 20)
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            results = search_results
-            token_consumed = self._estimate_output_tokens(search_results)
-            relevant = 0
-            expected_files_lower = {f.lower() for f in payload.expected_files}
-            for r in results:
-                if any(exp in r.file_path.lower() for exp in expected_files_lower):
-                    relevant += 1
-                if r.line in payload.expected_lines:
-                    relevant += 1
+            try:
+                search_results = self.searcher.hybrid_search(payload.query, payload.repo_id, 20)
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                results = search_results
+                token_consumed = self._estimate_output_tokens(search_results)
+                relevant = 0
+                expected_files_lower = {f.lower() for f in payload.expected_files}
+                for r in results:
+                    if any(exp in r.file_path.lower() for exp in expected_files_lower):
+                        relevant += 1
+                    if r.line in payload.expected_lines:
+                        relevant += 1
+            except Exception as e:
+                logger.error("CodePop search failed in benchmark: %s", e)
+                get_degradation_tracker().record(
+                    component="benchmark",
+                    error_type="SearchFailure",
+                    error_message=str(e),
+                    fallback_action="Continuing benchmark with empty results",
+                )
+                results = []
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                token_consumed = 0
+                relevant = 0
 
         accuracy_score = 0.0
         if results:

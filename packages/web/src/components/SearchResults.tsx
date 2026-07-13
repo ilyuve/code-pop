@@ -7,6 +7,7 @@ import { clsx } from 'clsx';
 interface SearchResultsProps {
   results: SearchResult[];
   isLoading?: boolean;
+  unavailableSources?: string[];
 }
 
 const SCORE_LABELS: Record<string, string> = {
@@ -25,7 +26,14 @@ const SCORE_COLORS: Record<string, string> = {
   final: '#6effb0',
 };
 
-export const SearchResults = ({ results, isLoading }: SearchResultsProps) => {
+const UNAVAILABLE_LABELS: Record<string, string> = {
+  vector: '向量暂不可用',
+  symbol: '符号暂不可用',
+  bm25: 'BM25暂不可用',
+  graph: '调用图暂不可用',
+};
+
+export const SearchResults = ({ results, isLoading, unavailableSources = [] }: SearchResultsProps) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -104,6 +112,18 @@ export const SearchResults = ({ results, isLoading }: SearchResultsProps) => {
       <div className="text-sm text-slate-500 dark:text-slate-400 mb-4">
         找到 {results.length} 个匹配结果
       </div>
+      {unavailableSources.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {unavailableSources.map((source) => (
+            <span
+              key={source}
+              className="text-xs px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 text-yellow-600 dark:text-yellow-400 rounded border border-yellow-200 dark:border-yellow-700"
+            >
+              {UNAVAILABLE_LABELS[source] || `${source}暂不可用`}
+            </span>
+          ))}
+        </div>
+      )}
       {results.map((result, index) => {
         const resultId = `${result.repoId}-${result.filePath}-${result.lineNumber}`;
         const isCopied = copiedId === resultId;

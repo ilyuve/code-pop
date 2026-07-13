@@ -1,5 +1,6 @@
 import type { CodeContext } from '../types';
 import { CodePreview } from './CodePreview';
+import { DegradationBanner } from './DegradationBanner';
 import { FileText, GitBranch, ArrowUpCircle, ArrowDownCircle, Folder, Zap } from 'lucide-react';
 
 interface FlowViewProps {
@@ -49,6 +50,7 @@ const ROLE_COLORS: Record<string, string> = {
 export const FlowView = ({ context }: FlowViewProps) => {
   return (
     <div className="flow-view space-y-6">
+      <DegradationBanner degraded={context.degraded || false} reason={context.degradation_reason} />
       <div className="flex items-center gap-4">
         <div className={`px-3 py-1 rounded-full text-sm font-medium ${INTENT_COLORS[context.query_intent] || INTENT_COLORS.general}`}>
           意图: {INTENT_LABELS[context.query_intent] || context.query_intent}

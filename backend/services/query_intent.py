@@ -1,9 +1,11 @@
-"""Query intent analysis: understand what the user wants, expand synonyms."""
+"""Query intent analysis: understand what the user wants, expand synonyms with degradation fallback."""
 
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
+
+from services.degradation_tracker import get_degradation_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class QueryIntent:
     expanded_terms: List[str] = field(default_factory=list)
     search_strategy: SearchStrategy = field(default_factory=lambda: SearchStrategy("vector", "bm25"))
     is_chinese: bool = False
+    degraded: bool = False
 
 
 class QueryIntentAnalyzer:
@@ -110,20 +113,39 @@ class QueryIntentAnalyzer:
     }
 
     def analyze(self, query: str) -> QueryIntent:
-        is_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
-        intent_type = self._detect_intent(query)
-        concepts = self._extract_concepts(query, is_chinese)
-        expanded_terms = self._expand_synonyms(concepts, query, is_chinese)
-        strategy = self._build_strategy(intent_type, is_chinese)
+        try:
+            is_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
+            intent_type = self._detect_intent(query)
+            concepts = self._extract_concepts(query, is_chinese)
+            expanded_terms = self._expand_synonyms(concepts, query, is_chinese)
+            strategy = self._build_strategy(intent_type, is_chinese)
 
-        return QueryIntent(
-            original=query,
-            intent_type=intent_type,
-            concepts=concepts,
-            expanded_terms=expanded_terms,
-            search_strategy=strategy,
-            is_chinese=is_chinese,
-        )
+            return QueryIntent(
+                original=query,
+                intent_type=intent_type,
+                concepts=concepts,
+                expanded_terms=expanded_terms,
+                search_strategy=strategy,
+                is_chinese=is_chinese,
+                degraded=False,
+            )
+        except Exception as e:
+            logger.warning("Query intent analysis degraded: %s", e)
+            get_degradation_tracker().record(
+                component="query_intent",
+                error_type=type(e).__name__,
+                error_message=str(e),
+                fallback_action="Returning general intent",
+            )
+            return QueryIntent(
+                original=query,
+                intent_type="general",
+                concepts=[],
+                expanded_terms=[query],
+                search_strategy=SearchStrategy("vector", "bm25"),
+                is_chinese=bool(re.search(r'[\u4e00-\u9fff]', query)),
+                degraded=True,
+            )
 
     def _detect_intent(self, query: str) -> str:
         query_lower = query.lower()
