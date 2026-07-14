@@ -2,6 +2,7 @@
 
 import collections
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 from uuid import UUID
@@ -10,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, SearchHistory, SparseEmbedding, Symbol
 from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
@@ -504,6 +505,8 @@ class Searcher:
     ) -> List[SearchResultItem]:
         logger.info("Hybrid search query=%s repo_id=%s", query, repo_id)
 
+        start_time = time.time()
+
         self._degraded_components = set()
         self._degradation_reasons = []
 
@@ -566,6 +569,28 @@ class Searcher:
 
         m3_reranker = get_m3_reranker()
         final = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
+
+        # ---- 记录搜索历史 ----
+        try:
+            latency_ms = int((time.time() - start_time) * 1000)
+            input_tokens = sum(len(r.content.split()) for r in final[:5])
+            history = SearchHistory(
+                query=query,
+                repo_id=repo_id,
+                mode="hybrid",
+                results_count=len(final),
+                latency_ms=latency_ms,
+                input_tokens=input_tokens,
+                output_tokens=0,
+            )
+            self.db.add(history)
+            self.db.commit()
+        except Exception as e:
+            logger.warning("Failed to record search history: %s", e)
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
 
         return final
 
