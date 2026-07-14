@@ -29,7 +29,7 @@ export const Dashboard = () => {
 
   const { data: searchStats } = useQuery({
     queryKey: ['searchHistoryStats'],
-    queryFn: fetchSearchHistoryStats,
+    queryFn: () => fetchSearchHistoryStats(),
     refetchInterval: 30000,
   });
 
