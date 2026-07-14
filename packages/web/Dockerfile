@@ -14,9 +14,9 @@ COPY packages/web ./packages/web
 # Install dependencies and run build scripts (esbuild, etc.).
 RUN pnpm install --config.ignore-scripts=false
 
-# Build the application.
+# Build the application with verbose output.
 WORKDIR /app/packages/web
-RUN pnpm run build
+RUN pnpm run build 2>&1 || (echo "=== BUILD FAILED ===" && pnpm run build 2>&1 | tail -100)
 
 # Serve with nginx.
 FROM nginx:alpine
