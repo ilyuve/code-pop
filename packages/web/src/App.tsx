@@ -9,6 +9,7 @@ import { Search } from './pages/Search';
 import { Benchmark } from './pages/Benchmark';
 import { Settings } from './pages/Settings';
 import { Monitor } from './pages/Monitor';
+import { Stats } from './pages/Stats';
 import { useStore } from './store';
 import { clsx } from 'clsx';
 
@@ -33,6 +34,7 @@ function App() {
               <Route path="/repos/:id" element={<RepoDetail />} />
               <Route path="/search" element={<Search />} />
               <Route path="/benchmark" element={<Benchmark />} />
+              <Route path="/stats" element={<Stats />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/monitor" element={<Monitor />} />
             </Routes>

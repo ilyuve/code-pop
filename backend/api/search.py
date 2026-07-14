@@ -18,6 +18,8 @@ from schemas import (
     ImpactResponse,
     RouteSearchRequest,
     RouteResponse,
+    SearchHistoryDailyStats,
+    SearchHistoryRecentItem,
     SearchHistoryResponse,
     SearchHistoryStats,
     SearchQuery,
@@ -191,6 +193,64 @@ def search_history_stats(
         "total_output_tokens": total_output,
         "estimated_tokens_saved": estimated_tokens_saved,
     }
+
+
+@router.get("/history/daily", response_model=List[SearchHistoryDailyStats])
+def search_history_daily(
+    repo_id: Optional[UUID] = None,
+    days: int = 7,
+    db: Session = Depends(get_db),
+) -> List[SearchHistoryDailyStats]:
+    from sqlalchemy import func, cast, Date
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    q = db.query(
+        cast(SearchHistory.created_at, Date).label("date"),
+        func.count().label("total_queries"),
+        func.coalesce(func.sum(SearchHistory.input_tokens), 0).label("total_input_tokens"),
+        func.coalesce(func.sum(SearchHistory.output_tokens), 0).label("total_output_tokens"),
+        func.coalesce(func.sum(SearchHistory.results_count), 0).label("total_results_count"),
+    ).filter(SearchHistory.created_at >= cutoff)
+
+    if repo_id:
+        q = q.filter(SearchHistory.repo_id == repo_id)
+
+    rows = q.group_by(cast(SearchHistory.created_at, Date)).order_by("date").all()
+    return [SearchHistoryDailyStats(
+        date=str(r.date),
+        total_queries=r.total_queries,
+        total_input_tokens=int(r.total_input_tokens),
+        total_output_tokens=int(r.total_output_tokens),
+        total_results_count=int(r.total_results_count),
+    ) for r in rows]
+
+
+@router.get("/history/recent", response_model=List[SearchHistoryRecentItem])
+def search_history_recent(
+    repo_id: Optional[UUID] = None,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+) -> List[SearchHistoryRecentItem]:
+    from sqlalchemy.orm import joinedload
+
+    q = db.query(SearchHistory).options(joinedload(SearchHistory.repo))
+    if repo_id:
+        q = q.filter(SearchHistory.repo_id == repo_id)
+
+    rows = q.order_by(SearchHistory.created_at.desc()).limit(limit).all()
+    return [SearchHistoryRecentItem(
+        id=r.id,
+        query=r.query,
+        repo_id=r.repo_id,
+        repo_name=r.repo.name if r.repo else None,
+        mode=r.mode,
+        results_count=r.results_count,
+        latency_ms=r.latency_ms,
+        input_tokens=r.input_tokens,
+        output_tokens=r.output_tokens,
+        created_at=r.created_at,
+    ) for r in rows]
 
 
 @router.post("/routes", response_model=List[RouteResponse])

@@ -129,6 +129,30 @@ class SearchHistoryStats(BaseModel):
     estimated_tokens_saved: int
 
 
+class SearchHistoryDailyStats(BaseModel):
+    date: str
+    total_queries: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_results_count: int
+
+
+class SearchHistoryRecentItem(BaseModel):
+    id: UUID
+    query: str
+    repo_id: Optional[UUID]
+    repo_name: Optional[str] = None
+    mode: str
+    results_count: int
+    latency_ms: int
+    input_tokens: int
+    output_tokens: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class WebhookPayload(BaseModel):
     ref: Optional[str] = None
     repository: Optional[dict] = None

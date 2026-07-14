@@ -86,6 +86,27 @@ export interface SearchHistoryStats {
   estimatedTokensSaved: number;
 }
 
+export interface SearchHistoryDailyStats {
+  date: string;
+  totalQueries: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalResultsCount: number;
+}
+
+export interface SearchHistoryRecentItem {
+  id: string;
+  query: string;
+  repoId?: string;
+  repoName?: string;
+  mode: string;
+  resultsCount: number;
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: string;
+}
+
 // Form types
 export interface AddRepoForm {
   name?: string;

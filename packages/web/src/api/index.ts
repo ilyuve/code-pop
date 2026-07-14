@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, CodeContext } from '../types';
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext } from '../types';
 
 const apiClient = axios.create({
   baseURL: '/api',
@@ -138,8 +138,10 @@ export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => 
   return response.data;
 };
 
-export const fetchSearchHistoryStats = async (): Promise<SearchHistoryStats> => {
-  const response = await apiClient.get('/search/history/stats');
+export const fetchSearchHistoryStats = async (repoId?: string): Promise<SearchHistoryStats> => {
+  const params = new URLSearchParams();
+  if (repoId) params.append('repo_id', repoId);
+  const response = await apiClient.get(`/search/history/stats?${params.toString()}`);
   const data = response.data;
   return {
     totalQueries: data.total_queries || 0,
@@ -148,6 +150,45 @@ export const fetchSearchHistoryStats = async (): Promise<SearchHistoryStats> => 
     totalOutputTokens: data.total_output_tokens || 0,
     estimatedTokensSaved: data.estimated_tokens_saved || 0,
   };
+};
+
+export const fetchSearchHistoryDaily = async (
+  repoId?: string,
+  days: number = 7
+): Promise<SearchHistoryDailyStats[]> => {
+  const params = new URLSearchParams();
+  if (repoId) params.append('repo_id', repoId);
+  params.append('days', String(days));
+  const response = await apiClient.get(`/search/history/daily?${params.toString()}`);
+  return response.data.map((r: any) => ({
+    date: r.date,
+    totalQueries: r.total_queries || 0,
+    totalInputTokens: r.total_input_tokens || 0,
+    totalOutputTokens: r.total_output_tokens || 0,
+    totalResultsCount: r.total_results_count || 0,
+  }));
+};
+
+export const fetchSearchHistoryRecent = async (
+  repoId?: string,
+  limit: number = 10
+): Promise<SearchHistoryRecentItem[]> => {
+  const params = new URLSearchParams();
+  if (repoId) params.append('repo_id', repoId);
+  params.append('limit', String(limit));
+  const response = await apiClient.get(`/search/history/recent?${params.toString()}`);
+  return response.data.map((r: any) => ({
+    id: r.id,
+    query: r.query,
+    repoId: r.repo_id,
+    repoName: r.repo_name,
+    mode: r.mode,
+    resultsCount: r.results_count || 0,
+    latencyMs: r.latency_ms || 0,
+    inputTokens: r.input_tokens || 0,
+    outputTokens: r.output_tokens || 0,
+    createdAt: r.created_at,
+  }));
 };
 
 // Benchmark APIs
