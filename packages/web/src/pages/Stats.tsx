@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { TrendingDown, Database, Cpu, FileText, Clock, Package, ArrowUpRight } from 'lucide-react';
+import { TrendingDown, Database, FileText, ArrowUpRight, Search } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useRepos } from '../hooks/useRepos';
 import { fetchSearchHistoryStats, fetchSearchHistoryDaily, fetchSearchHistoryRecent } from '../api';
@@ -84,13 +84,13 @@ export const Stats = () => {
     );
 
     const pointsInput = data.map((d, i) => {
-      const x = (i / (data.length - 1)) * 100;
+      const x = data.length === 1 ? 50 : (i / (data.length - 1)) * 100;
       const y = 100 - (d.totalInputTokens / maxToken) * 90;
       return `${x},${y}`;
     }).join(' ');
 
     const pointsOutput = data.map((d, i) => {
-      const x = (i / (data.length - 1)) * 100;
+      const x = data.length === 1 ? 50 : (i / (data.length - 1)) * 100;
       const y = 100 - (d.totalOutputTokens / maxToken) * 90;
       return `${x},${y}`;
     }).join(' ');
