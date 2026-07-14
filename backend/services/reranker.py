@@ -4,7 +4,6 @@ import collections
 from typing import List
 
 from sentence_transformers import CrossEncoder
-from config import settings
 from schemas import SearchResultItem
 
 logger = logging.getLogger(__name__)
@@ -13,17 +12,27 @@ logger = logging.getLogger(__name__)
 _m3_reranker_instance = None
 
 
+RERANKER_MODEL = "BAAI/bge-reranker-base"
+
+
 class M3Reranker:
-    """用 bge-m3 做交叉编码重排序。"""
+    """用 bge-reranker-base 做交叉编码重排序。"""
 
     def __init__(self):
-        if not hasattr(self, '_model') or self._model is None:
-            model_name = settings.embedding_model
-            self._model = CrossEncoder(
-                model_name,
-                max_length=512,
-                device='cpu',
-            )
+        if not hasattr(self, '_model'):
+            self._model = None
+
+        if self._model is None:
+            try:
+                self._model = CrossEncoder(
+                    RERANKER_MODEL,
+                    max_length=512,
+                    device='cpu',
+                )
+                logger.info("M3Reranker model loaded: %s", RERANKER_MODEL)
+            except Exception as e:
+                logger.warning("Failed to load M3Reranker model %s: %s", RERANKER_MODEL, e)
+                self._model = None
 
     @property
     def model(self):
@@ -33,6 +42,10 @@ class M3Reranker:
     def rerank(self, query: str, results: List[SearchResultItem], top_k: int = 10) -> List[SearchResultItem]:
         if not results:
             return results
+
+        if self._model is None:
+            logger.warning("M3Reranker model not loaded, skipping rerank")
+            return results[:top_k]
 
         pairs = [
             [query, f"{r.file_path}: {r.content[:500]}"]

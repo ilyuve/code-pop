@@ -53,6 +53,12 @@ async def github_webhook(
     if event_type != "push":
         return {"status": "ignored", "event": event_type}
 
+    # 只处理 main 和 master 分支的 push
+    ref = data.get("ref", "")
+    if ref not in ("refs/heads/main", "refs/heads/master"):
+        logger.info("Ignoring push to branch %s", ref)
+        return {"status": "ignored", "reason": f"branch {ref} not main/master"}
+
     repo_info = data.get("repository") or {}
     clone_url = repo_info.get("clone_url")
     if not clone_url:

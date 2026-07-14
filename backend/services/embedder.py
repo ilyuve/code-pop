@@ -117,7 +117,7 @@ class Embedder:
             return self._degraded_encode(texts)
 
     def encode_sparse(self, texts: List[str]) -> List[dict]:
-        """Return sparse embeddings (token weights) using transformers auto model."""
+        """Return sparse embeddings (token weights) using BGEM3FlagModel."""
         if not texts:
             return []
 
@@ -125,47 +125,32 @@ class Embedder:
             return [{} for _ in texts]
 
         try:
-            import torch
-            from transformers import AutoTokenizer, AutoModel
-
             model_name = settings.embedding_model
 
-            if not hasattr(self, '_sparse_tokenizer') or self._sparse_tokenizer is None:
-                self._sparse_tokenizer = AutoTokenizer.from_pretrained(model_name)
-                self._sparse_model = AutoModel.from_pretrained(model_name)
-                self._sparse_model.eval()
-                if torch.cuda.is_available():
-                    self._sparse_model = self._sparse_model.to('cuda')
+            if not hasattr(self, '_m3_model') or self._m3_model is None:
+                from FlagEmbedding import BGEM3FlagModel
+                logger.info("Loading BGEM3FlagModel for sparse embeddings: %s", model_name)
+                self._m3_model = BGEM3FlagModel(
+                    model_name,
+                    devices='cpu',
+                    use_fp16=False,
+                )
+
+            output = self._m3_model.encode(
+                texts,
+                return_dense=False,
+                return_sparse=True,
+                return_colbert_vecs=False,
+            )
+            lexical_weights = output['lexical_weights']
 
             results = []
-            with torch.no_grad():
-                for text in texts:
-                    inputs = self._sparse_tokenizer(
-                        text,
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=512,
-                    )
-                    if torch.cuda.is_available():
-                        inputs = {k: v.to('cuda') for k, v in inputs.items()}
-
-                    outputs = self._sparse_model(**inputs)
-                    embeddings = outputs.last_hidden_state.squeeze(0)
-                    weights = torch.norm(embeddings, dim=-1).tolist()
-                    tokens = inputs["input_ids"].squeeze(0).tolist()
-
-                    sparse_dict = {}
-                    special_ids = {
-                        self._sparse_tokenizer.pad_token_id,
-                        self._sparse_tokenizer.cls_token_id,
-                        self._sparse_tokenizer.sep_token_id,
-                    }
-                    for token_id, weight in zip(tokens, weights):
-                        if token_id in special_ids or weight <= 0.1:
-                            continue
-                        sparse_dict[token_id] = weight
-                    results.append(sparse_dict)
+            for s in lexical_weights:
+                sparse_dict = {}
+                for k, v in s.items():
+                    if float(v) > 0.0:
+                        sparse_dict[int(k)] = float(v)
+                results.append(sparse_dict)
 
             return results
         except Exception as exc:

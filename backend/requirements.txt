@@ -15,6 +15,7 @@ pgvector==0.3.6
 # Embeddings (local, no OpenAI)
 sentence-transformers==3.3.0
 huggingface-hub==0.26.0
+FlagEmbedding>=1.2.0
 
 # Code parsing
 tree-sitter==0.24.0

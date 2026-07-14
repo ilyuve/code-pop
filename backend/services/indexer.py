@@ -888,6 +888,20 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
 
         _add_log(db, repo_id_str, "info", "框架路由解析完成", "routes")
 
+        # ---- 清理已删除的文件 ----
+        # 扫描仓库当前所有文件路径，删除数据库中不存在于仓库的记录
+        current_file_paths = set(str(f.relative_to(local_path)) for f in source_files)
+        db_files = db.query(CodeFile).filter(CodeFile.repo_id == repo_id).all()
+        deleted_count = 0
+        for db_file in db_files:
+            if db_file.path not in current_file_paths:
+                db.delete(db_file)
+                deleted_count += 1
+        if deleted_count > 0:
+            db.commit()
+            logger.info("Deleted %d removed files from database for repo %s", deleted_count, repo_id)
+            _add_log(db, repo_id_str, "info", f"清理已删除文件: {deleted_count} 个", "cleanup")
+
         repo.status = RepoStatus.indexed.value
         repo.last_indexed_at = datetime.utcnow()
         db.commit()
