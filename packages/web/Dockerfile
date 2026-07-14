@@ -14,7 +14,12 @@ COPY tailwind.config.js ./
 COPY src ./src
 COPY public ./public
 
-RUN npm run build
+RUN echo "=== Running build with verbose output ===" && \
+    npm run build 2>&1 || (echo "BUILD FAILED"; exit 1)
+
+RUN echo "=== Build result ===" && \
+    ls -la dist || \
+    (echo "DIST NOT FOUND"; exit 1)
 
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
