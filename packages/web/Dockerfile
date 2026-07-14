@@ -2,28 +2,25 @@ FROM node:20-slim AS builder
 
 WORKDIR /app
 
-COPY package.json ./
+RUN npm install -g pnpm
 
-RUN npm install --legacy-peer-deps --network-timeout=600000
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 
-COPY tsconfig.json ./
-COPY vite.config.ts ./
-COPY index.html ./
-COPY postcss.config.js ./
-COPY tailwind.config.js ./
-COPY src ./src
-COPY public ./public
+COPY packages/web ./packages/web
 
-RUN echo "=== Running build with verbose output ===" && \
-    npm run build 2>&1 || (echo "BUILD FAILED"; exit 1)
+RUN pnpm install --config.ignore-scripts=false --network-timeout=600000
 
-RUN echo "=== Build result ===" && \
-    ls -la dist || \
-    (echo "DIST NOT FOUND"; exit 1)
+WORKDIR /app/packages/web
+
+RUN pnpm exec tsc --noEmit
+
+RUN pnpm run build
+
+RUN ls -la dist
 
 FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/packages/web/dist /usr/share/nginx/html
+COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 3000
 
