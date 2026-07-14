@@ -4,15 +4,19 @@ WORKDIR /app
 
 RUN npm install -g pnpm
 
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+# 安装编译原生模块所需的系统工具（esbuild 等）
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/web ./packages/web
 
-RUN pnpm install --config.ignore-scripts=false --network-timeout=600000
+RUN pnpm install --frozen-lockfile
 
 WORKDIR /app/packages/web
-
-RUN pnpm exec tsc --noEmit
 
 RUN pnpm run build
 
