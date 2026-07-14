@@ -2,27 +2,23 @@ FROM node:20-slim AS builder
 
 WORKDIR /app
 
-# Install pnpm.
-RUN npm install -g pnpm
+COPY package.json ./
 
-# Copy pnpm workspace config and lockfile from root.
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+RUN npm install --legacy-peer-deps --network-timeout=600000
 
-# Copy web package.
-COPY packages/web ./packages/web
+COPY tsconfig.json ./
+COPY vite.config.ts ./
+COPY index.html ./
+COPY postcss.config.js ./
+COPY tailwind.config.js ./
+COPY src ./src
+COPY public ./public
 
-# Install dependencies and run build scripts (esbuild, etc.).
-RUN pnpm install --config.ignore-scripts=false
+RUN npm run build
 
-# Build the application with verbose output.
-WORKDIR /app/packages/web
-RUN echo "=== Checking TypeScript ===" && pnpm exec tsc --noEmit 2>&1 | tail -50
-RUN echo "=== Running Build ===" && pnpm run build 2>&1 || (echo "=== BUILD FAILED ===" && pnpm run build 2>&1 | tail -100)
-
-# Serve with nginx.
 FROM nginx:alpine
-COPY --from=builder /app/packages/web/dist /usr/share/nginx/html
-COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 3000
 
