@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware/persist';
 import type { Repo, SearchResult, Settings } from '../types';
 import type { WebSocketStatus } from '../hooks/useWebSocket';
 
