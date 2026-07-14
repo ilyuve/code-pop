@@ -16,7 +16,8 @@ RUN pnpm install --config.ignore-scripts=false
 
 # Build the application with verbose output.
 WORKDIR /app/packages/web
-RUN pnpm run build 2>&1 || (echo "=== BUILD FAILED ===" && pnpm run build 2>&1 | tail -100)
+RUN echo "=== Checking TypeScript ===" && pnpm exec tsc --noEmit 2>&1 | tail -50
+RUN echo "=== Running Build ===" && pnpm run build 2>&1 || (echo "=== BUILD FAILED ===" && pnpm run build 2>&1 | tail -100)
 
 # Serve with nginx.
 FROM nginx:alpine
