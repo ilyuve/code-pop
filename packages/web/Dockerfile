@@ -11,12 +11,12 @@ COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 # Copy web package.
 COPY packages/web ./packages/web
 
-# Install dependencies with verbose output.
-RUN pnpm install --verbose 2>&1 | tail -50
+# Install dependencies and run build scripts (esbuild, etc.)
+RUN pnpm install --config.ignore-scripts=false
 
-# Build the application with verbose output.
+# Build the application.
 WORKDIR /app/packages/web
-RUN pnpm run build 2>&1
+RUN pnpm run build
 
 # Serve with nginx.
 FROM nginx:alpine
