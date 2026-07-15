@@ -20,6 +20,9 @@ postgres/
 # 代码仓库目录
 repos/
 
+# 模型缓存
+models/
+
 # 构建产物
 dist/
 build/
