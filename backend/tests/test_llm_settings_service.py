@@ -8,6 +8,7 @@ import pytest
 from services.llm_settings_service import (
     create_provider,
     delete_provider,
+    get_cost_estimate,
     get_provider,
     get_usage_summary,
     list_providers,
@@ -174,3 +175,44 @@ def test_get_usage_summary():
     assert summary["total_calls"] == 5
     assert summary["success_calls"] == 5
     assert summary["input_tokens"] == 100
+
+
+def test_get_cost_estimate_empty():
+    db = MagicMock()
+    db.query.return_value.outerjoin.return_value.filter.return_value.filter.return_value.group_by.return_value.all.return_value = []
+
+    estimate = get_cost_estimate(db, minutes=60)
+    assert estimate["period_minutes"] == 60
+    assert estimate["total_cost"] == 0
+    assert estimate["provider_breakdown"] == {}
+    assert estimate["operation_breakdown"] == {}
+
+
+def test_get_cost_estimate_with_usage():
+    db = MagicMock()
+    row = MagicMock()
+    row.provider_id = uuid4()
+    row.operation = "chat"
+    row.provider_name = "deepseek"
+    row.cost_per_1k_input = 0.001
+    row.cost_per_1k_output = 0.002
+    row.call_count = 2
+    row.input_tokens = 2000
+    row.output_tokens = 1000
+    db.query.return_value.outerjoin.return_value.filter.return_value.filter.return_value.group_by.return_value.all.return_value = [row]
+
+    estimate = get_cost_estimate(db, minutes=60)
+    assert estimate["total_cost"] == 0.004  # (2000/1000)*0.001 + (1000/1000)*0.002
+    assert estimate["total_input_tokens"] == 2000
+    assert estimate["total_output_tokens"] == 1000
+    assert estimate["provider_breakdown"]["deepseek"]["cost"] == 0.004
+    assert estimate["operation_breakdown"]["chat"]["cost"] == 0.004
+
+
+def test_get_cost_estimate_filters_by_repo():
+    db = MagicMock()
+    repo_id = uuid4()
+    db.query.return_value.outerjoin.return_value.filter.return_value.filter.return_value.group_by.return_value.all.return_value = []
+
+    estimate = get_cost_estimate(db, minutes=60, repo_id=repo_id)
+    assert estimate["repo_id"] == str(repo_id)

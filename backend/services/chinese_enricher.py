@@ -203,14 +203,14 @@ def aggregate_domain_synonyms(
                 current = set(json.loads(row.synonyms))
                 current.update(cleaned)
                 row.synonyms = json.dumps(sorted(current), ensure_ascii=False)
-                row.frequency += 1
+                row.hit_count += 1
             else:
                 row = DomainSynonym(
                     repo_id=repo_id,
                     canonical_term=term,
                     synonyms=json.dumps(cleaned, ensure_ascii=False),
                     source="auto",
-                    frequency=1,
+                    hit_count=1,
                 )
                 db.add(row)
                 existing[term] = row
@@ -251,10 +251,12 @@ def save_embedding_enrichment(
     content_hash: str,
     result: EnrichmentResult,
     generated_by: str,
+    provider_id: Optional[UUID] = None,
 ) -> None:
     """Persist enrichment result for an embedding."""
     enrichment = EmbeddingEnrichment(
         embedding_id=embedding_id,
+        provider_id=provider_id,
         content_hash=content_hash,
         chinese_summary=result.chinese_summary,
         keywords=json.dumps(result.keywords, ensure_ascii=False),
@@ -270,10 +272,12 @@ def save_symbol_flow_label(
     db: Session,
     symbol_id: UUID,
     result: FlowLabelResult,
+    provider_id: Optional[UUID] = None,
 ) -> None:
     """Persist flow label for a symbol."""
     label = SymbolFlowLabel(
         symbol_id=symbol_id,
+        provider_id=provider_id,
         layer=result.layer,
         module=result.module,
         chinese_name=result.chinese_name,

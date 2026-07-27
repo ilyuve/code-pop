@@ -79,7 +79,21 @@ class LLMClient:
         self.base_url = provider.base_url.rstrip("/")
         self.model = provider.model
         self.timeout = provider.timeout_seconds or 60
-        self.extra_headers = json.loads(provider.extra_headers) if provider.extra_headers else {}
+        self.extra_headers = self._parse_json_field(provider.extra_headers)
+        self.extra_body = self._parse_json_field(provider.extra_body)
+
+    @staticmethod
+    def _parse_json_field(value: Any) -> Dict[str, Any]:
+        if not value or isinstance(value, bool):
+            return {}
+        if isinstance(value, str):
+            try:
+                return json.loads(value) or {}
+            except json.JSONDecodeError:
+                return {}
+        if isinstance(value, dict):
+            return value
+        return {}
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -102,6 +116,8 @@ class LLMClient:
         }
         if response_format:
             payload["response_format"] = response_format
+        if self.extra_body:
+            payload.update(self.extra_body)
 
         import asyncio
         import time
@@ -154,6 +170,8 @@ class LLMClient:
             "model": self.model,
             "input": texts,
         }
+        if self.extra_body:
+            payload.update(self.extra_body)
 
         import time
 

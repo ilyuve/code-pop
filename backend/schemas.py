@@ -185,6 +185,7 @@ class CallChain(BaseModel):
     upstream: List[SymbolEntry] = []
     downstream: List[SymbolEntry] = []
     depth: int = 0
+    flow_summary: Optional[str] = None
 
 
 class FileRole(str):
@@ -212,6 +213,7 @@ class CodeContext(BaseModel):
     matched_concepts: List[str] = []
     entry_points: List[SymbolEntry] = []
     call_chain: Optional[CallChain] = None
+    flow_summary: Optional[str] = None
     related_files: List[FileSummary] = []
     code_snippets: List[SearchResultItem] = []
     total_files: int = 0

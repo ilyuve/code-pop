@@ -16,6 +16,7 @@ def _make_provider(name="test", capability="chat"):
     p = MagicMock()
     p.id = uuid4()
     p.name = name
+    p.provider_type = "openai_compatible"
     p.base_url = "https://api.example.com"
     p.api_key = "encrypted"
     p.model = "model"
@@ -25,7 +26,10 @@ def _make_provider(name="test", capability="chat"):
     p.max_tokens = 1024
     p.temperature = 0.1
     p.timeout_seconds = 30
+    p.cost_per_1k_input = 0.001
+    p.cost_per_1k_output = 0.002
     p.extra_headers = None
+    p.extra_body = None
     p.created_at = None
     p.updated_at = None
     return p
@@ -130,3 +134,14 @@ def test_usage_summary(client, mock_db):
     resp = client.get("/api/admin/llm/usage?minutes=60")
     assert resp.status_code == 200
     assert resp.json()["period_minutes"] == 60
+
+
+def test_cost_estimate(client, mock_db):
+    mock_db.query.return_value.outerjoin.return_value.filter.return_value.filter.return_value.group_by.return_value.all.return_value = []
+
+    resp = client.get("/api/admin/llm/cost?minutes=60")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["period_minutes"] == 60
+    assert data["total_cost"] == 0
+    assert data["provider_breakdown"] == {}

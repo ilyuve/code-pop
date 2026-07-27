@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext } from '../types';
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext, LLMCostEstimate } from '../types';
 
 const apiClient = axios.create({
   baseURL: '/api',
@@ -248,6 +248,28 @@ export const fetchBenchmarkSummary = async (): Promise<BenchmarkSummary> => {
 // Health APIs
 export const fetchHealth = async (): Promise<any> => {
   const response = await apiClient.get('/health');
+  return response.data;
+};
+
+// LLM admin APIs
+export const fetchLLMProviders = async (): Promise<any[]> => {
+  const response = await apiClient.get('/admin/llm/providers');
+  return response.data.providers || [];
+};
+
+export const fetchLLMUsage = async (minutes: number = 60): Promise<any> => {
+  const response = await apiClient.get(`/admin/llm/usage?minutes=${minutes}`);
+  return response.data;
+};
+
+export const fetchLLMCost = async (
+  minutes: number = 60,
+  repoId?: string
+): Promise<LLMCostEstimate> => {
+  const params = new URLSearchParams();
+  params.append('minutes', String(minutes));
+  if (repoId) params.append('repo_id', repoId);
+  const response = await apiClient.get(`/admin/llm/cost?${params.toString()}`);
   return response.data;
 };
 

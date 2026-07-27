@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -149,9 +150,13 @@ class SearchHistory(Base):
     latency_ms = Column(Integer, default=0, nullable=False)
     input_tokens = Column(Integer, default=0, nullable=False)
     output_tokens = Column(Integer, default=0, nullable=False)
+    llm_provider_id = Column(UUID(as_uuid=True), ForeignKey("llm_providers.id", ondelete="SET NULL"), nullable=True)
+    llm_input_tokens = Column(Integer, default=0, nullable=False)
+    llm_output_tokens = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     repo = relationship("Repository", back_populates="history")
+    llm_provider = relationship("LlmProvider")
 
 
 class BenchmarkMode(str, PyEnum):
@@ -241,11 +246,24 @@ class LlmProviderCapability(str, PyEnum):
     both = "both"
 
 
+class LlmProviderType(str, PyEnum):
+    openai_compatible = "openai_compatible"
+    deepseek = "deepseek"
+    glm = "glm"
+    azure = "azure"
+    custom = "custom"
+
+
 class LlmProvider(Base):
     __tablename__ = "llm_providers"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(128), nullable=False)
+    provider_type = Column(
+        String(32),
+        default=LlmProviderType.openai_compatible.value,
+        nullable=False,
+    )
     base_url = Column(String(512), nullable=False)
     api_key = Column(Text, nullable=False)  # encrypted
     model = Column(String(128), nullable=False)
@@ -255,7 +273,10 @@ class LlmProvider(Base):
     max_tokens = Column(Integer, default=4096, nullable=False)
     temperature = Column(Float, default=0.1, nullable=False)
     timeout_seconds = Column(Integer, default=60, nullable=False)
+    cost_per_1k_input = Column(Numeric(10, 6), default=0, nullable=False)
+    cost_per_1k_output = Column(Numeric(10, 6), default=0, nullable=False)
     extra_headers = Column(Text, nullable=True)  # JSON
+    extra_body = Column(Text, nullable=True)  # JSON
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -281,11 +302,32 @@ class LlmUsageLog(Base):
     provider = relationship("LlmProvider")
 
 
+class LlmSetting(Base):
+    __tablename__ = "llm_settings"
+    __table_args__ = (
+        UniqueConstraint("scope", "repo_id", name="uix_llm_setting_scope_repo"),
+        Index("idx_llm_setting_repo", "repo_id"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope = Column(String(32), nullable=False)  # global / repo
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=True)
+    enable_index_chinese_enrich = Column(Integer, default=1, nullable=False)  # 0/1
+    enable_query_llm_expand = Column(Integer, default=1, nullable=False)  # 0/1
+    enable_flow_label = Column(Integer, default=1, nullable=False)  # 0/1
+    default_provider_id = Column(UUID(as_uuid=True), ForeignKey("llm_providers.id", ondelete="SET NULL"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    repo = relationship("Repository")
+    default_provider = relationship("LlmProvider")
+
+
 class EmbeddingEnrichment(Base):
     __tablename__ = "embedding_enrichments"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     embedding_id = Column(UUID(as_uuid=True), ForeignKey("embeddings.id", ondelete="CASCADE"), nullable=False, unique=True)
+    provider_id = Column(UUID(as_uuid=True), ForeignKey("llm_providers.id", ondelete="SET NULL"), nullable=True)
     content_hash = Column(String(64), nullable=False)
     chinese_summary = Column(Text, nullable=True)
     keywords = Column(Text, nullable=True)  # JSON list
@@ -296,6 +338,7 @@ class EmbeddingEnrichment(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     embedding = relationship("Embedding", back_populates="enrichment")
+    provider = relationship("LlmProvider")
 
 
 class DomainSynonym(Base):
@@ -310,7 +353,7 @@ class DomainSynonym(Base):
     canonical_term = Column(String(128), nullable=False)
     synonyms = Column(Text, nullable=False)  # JSON list
     source = Column(String(32), default="auto", nullable=False)  # auto / manual
-    frequency = Column(Integer, default=1, nullable=False)
+    hit_count = Column(Integer, default=1, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -323,6 +366,7 @@ class SymbolFlowLabel(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     symbol_id = Column(UUID(as_uuid=True), ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
+    provider_id = Column(UUID(as_uuid=True), ForeignKey("llm_providers.id", ondelete="SET NULL"), nullable=True)
     layer = Column(String(64), nullable=True)  # controller / service / repository / etc.
     module = Column(String(128), nullable=True)
     chinese_name = Column(String(256), nullable=True)
@@ -331,6 +375,7 @@ class SymbolFlowLabel(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     symbol = relationship("Symbol", back_populates="flow_label")
+    provider = relationship("LlmProvider")
 
 
 # Wire up reverse relationships

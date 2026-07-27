@@ -29,6 +29,7 @@ from services.parser import (
 from services.router_parser import RouterParser
 from services.repo_sync import clone_or_pull
 from services.chinese_enricher import (
+    EnrichmentResult,
     aggregate_domain_synonyms,
     enrich_chunk,
     enrich_symbol_flow,
@@ -36,6 +37,7 @@ from services.chinese_enricher import (
     save_symbol_flow_label,
 )
 from services.llm_router import LLMRouter
+from services.llm_settings_service import get_effective_settings
 
 logger = logging.getLogger(__name__)
 
@@ -310,12 +312,29 @@ def _index_file(
     return code_file, parsed
 
 
+def _build_enriched_text(content: str, enrichment: Optional[EnrichmentResult]) -> str:
+    """Prepend Chinese summary and keywords to chunk content for embedding."""
+    if not enrichment:
+        return content
+    parts = []
+    if enrichment.chinese_summary:
+        parts.append(f"【中文摘要】{enrichment.chinese_summary}")
+    if enrichment.keywords:
+        parts.append(f"【关键词】{', '.join(enrichment.keywords)}")
+    if parts:
+        return "\n".join(parts) + "\n\n" + content
+    return content
+
+
 def _bulk_insert_symbols_and_embeddings(
     db: Session,
     repo_id: UUID,
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
+    enrichment_provider_id: Optional[UUID] = None,
+    enrichment_model_name: str = "unknown",
 ) -> None:
     """Embed chunks and bulk insert symbols + embeddings for parsed files."""
     logger.info(
@@ -388,14 +407,22 @@ def _bulk_insert_symbols_and_embeddings(
             )
 
     # ---- Stage 3: vector generation (55% -> 80%) ----
+    import hashlib
+
     embedding_mappings: List[Dict[str, Any]] = []
     texts_to_embed: List[str] = []
-    meta: List[Tuple[UUID, int, int, int, int]] = []  # (file_id, chunk_index, start_line, end_line, token_count)
+    original_contents: List[str] = []
+    meta: List[Tuple[UUID, int, int, int, int, str]] = []  # (file_id, chunk_index, start_line, end_line, token_count, chunk_hash)
+    chunk_hashes: List[str] = []
 
     for code_file, parsed in file_records:
         for idx, chunk in enumerate(parsed.chunks):
-            texts_to_embed.append(chunk.content)
-            meta.append((code_file.id, idx, chunk.start_line, chunk.end_line, len(chunk.content.split())))
+            chunk_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+            enrichment = chunk_enrichments.get(chunk_hash) if chunk_enrichments else None
+            texts_to_embed.append(_build_enriched_text(chunk.content, enrichment))
+            original_contents.append(chunk.content)
+            meta.append((code_file.id, idx, chunk.start_line, chunk.end_line, len(chunk.content.split()), chunk_hash))
+            chunk_hashes.append(chunk_hash)
 
     total_chunks = len(texts_to_embed)
     logger.info("Encoding %d chunks", total_chunks)
@@ -483,7 +510,7 @@ def _bulk_insert_symbols_and_embeddings(
     sparse_embeddings_data: List[Dict[str, Any]] = []
 
     for text_idx, (vector, mapping_meta) in enumerate(zip(vectors, meta)):
-        file_id, chunk_index, start_line, end_line, token_count = mapping_meta
+        file_id, chunk_index, start_line, end_line, token_count, chunk_hash = mapping_meta
         embedding_mappings.append(
             {
                 "file_id": file_id,
@@ -491,7 +518,7 @@ def _bulk_insert_symbols_and_embeddings(
                 "chunk_index": chunk_index,
                 "start_line": start_line,
                 "end_line": end_line,
-                "content": texts_to_embed[text_idx],
+                "content": original_contents[text_idx],
                 "embedding": vector,
                 "token_count": token_count,
             }
@@ -538,6 +565,23 @@ def _bulk_insert_symbols_and_embeddings(
             log_message=f"已插入 {inserted}/{total_embeddings} 条向量",
             db=db,
         )
+
+    # Persist enrichments now that embeddings have IDs.
+    if chunk_enrichments:
+        embedding_meta = {
+            (emb.file_id, emb.chunk_index): emb.id
+            for emb in db.query(Embedding).filter(Embedding.repo_id == repo_id).all()
+        }
+        for text_idx, mapping_meta in enumerate(meta):
+            file_id, chunk_index, _, _, _, chunk_hash = mapping_meta
+            enrichment = chunk_enrichments.get(chunk_hash)
+            embedding_id = embedding_meta.get((file_id, chunk_index))
+            if enrichment and embedding_id:
+                save_embedding_enrichment(
+                    db, embedding_id, chunk_hash, enrichment,
+                    enrichment_model_name, provider_id=enrichment_provider_id,
+                )
+        db.commit()
 
     _notify(
         loop,
@@ -617,14 +661,40 @@ def _bulk_insert_symbols_and_embeddings(
     )
 
 
-async def _enrich_repository_async(
+def _load_cached_enrichments(db: Session, chunk_hashes: List[str]) -> Dict[str, EnrichmentResult]:
+    """Load existing enrichment results by chunk content hash for deduplication."""
+    if not chunk_hashes:
+        return {}
+    unique_hashes = list(set(chunk_hashes))
+    rows = (
+        db.query(EmbeddingEnrichment)
+        .filter(EmbeddingEnrichment.content_hash.in_(unique_hashes))
+        .all()
+    )
+    cached: Dict[str, EnrichmentResult] = {}
+    for row in rows:
+        if not row.content_hash or row.content_hash in cached:
+            continue
+        cached[row.content_hash] = EnrichmentResult(
+            chinese_summary=row.chinese_summary,
+            keywords=json.loads(row.keywords) if row.keywords else [],
+            vertical_layer=row.vertical_layer,
+            horizontal_module=row.horizontal_module,
+            synonyms=json.loads(row.synonyms) if row.synonyms else {},
+        )
+    return cached
+
+
+async def _enrich_chunks_for_indexing_async(
     db: Session,
     repo_id: UUID,
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
-) -> None:
-    """Generate Chinese summaries, keywords, synonyms and flow labels via LLM."""
+) -> Tuple[Optional[UUID], str, Dict[str, EnrichmentResult]]:
+    """Enrich chunks via LLM before embedding. Returns (provider_id, model_name, chunk_hash->result)."""
+    import hashlib
+
     router = LLMRouter(db)
     providers = router._get_enabled_providers("chat")
     if not providers:
@@ -633,57 +703,55 @@ async def _enrich_repository_async(
             loop,
             repo_id_str,
             RepoStatus.indexing.value,
-            80.0,
+            35.0,
             stage="chinese_enrichment",
             stage_progress={"stage": "chinese_enrichment", "current": 0, "total": 0, "percentage": 100.0},
             log_message="未配置 LLM chat provider，跳过中文语义增强",
             db=db,
         )
-        return
+        return None, "unknown", {}
 
-    model_name = providers[0].model
+    provider = providers[0]
+    provider_id = provider.id
+    model_name = provider.model
 
-    # 1. Enrich embeddings
-    embeddings = (
-        db.query(Embedding)
-        .filter(Embedding.repo_id == repo_id)
-        .order_by(Embedding.file_id, Embedding.chunk_index)
-        .all()
-    )
-
-    # Build a lookup from (file_id, chunk_index) to parsed chunk for content hash
-    chunk_meta: Dict[Tuple[UUID, int], Tuple[str, str]] = {}
+    chunks_to_enrich: List[Tuple[str, str, str]] = []  # (chunk_hash, content, language)
     for code_file, parsed in file_records:
-        for idx, chunk in enumerate(parsed.chunks):
-            chunk_meta[(code_file.id, idx)] = (chunk.content, parsed.content_hash)
+        for chunk in parsed.chunks:
+            chunk_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+            chunks_to_enrich.append((chunk_hash, chunk.content, code_file.language or parsed.language))
 
-    total = len(embeddings)
+    unique_chunks: Dict[str, Tuple[str, str]] = {}
+    for chunk_hash, content, language in chunks_to_enrich:
+        unique_chunks.setdefault(chunk_hash, (content, language))
+
+    chunk_hashes = list(unique_chunks.keys())
+    cached = _load_cached_enrichments(db, chunk_hashes)
+    missing_hashes = [h for h in chunk_hashes if h not in cached]
+
+    total = len(missing_hashes)
     processed = 0
-    synonym_batches: List[Dict[str, List[str]]] = []
+    semaphore = asyncio.Semaphore(5)
 
     _notify(
         loop,
         repo_id_str,
         RepoStatus.indexing.value,
-        80.0,
+        35.0,
         stage="chinese_enrichment",
         stage_progress={"stage": "chinese_enrichment", "current": 0, "total": total, "percentage": 0.0},
-        log_message=f"开始中文语义增强，共 {total} 个 chunks",
+        log_message=f"开始中文语义增强，命中缓存 {len(cached)}，待生成 {total}",
         db=db,
     )
 
-    semaphore = asyncio.Semaphore(5)
-
-    async def enrich_one(emb: Embedding) -> None:
+    async def enrich_one(chunk_hash: str) -> None:
+        content, language = unique_chunks[chunk_hash]
         async with semaphore:
-            content, content_hash = chunk_meta.get((emb.file_id, emb.chunk_index), (emb.content, ""))
-            result = await enrich_chunk(router, content, emb.file.language, repo_id=repo_id_str)
+            result = await enrich_chunk(router, content, language, repo_id=repo_id_str)
             if result:
-                save_embedding_enrichment(db, emb.id, content_hash, result, model_name)
-                if result.synonyms:
-                    synonym_batches.append(result.synonyms)
+                cached[chunk_hash] = result
 
-    tasks = [asyncio.create_task(enrich_one(emb)) for emb in embeddings]
+    tasks = [asyncio.create_task(enrich_one(h)) for h in missing_hashes]
     for task in asyncio.as_completed(tasks):
         try:
             await task
@@ -696,7 +764,7 @@ async def _enrich_repository_async(
                 loop,
                 repo_id_str,
                 RepoStatus.indexing.value,
-                80.0 + (processed / total * 10.0) if total else 85.0,
+                35.0 + (processed / total * 20.0) if total else 55.0,
                 stage="chinese_enrichment",
                 stage_progress={
                     "stage": "chinese_enrichment",
@@ -708,16 +776,64 @@ async def _enrich_repository_async(
                 db=db,
             )
 
-    db.commit()
+    return provider_id, model_name, cached
 
-    # 2. Aggregate domain synonyms
+
+async def _enrich_repository_async(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+    provider_id: Optional[UUID] = None,
+    chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
+    enable_flow_label: bool = True,
+) -> None:
+    """Aggregate domain synonyms and generate symbol flow labels via LLM."""
+    router = LLMRouter(db)
+    providers = router._get_enabled_providers("chat")
+    if not providers:
+        logger.info("No chat providers configured, skipping flow labels")
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            95.0,
+            stage="flow_labels",
+            stage_progress={"stage": "flow_labels", "current": 0, "total": 0, "percentage": 100.0},
+            log_message="未配置 LLM chat provider，跳过流程标签",
+            db=db,
+        )
+        return
+
+    active_provider_id = provider_id or providers[0].id
+
+    # 1. Aggregate domain synonyms from chunk enrichments
+    synonym_batches: List[Dict[str, List[str]]] = []
+    if chunk_enrichments:
+        for result in chunk_enrichments.values():
+            if result.synonyms:
+                synonym_batches.append(result.synonyms)
     if synonym_batches:
         try:
             aggregate_domain_synonyms(db, repo_id, synonym_batches)
         except Exception as e:
             logger.warning("Failed to aggregate domain synonyms: %s", e)
 
-    # 3. Enrich symbol flow labels
+    if not enable_flow_label:
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            95.0,
+            stage="flow_labels",
+            stage_progress={"stage": "flow_labels", "current": 0, "total": 0, "percentage": 100.0},
+            log_message="流程标签功能已关闭",
+            db=db,
+        )
+        return
+
+    # 2. Enrich symbol flow labels
     symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
     symbol_total = len(symbols)
     symbol_processed = 0
@@ -733,10 +849,11 @@ async def _enrich_repository_async(
         db=db,
     )
 
-    # Find best chunk content for each symbol
     file_embeddings = {}
     for code_file, parsed in file_records:
         file_embeddings[code_file.id] = parsed.content
+
+    semaphore = asyncio.Semaphore(5)
 
     async def enrich_symbol_one(sym: Symbol) -> None:
         async with semaphore:
@@ -750,7 +867,7 @@ async def _enrich_repository_async(
                 repo_id=repo_id_str,
             )
             if result:
-                save_symbol_flow_label(db, sym.id, result)
+                save_symbol_flow_label(db, sym.id, result, provider_id=active_provider_id)
 
     symbol_tasks = [asyncio.create_task(enrich_symbol_one(sym)) for sym in symbols]
     for task in asyncio.as_completed(symbol_tasks):
@@ -783,9 +900,9 @@ async def _enrich_repository_async(
         repo_id_str,
         RepoStatus.indexing.value,
         95.0,
-        stage="chinese_enrichment",
-        stage_progress={"stage": "chinese_enrichment", "current": total, "total": total, "percentage": 100.0},
-        log_message="中文语义增强完成",
+        stage="flow_labels",
+        stage_progress={"stage": "flow_labels", "current": symbol_total, "total": symbol_total, "percentage": 100.0},
+        log_message="流程标签完成",
         db=db,
     )
 
@@ -796,10 +913,24 @@ def _enrich_repository(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    provider_id: Optional[UUID] = None,
+    chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
+    enable_flow_label: bool = True,
 ) -> None:
     """Synchronous wrapper to run async enrichment in a worker thread."""
     try:
-        asyncio.run(_enrich_repository_async(db, repo_id, repo_id_str, file_records, loop))
+        asyncio.run(
+            _enrich_repository_async(
+                db,
+                repo_id,
+                repo_id_str,
+                file_records,
+                loop,
+                provider_id=provider_id,
+                chunk_enrichments=chunk_enrichments,
+                enable_flow_label=enable_flow_label,
+            )
+        )
     except Exception as e:
         logger.warning("Chinese enrichment stage failed: %s", e)
         get_degradation_tracker().record(
@@ -1055,15 +1186,57 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
 
         _add_log(db, repo_id_str, "info", f"文件扫描完成，共处理 {processed} 个文件，跳过 {skipped} 个", "scan")
 
+        llm_settings = get_effective_settings(db, repo_id)
+        enable_index_enrich = llm_settings.get("enable_index_chinese_enrich", True)
+        enable_flow_label = llm_settings.get("enable_flow_label", True)
+
+        chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None
+        enrichment_provider_id: Optional[UUID] = None
+        enrichment_model_name = "unknown"
+
+        if enable_index_enrich and all_file_records:
+            try:
+                enrichment_provider_id, enrichment_model_name, chunk_enrichments = asyncio.run(
+                    _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop)
+                )
+                db.commit()
+            except Exception as enrich_exc:
+                logger.warning("Chunk enrichment failed: %s", enrich_exc)
+                get_degradation_tracker().record(
+                    component="indexer:chunk_enrichment",
+                    error_type=type(enrich_exc).__name__,
+                    error_message=str(enrich_exc),
+                    fallback_action="Continue indexing without Chinese enrichment",
+                )
+                chunk_enrichments = None
+
         if all_file_records:
             print(f"[INDEXER] flushing {len(all_file_records)} records for repo {repo_id}", flush=True)
-            _bulk_insert_symbols_and_embeddings(db, repo_id, repo_id_str, all_file_records, loop)
+            _bulk_insert_symbols_and_embeddings(
+                db,
+                repo_id,
+                repo_id_str,
+                all_file_records,
+                loop,
+                chunk_enrichments=chunk_enrichments,
+                enrichment_provider_id=enrichment_provider_id,
+                enrichment_model_name=enrichment_model_name,
+            )
             total_inserted += len(all_file_records)
             db.commit()
             db.expire_all()
             gc.collect()
 
-        _enrich_repository(db, repo_id, repo_id_str, all_file_records, loop)
+        _enrich_repository(
+            db,
+            repo_id,
+            repo_id_str,
+            all_file_records,
+            loop,
+            provider_id=enrichment_provider_id,
+            chunk_enrichments=chunk_enrichments,
+            enable_flow_label=enable_flow_label,
+        )
 
         _notify(
             loop,

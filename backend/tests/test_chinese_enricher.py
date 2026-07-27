@@ -78,13 +78,13 @@ class TestDomainSynonymAggregation:
         existing = MagicMock()
         existing.canonical_term = "骑士"
         existing.synonyms = json.dumps(["骑士"], ensure_ascii=False)
-        existing.frequency = 1
+        existing.hit_count = 1
         db.query.return_value.filter.return_value.all.return_value = [existing]
 
         aggregate_domain_synonyms(db, repo_id, [{"骑士": ["骑手"]}])
 
         assert "骑手" in json.loads(existing.synonyms)
-        assert existing.frequency == 2
+        assert existing.hit_count == 2
         db.commit.assert_called_once()
 
     def test_load_domain_synonyms(self):

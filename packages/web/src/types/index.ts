@@ -107,6 +107,23 @@ export interface SearchHistoryRecentItem {
   createdAt: string;
 }
 
+export interface LLMCostBreakdown {
+  input_tokens: number;
+  output_tokens: number;
+  call_count: number;
+  cost: number;
+}
+
+export interface LLMCostEstimate {
+  period_minutes: number;
+  repo_id: string | null;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  provider_breakdown: Record<string, LLMCostBreakdown>;
+  operation_breakdown: Record<string, LLMCostBreakdown>;
+}
+
 // Form types
 export interface AddRepoForm {
   name?: string;

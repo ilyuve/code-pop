@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Save, RotateCcw, Sun, Moon, Server, Brain, Plus, Trash2, Play, AlertCircle, CheckCircle2, Loader2, TrendingUp } from 'lucide-react';
 import { useStore } from '../store';
 import { clsx } from 'clsx';
@@ -6,6 +6,7 @@ import { clsx } from 'clsx';
 interface LLMProvider {
   id?: string;
   name: string;
+  provider_type: string;
   base_url: string;
   api_key: string;
   model: string;
@@ -15,7 +16,10 @@ interface LLMProvider {
   max_tokens: number;
   temperature: number;
   timeout_seconds: number;
+  cost_per_1k_input: number;
+  cost_per_1k_output: number;
   extra_headers: string;
+  extra_body?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -28,6 +32,30 @@ interface UsageSummary {
   input_tokens: number;
   output_tokens: number;
   latency_ms: number;
+}
+
+interface LLMSettings {
+  enable_index_chinese_enrich: boolean;
+  enable_query_llm_expand: boolean;
+  enable_flow_label: boolean;
+  default_provider_id?: string | null;
+}
+
+interface LLMCostBreakdown {
+  input_tokens: number;
+  output_tokens: number;
+  call_count: number;
+  cost: number;
+}
+
+interface LLMCostEstimate {
+  period_minutes: number;
+  repo_id: string | null;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  provider_breakdown: Record<string, LLMCostBreakdown>;
+  operation_breakdown: Record<string, LLMCostBreakdown>;
 }
 
 export const Settings = () => {
@@ -44,6 +72,10 @@ export const Settings = () => {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [llmSettings, setLlmSettings] = useState<LLMSettings | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [cost, setCost] = useState<LLMCostEstimate | null>(null);
+  const [costPeriod, setCostPeriod] = useState<number>(60);
 
   useEffect(() => {
     const changed =
@@ -53,12 +85,7 @@ export const Settings = () => {
     setHasChanges(changed);
   }, [apiEndpoint, embeddingProvider, theme, settings]);
 
-  useEffect(() => {
-    fetchProviders();
-    fetchUsage();
-  }, []);
-
-  const fetchProviders = async () => {
+  const fetchProviders = useCallback(async () => {
     setLoadingProviders(true);
     try {
       const resp = await fetch(`${apiEndpoint}/admin/llm/providers`);
@@ -69,15 +96,61 @@ export const Settings = () => {
     } finally {
       setLoadingProviders(false);
     }
-  };
+  }, [apiEndpoint]);
 
-  const fetchUsage = async () => {
+  const fetchUsage = useCallback(async () => {
     try {
       const resp = await fetch(`${apiEndpoint}/admin/llm/usage?minutes=60`);
       const data = await resp.json();
       setUsage(data);
     } catch (e) {
       console.error('Failed to load usage', e);
+    }
+  }, [apiEndpoint]);
+
+  const fetchLlmSettings = useCallback(async () => {
+    try {
+      const resp = await fetch(`${apiEndpoint}/admin/llm/settings`);
+      const data = await resp.json();
+      setLlmSettings(data.settings);
+    } catch (e) {
+      console.error('Failed to load LLM settings', e);
+    }
+  }, [apiEndpoint]);
+
+  const fetchCost = useCallback(async () => {
+    try {
+      const resp = await fetch(`${apiEndpoint}/admin/llm/cost?minutes=${costPeriod}`);
+      const data = await resp.json();
+      setCost(data);
+    } catch (e) {
+      console.error('Failed to load cost', e);
+    }
+  }, [apiEndpoint, costPeriod]);
+
+  useEffect(() => {
+    fetchProviders();
+    fetchUsage();
+    fetchLlmSettings();
+    fetchCost();
+  }, [fetchProviders, fetchUsage, fetchLlmSettings, fetchCost]);
+
+  const saveLlmSettings = async () => {
+    if (!llmSettings) return;
+    setSavingSettings(true);
+    try {
+      const resp = await fetch(`${apiEndpoint}/admin/llm/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(llmSettings),
+      });
+      if (!resp.ok) throw new Error('Save failed');
+      const data = await resp.json();
+      setLlmSettings(data.settings);
+    } catch (e) {
+      alert('保存设置失败：' + (e as Error).message);
+    } finally {
+      setSavingSettings(false);
     }
   };
 
@@ -109,6 +182,7 @@ export const Settings = () => {
   const handleAddProvider = () => {
     setEditingProvider({
       name: '',
+      provider_type: 'openai_compatible',
       base_url: 'https://api.deepseek.com',
       api_key: '',
       model: 'deepseek-chat',
@@ -118,7 +192,10 @@ export const Settings = () => {
       max_tokens: 4096,
       temperature: 0.1,
       timeout_seconds: 60,
+      cost_per_1k_input: 0,
+      cost_per_1k_output: 0,
       extra_headers: '',
+      extra_body: '',
     });
     setTestResult(null);
   };
@@ -243,6 +320,20 @@ export const Settings = () => {
                 />
               </div>
               <div>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">协议类型</label>
+                <select
+                  value={editingProvider.provider_type}
+                  onChange={(e) => setEditingProvider({ ...editingProvider, provider_type: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                >
+                  <option value="openai_compatible">OpenAI Compatible</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="glm">GLM</option>
+                  <option value="azure">Azure</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              <div>
                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Base URL</label>
                 <input
                   type="text"
@@ -274,7 +365,7 @@ export const Settings = () => {
                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">能力</label>
                 <select
                   value={editingProvider.capability}
-                  onChange={(e) => setEditingProvider({ ...editingProvider, capability: e.target.value as any })}
+                  onChange={(e) => setEditingProvider({ ...editingProvider, capability: e.target.value as LLMProvider['capability'] })}
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
                 >
                   <option value="chat">Chat</option>
@@ -319,6 +410,26 @@ export const Settings = () => {
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
                 />
               </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">输入成本 / 1K tokens（USD）</label>
+                <input
+                  type="number"
+                  step="0.000001"
+                  value={editingProvider.cost_per_1k_input}
+                  onChange={(e) => setEditingProvider({ ...editingProvider, cost_per_1k_input: parseFloat(e.target.value) || 0 })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">输出成本 / 1K tokens（USD）</label>
+                <input
+                  type="number"
+                  step="0.000001"
+                  value={editingProvider.cost_per_1k_output}
+                  onChange={(e) => setEditingProvider({ ...editingProvider, cost_per_1k_output: parseFloat(e.target.value) || 0 })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                />
+              </div>
               <div className="flex items-center gap-3">
                 <input
                   id="enabled"
@@ -328,6 +439,26 @@ export const Settings = () => {
                   className="w-4 h-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
                 />
                 <label htmlFor="enabled" className="text-sm text-slate-700 dark:text-slate-300">启用</label>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Extra Headers（JSON）</label>
+                <textarea
+                  value={editingProvider.extra_headers}
+                  onChange={(e) => setEditingProvider({ ...editingProvider, extra_headers: e.target.value })}
+                  rows={3}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Extra Body（JSON）</label>
+                <textarea
+                  value={editingProvider.extra_body}
+                  onChange={(e) => setEditingProvider({ ...editingProvider, extra_body: e.target.value })}
+                  rows={3}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm font-mono"
+                />
               </div>
             </div>
             <div className="flex gap-3">
@@ -379,9 +510,17 @@ export const Settings = () => {
                     <span className="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">
                       {p.capability}
                     </span>
+                    <span className="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">
+                      {p.provider_type}
+                    </span>
                   </div>
                   <div className="text-xs text-slate-500 dark:text-slate-400">
                     {p.model} · 优先级 {p.priority} · {p.base_url}
+                    {(p.cost_per_1k_input || p.cost_per_1k_output) && (
+                      <span className="ml-2">
+                        ${p.cost_per_1k_input}/1K in · ${p.cost_per_1k_output}/1K out
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -422,6 +561,162 @@ export const Settings = () => {
               </div>
             ))}
           </div>
+        )}
+      </section>
+
+      {/* Global LLM Settings */}
+      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-amber-100 dark:bg-amber-900/30 rounded-lg">
+              <Server className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+            </div>
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">LLM 功能开关</h2>
+          </div>
+          <button
+            onClick={saveLlmSettings}
+            disabled={savingSettings}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-300 text-white rounded-lg text-sm font-medium"
+          >
+            {savingSettings ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            保存开关
+          </button>
+        </div>
+        {llmSettings ? (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+              <div>
+                <div className="text-sm font-medium text-slate-900 dark:text-white">索引中文语义增强</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">为代码片段生成中文摘要、关键词和同义词</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={llmSettings.enable_index_chinese_enrich}
+                onChange={(e) => setLlmSettings({ ...llmSettings, enable_index_chinese_enrich: e.target.checked })}
+                className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+              />
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+              <div>
+                <div className="text-sm font-medium text-slate-900 dark:text-white">查询 LLM 扩展</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">本地同义词未命中时请求 LLM 生成扩展词</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={llmSettings.enable_query_llm_expand}
+                onChange={(e) => setLlmSettings({ ...llmSettings, enable_query_llm_expand: e.target.checked })}
+                className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+              />
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+              <div>
+                <div className="text-sm font-medium text-slate-900 dark:text-white">Flow Label 生成</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">为符号生成层、模块、中文名等流程标签</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={llmSettings.enable_flow_label}
+                onChange={(e) => setLlmSettings({ ...llmSettings, enable_flow_label: e.target.checked })}
+                className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+              />
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+              <div>
+                <div className="text-sm font-medium text-slate-900 dark:text-white">默认 Provider</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">未指定时使用的 LLM Provider</div>
+              </div>
+              <select
+                value={llmSettings.default_provider_id || ''}
+                onChange={(e) => setLlmSettings({ ...llmSettings, default_provider_id: e.target.value || null })}
+                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+              >
+                <option value="">自动选择</option>
+                {providers.filter((p) => p.enabled).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-6 text-slate-500 dark:text-slate-400 text-sm">加载中...</div>
+        )}
+      </section>
+
+      {/* Cost Dashboard */}
+      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
+              <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+            </div>
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">LLM 成本估算</h2>
+          </div>
+          <select
+            value={costPeriod}
+            onChange={(e) => setCostPeriod(parseInt(e.target.value))}
+            className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+          >
+            <option value={60}>最近 1 小时</option>
+            <option value={360}>最近 6 小时</option>
+            <option value={1440}>最近 24 小时</option>
+            <option value={10080}>最近 7 天</option>
+          </select>
+        </div>
+        {cost ? (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+                <div className="text-xs text-slate-500 dark:text-slate-400">预估总成本</div>
+                <div className="text-xl font-semibold text-slate-900 dark:text-white">${cost.total_cost.toFixed(6)}</div>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+                <div className="text-xs text-slate-500 dark:text-slate-400">输入 Tokens</div>
+                <div className="text-xl font-semibold text-slate-900 dark:text-white">{formatNumber(cost.total_input_tokens)}</div>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+                <div className="text-xs text-slate-500 dark:text-slate-400">输出 Tokens</div>
+                <div className="text-xl font-semibold text-slate-900 dark:text-white">{formatNumber(cost.total_output_tokens)}</div>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+                <div className="text-xs text-slate-500 dark:text-slate-400">调用次数</div>
+                <div className="text-xl font-semibold text-slate-900 dark:text-white">
+                  {formatNumber(Object.values(cost.provider_breakdown).reduce((sum, p) => sum + p.call_count, 0))}
+                </div>
+              </div>
+            </div>
+            {Object.keys(cost.provider_breakdown).length > 0 && (
+              <div>
+                <h3 className="text-sm font-medium text-slate-900 dark:text-white mb-3">按 Provider</h3>
+                <div className="space-y-2">
+                  {Object.entries(cost.provider_breakdown).map(([name, data]) => (
+                    <div key={name} className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+                      <div className="text-sm text-slate-700 dark:text-slate-300">{name}</div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400">
+                        {data.call_count} 次 · {formatNumber(data.input_tokens)} / {formatNumber(data.output_tokens)} tokens · ${data.cost.toFixed(6)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {Object.keys(cost.operation_breakdown).length > 0 && (
+              <div>
+                <h3 className="text-sm font-medium text-slate-900 dark:text-white mb-3">按 Operation</h3>
+                <div className="space-y-2">
+                  {Object.entries(cost.operation_breakdown).map(([name, data]) => (
+                    <div key={name} className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+                      <div className="text-sm text-slate-700 dark:text-slate-300">{name}</div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400">
+                        {data.call_count} 次 · {formatNumber(data.input_tokens)} / {formatNumber(data.output_tokens)} tokens · ${data.cost.toFixed(6)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-6 text-slate-500 dark:text-slate-400 text-sm">暂无数据</div>
         )}
       </section>
 

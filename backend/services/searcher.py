@@ -15,6 +15,8 @@ from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol, 
 from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
+from services.llm_router import LLMRouter
+from services.llm_settings_service import get_effective_settings
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
 from services.query_normalizer import SymbolNormalizer
 from services.reranker import CodeReranker, M3Reranker, get_m3_reranker
@@ -151,11 +153,17 @@ class Searcher:
         self._degraded_components = set()
         self._degradation_reasons = []
 
+        llm_settings = get_effective_settings(self.db, repo_id)
+        enable_query_llm_expand = llm_settings.get("enable_query_llm_expand", True)
+        llm_router = LLMRouter(self.db) if enable_query_llm_expand else None
+
         if intent is None:
             intent = self.intent_analyzer.analyze(
                 query,
                 repo_id=str(repo_id) if repo_id else None,
                 db=self.db,
+                enable_llm_expand=enable_query_llm_expand,
+                llm_router=llm_router,
             )
         logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
 
@@ -187,8 +195,11 @@ class Searcher:
                     strategy.include_callees,
                 )
                 call_chain = chain
+                chain.flow_summary = self._generate_flow_summary(query, intent.intent_type, entry_points, chain)
                 chain_files = self._collect_chain_files(chain)
                 related_files.extend(chain_files)
+
+        flow_summary = call_chain.flow_summary if call_chain else None
 
         seen_files = set()
         for hit in hits[:limit]:
@@ -229,6 +240,7 @@ class Searcher:
             matched_concepts=intent.expanded_terms[:10],
             entry_points=entry_points,
             call_chain=call_chain,
+            flow_summary=flow_summary,
             related_files=related_files,
             code_snippets=code_snippets,
             total_files=len(related_files),
@@ -251,54 +263,63 @@ class Searcher:
         search_terms = intent.expanded_terms if strategy.expand_synonyms else [intent.original]
 
         for term in search_terms[:5]:
-            hits: List[_Hit] = []
+            term_hits: List[_Hit] = []
+
+            def run_search(search_fn, source_name: str, fallback_fn=None):
+                try:
+                    return search_fn()
+                except Exception as e:
+                    logger.warning("%s search degraded for term '%s': %s", source_name, term, e)
+                    self._record_degradation(f"{source_name}_search", str(e), f"Skipping {source_name} search")
+                    if fallback_fn:
+                        try:
+                            return fallback_fn()
+                        except Exception as fallback_e:
+                            logger.warning("%s fallback failed for term '%s': %s", source_name, term, fallback_e)
+                    return []
 
             if strategy.primary == "vector":
-                try:
-                    query_embedding = self.embedder.encode_query(term)
-                    hits = self._vector_search(query_embedding, repo_id, limit=30)
-                except Exception as e:
-                    logger.warning("Vector search degraded for term '%s': %s", term, e)
-                    self._record_degradation("vector_search", str(e), "Skipping vector search")
+                term_hits.extend(run_search(
+                    lambda: self._vector_search(self.embedder.encode_query(term), repo_id, limit=30),
+                    "vector",
+                ))
+                # Always supplement with BM25 for Chinese semantic fields.
+                term_hits.extend(run_search(
+                    lambda: self._bm25_search(term, repo_id, limit=30),
+                    "bm25",
+                    lambda: self._like_search(term, repo_id, limit=30),
+                ))
 
             elif strategy.primary == "symbol":
-                try:
-                    hits = self._symbol_search(term, repo_id, top_k=30)
-                except Exception as e:
-                    logger.warning("Symbol search degraded for term '%s': %s", term, e)
-                    self._record_degradation("symbol_search", str(e), "Skipping symbol search")
+                term_hits.extend(run_search(
+                    lambda: self._symbol_search(term, repo_id, top_k=30),
+                    "symbol",
+                ))
 
             elif strategy.primary == "call_graph":
-                try:
-                    sym_hits = self._symbol_search(term, repo_id, top_k=10)
-                    hits = sym_hits
-                    if strategy.include_callers or strategy.include_callees:
-                        for h in sym_hits[:3]:
-                            if h.symbol_id:
-                                try:
-                                    graph_hits = self._graph_search_from_symbol(
-                                        h.symbol_id, repo_id, strategy.call_depth
-                                    )
-                                    hits.extend(graph_hits)
-                                except Exception as e:
-                                    logger.warning("Graph search degraded for term '%s': %s", term, e)
-                                    self._record_degradation("graph_search", str(e), "Skipping graph search")
-                except Exception as e:
-                    logger.warning("Symbol search degraded for call_graph term '%s': %s", term, e)
-                    self._record_degradation("symbol_search", str(e), "Skipping call_graph search")
+                sym_hits = run_search(
+                    lambda: self._symbol_search(term, repo_id, top_k=10),
+                    "symbol",
+                )
+                term_hits.extend(sym_hits)
+                if strategy.include_callers or strategy.include_callees:
+                    for h in sym_hits[:3]:
+                        if h.symbol_id:
+                            term_hits.extend(run_search(
+                                lambda: self._graph_search_from_symbol(
+                                    h.symbol_id, repo_id, strategy.call_depth
+                                ),
+                                "graph",
+                            ))
 
             elif strategy.primary == "bm25":
-                try:
-                    hits = self._bm25_search(term, repo_id, limit=30)
-                except Exception as e:
-                    logger.warning("BM25 search degraded for term '%s', falling back to LIKE: %s", term, e)
-                    self._record_degradation("bm25_search", str(e), "Falling back to LIKE query")
-                    try:
-                        hits = self._like_search(term, repo_id, limit=30)
-                    except Exception as like_e:
-                        logger.warning("LIKE fallback also failed: %s", like_e)
+                term_hits.extend(run_search(
+                    lambda: self._bm25_search(term, repo_id, limit=30),
+                    "bm25",
+                    lambda: self._like_search(term, repo_id, limit=30),
+                ))
 
-            all_hits.extend(hits)
+            all_hits.extend(term_hits)
 
         return self._fuse_multiple(all_hits)
 
@@ -321,6 +342,31 @@ class Searcher:
             chinese_name=label.chinese_name if label else None,
             io_description=label.io_description if label else None,
         )
+
+    def _generate_flow_summary(
+        self,
+        query: str,
+        intent_type: str,
+        entry_points: List["SymbolEntry"],
+        chain: "CallChain",
+    ) -> Optional[str]:
+        """Generate a concise Chinese description of the code flow for how_it_works queries."""
+        if intent_type != "how_it_works":
+            return None
+        if not chain or not chain.root:
+            return None
+
+        root_name = chain.root.chinese_name or chain.root.name
+        parts = [f"「{query}」对应入口为 {root_name}（{chain.root.layer or '未知层'}）。"]
+
+        if chain.upstream:
+            names = [s.chinese_name or s.name for s in chain.upstream[:5]]
+            parts.append(f"上游调用：{', '.join(names)}。")
+        if chain.downstream:
+            names = [s.chinese_name or s.name for s in chain.downstream[:5]]
+            parts.append(f"下游处理：{', '.join(names)}。")
+
+        return "".join(parts)
 
     def _build_call_chain(
         self,
