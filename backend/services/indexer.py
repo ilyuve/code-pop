@@ -28,6 +28,14 @@ from services.parser import (
 )
 from services.router_parser import RouterParser
 from services.repo_sync import clone_or_pull
+from services.chinese_enricher import (
+    aggregate_domain_synonyms,
+    enrich_chunk,
+    enrich_symbol_flow,
+    save_embedding_enrichment,
+    save_symbol_flow_label,
+)
+from services.llm_router import LLMRouter
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +617,199 @@ def _bulk_insert_symbols_and_embeddings(
     )
 
 
+async def _enrich_repository_async(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Generate Chinese summaries, keywords, synonyms and flow labels via LLM."""
+    router = LLMRouter(db)
+    providers = router._get_enabled_providers("chat")
+    if not providers:
+        logger.info("No chat providers configured, skipping Chinese enrichment")
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            80.0,
+            stage="chinese_enrichment",
+            stage_progress={"stage": "chinese_enrichment", "current": 0, "total": 0, "percentage": 100.0},
+            log_message="未配置 LLM chat provider，跳过中文语义增强",
+            db=db,
+        )
+        return
+
+    model_name = providers[0].model
+
+    # 1. Enrich embeddings
+    embeddings = (
+        db.query(Embedding)
+        .filter(Embedding.repo_id == repo_id)
+        .order_by(Embedding.file_id, Embedding.chunk_index)
+        .all()
+    )
+
+    # Build a lookup from (file_id, chunk_index) to parsed chunk for content hash
+    chunk_meta: Dict[Tuple[UUID, int], Tuple[str, str]] = {}
+    for code_file, parsed in file_records:
+        for idx, chunk in enumerate(parsed.chunks):
+            chunk_meta[(code_file.id, idx)] = (chunk.content, parsed.content_hash)
+
+    total = len(embeddings)
+    processed = 0
+    synonym_batches: List[Dict[str, List[str]]] = []
+
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        80.0,
+        stage="chinese_enrichment",
+        stage_progress={"stage": "chinese_enrichment", "current": 0, "total": total, "percentage": 0.0},
+        log_message=f"开始中文语义增强，共 {total} 个 chunks",
+        db=db,
+    )
+
+    semaphore = asyncio.Semaphore(5)
+
+    async def enrich_one(emb: Embedding) -> None:
+        async with semaphore:
+            content, content_hash = chunk_meta.get((emb.file_id, emb.chunk_index), (emb.content, ""))
+            result = await enrich_chunk(router, content, emb.file.language, repo_id=repo_id_str)
+            if result:
+                save_embedding_enrichment(db, emb.id, content_hash, result, model_name)
+                if result.synonyms:
+                    synonym_batches.append(result.synonyms)
+
+    tasks = [asyncio.create_task(enrich_one(emb)) for emb in embeddings]
+    for task in asyncio.as_completed(tasks):
+        try:
+            await task
+        except Exception as e:
+            logger.warning("Chinese enrichment task failed: %s", e)
+        processed += 1
+        if processed % 5 == 0 or processed == total:
+            pct = (processed / total * 100.0) if total else 100.0
+            _notify(
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                80.0 + (processed / total * 10.0) if total else 85.0,
+                stage="chinese_enrichment",
+                stage_progress={
+                    "stage": "chinese_enrichment",
+                    "current": processed,
+                    "total": total,
+                    "percentage": round(pct, 2),
+                },
+                log_message=f"中文语义增强进度: {processed}/{total}",
+                db=db,
+            )
+
+    db.commit()
+
+    # 2. Aggregate domain synonyms
+    if synonym_batches:
+        try:
+            aggregate_domain_synonyms(db, repo_id, synonym_batches)
+        except Exception as e:
+            logger.warning("Failed to aggregate domain synonyms: %s", e)
+
+    # 3. Enrich symbol flow labels
+    symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
+    symbol_total = len(symbols)
+    symbol_processed = 0
+
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        90.0,
+        stage="flow_labels",
+        stage_progress={"stage": "flow_labels", "current": 0, "total": symbol_total, "percentage": 0.0},
+        log_message=f"开始生成流程标签，共 {symbol_total} 个 symbols",
+        db=db,
+    )
+
+    # Find best chunk content for each symbol
+    file_embeddings = {}
+    for code_file, parsed in file_records:
+        file_embeddings[code_file.id] = parsed.content
+
+    async def enrich_symbol_one(sym: Symbol) -> None:
+        async with semaphore:
+            content = file_embeddings.get(sym.file_id, sym.file.path)
+            result = await enrich_symbol_flow(
+                router,
+                sym.name,
+                sym.file.path,
+                sym.file.language,
+                content,
+                repo_id=repo_id_str,
+            )
+            if result:
+                save_symbol_flow_label(db, sym.id, result)
+
+    symbol_tasks = [asyncio.create_task(enrich_symbol_one(sym)) for sym in symbols]
+    for task in asyncio.as_completed(symbol_tasks):
+        try:
+            await task
+        except Exception as e:
+            logger.warning("Flow label task failed: %s", e)
+        symbol_processed += 1
+        if symbol_processed % 10 == 0 or symbol_processed == symbol_total:
+            pct = (symbol_processed / symbol_total * 100.0) if symbol_total else 100.0
+            _notify(
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                90.0 + (symbol_processed / symbol_total * 5.0) if symbol_total else 92.5,
+                stage="flow_labels",
+                stage_progress={
+                    "stage": "flow_labels",
+                    "current": symbol_processed,
+                    "total": symbol_total,
+                    "percentage": round(pct, 2),
+                },
+                log_message=f"流程标签进度: {symbol_processed}/{symbol_total}",
+                db=db,
+            )
+
+    db.commit()
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        95.0,
+        stage="chinese_enrichment",
+        stage_progress={"stage": "chinese_enrichment", "current": total, "total": total, "percentage": 100.0},
+        log_message="中文语义增强完成",
+        db=db,
+    )
+
+
+def _enrich_repository(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Synchronous wrapper to run async enrichment in a worker thread."""
+    try:
+        asyncio.run(_enrich_repository_async(db, repo_id, repo_id_str, file_records, loop))
+    except Exception as e:
+        logger.warning("Chinese enrichment stage failed: %s", e)
+        get_degradation_tracker().record(
+            component="indexer:chinese_enrichment",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            fallback_action="Skipping enrichment, search falls back to baseline",
+        )
+
+
 def _rebuild_call_graph(
     db: Session,
     repo_id: UUID,
@@ -862,11 +1063,13 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             db.expire_all()
             gc.collect()
 
+        _enrich_repository(db, repo_id, repo_id_str, all_file_records, loop)
+
         _notify(
             loop,
             repo_id_str,
             RepoStatus.indexing.value,
-            80.0,
+            95.0,
             stage="call_graph",
             stage_progress={
                 "stage": "call_graph",
