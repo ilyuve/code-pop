@@ -233,3 +233,110 @@ class FrameworkRoute(Base):
 
     repo = relationship("Repository")
     file = relationship("CodeFile")
+
+
+class LlmProviderCapability(str, PyEnum):
+    chat = "chat"
+    embed = "embed"
+    both = "both"
+
+
+class LlmProvider(Base):
+    __tablename__ = "llm_providers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(128), nullable=False)
+    base_url = Column(String(512), nullable=False)
+    api_key = Column(Text, nullable=False)  # encrypted
+    model = Column(String(128), nullable=False)
+    capability = Column(String(32), default=LlmProviderCapability.chat.value, nullable=False)
+    priority = Column(Integer, default=0, nullable=False)
+    enabled = Column(Integer, default=1, nullable=False)  # 0/1
+    max_tokens = Column(Integer, default=4096, nullable=False)
+    temperature = Column(Float, default=0.1, nullable=False)
+    timeout_seconds = Column(Integer, default=60, nullable=False)
+    extra_headers = Column(Text, nullable=True)  # JSON
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_llm_provider_priority", "priority", "enabled"),
+    )
+
+
+class LlmUsageLog(Base):
+    __tablename__ = "llm_usage_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider_id = Column(UUID(as_uuid=True), ForeignKey("llm_providers.id", ondelete="SET NULL"), nullable=True)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True)
+    operation = Column(String(64), nullable=False)
+    input_tokens = Column(Integer, default=0, nullable=False)
+    output_tokens = Column(Integer, default=0, nullable=False)
+    latency_ms = Column(Integer, default=0, nullable=False)
+    status = Column(String(32), default="success", nullable=False)  # success / error / degraded
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    provider = relationship("LlmProvider")
+
+
+class EmbeddingEnrichment(Base):
+    __tablename__ = "embedding_enrichments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    embedding_id = Column(UUID(as_uuid=True), ForeignKey("embeddings.id", ondelete="CASCADE"), nullable=False, unique=True)
+    content_hash = Column(String(64), nullable=False)
+    chinese_summary = Column(Text, nullable=True)
+    keywords = Column(Text, nullable=True)  # JSON list
+    vertical_layer = Column(String(64), nullable=True)
+    horizontal_module = Column(String(128), nullable=True)
+    synonyms = Column(Text, nullable=True)  # JSON dict
+    generated_by = Column(String(128), nullable=True)  # model name
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    embedding = relationship("Embedding", back_populates="enrichment")
+
+
+class DomainSynonym(Base):
+    __tablename__ = "domain_synonyms"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "canonical_term", name="uix_domain_synonym_repo_term"),
+        Index("idx_domain_synonym_repo", "repo_id"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    canonical_term = Column(String(128), nullable=False)
+    synonyms = Column(Text, nullable=False)  # JSON list
+    source = Column(String(32), default="auto", nullable=False)  # auto / manual
+    frequency = Column(Integer, default=1, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class SymbolFlowLabel(Base):
+    __tablename__ = "symbol_flow_labels"
+    __table_args__ = (
+        UniqueConstraint("symbol_id", name="uix_symbol_flow_label_symbol"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    symbol_id = Column(UUID(as_uuid=True), ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
+    layer = Column(String(64), nullable=True)  # controller / service / repository / etc.
+    module = Column(String(128), nullable=True)
+    chinese_name = Column(String(256), nullable=True)
+    io_description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    symbol = relationship("Symbol", back_populates="flow_label")
+
+
+# Wire up reverse relationships
+Embedding.enrichment = relationship("EmbeddingEnrichment", back_populates="embedding", uselist=False)
+Symbol.flow_label = relationship("SymbolFlowLabel", back_populates="symbol", uselist=False)
+Repository.llm_usage_logs = relationship("LlmUsageLog", back_populates="repo")
+Repository.domain_synonyms = relationship("DomainSynonym", back_populates="repo", cascade="all, delete-orphan")
+LlmUsageLog.repo = relationship("Repository", back_populates="llm_usage_logs")
+DomainSynonym.repo = relationship("Repository", back_populates="domain_synonyms")
