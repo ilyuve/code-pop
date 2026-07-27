@@ -21,7 +21,7 @@ _ENRICHMENT_PROMPT = """你是一名资深软件工程师，正在为代码仓�
 - keywords: 5-10 个中文关键词列表，便于检索
 - vertical_layer: 竖向分层，只能是 controller / service / repository / model / util / config / other 之一
 - horizontal_module: 横向业务模块名，例如 delivery / order / payment / user
-- synonyms: 一个对象，键是中文术语，值是同义词列表（可包含英文）。例如 {"骑士": ["骑手", "rider"], "配送": ["delivery", "dispatch"]}
+- synonyms: 一个对象，键是中文术语，值是同义词列表（可包含英文）。例如 {{"骑士": ["骑手", "rider"], "配送": ["delivery", "dispatch"]}}
 
 代码：
 ```{language}

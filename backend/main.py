@@ -21,6 +21,7 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from api import repos, search, webhook, ws
+from api.admin import llm as admin_llm
 from config import settings
 from mcp_server.server import get_mcp_app, get_mcp_session_manager
 from database import SessionLocal, get_db
@@ -119,6 +120,7 @@ app.include_router(repos.router)
 app.include_router(search.router)
 app.include_router(webhook.router)
 app.include_router(ws.router)
+app.include_router(admin_llm.router)
 
 mcp_app = get_mcp_app()
 app.mount("/mcp", mcp_app)
