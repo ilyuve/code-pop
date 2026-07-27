@@ -174,6 +174,10 @@ class SymbolEntry(BaseModel):
     file_path: str
     line: int
     relevance_score: float = 0.0
+    layer: Optional[str] = None
+    module: Optional[str] = None
+    chinese_name: Optional[str] = None
+    io_description: Optional[str] = None
 
 
 class CallChain(BaseModel):

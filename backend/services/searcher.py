@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol, SymbolFlowLabel
 from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
@@ -151,7 +151,11 @@ class Searcher:
         self._degradation_reasons = []
 
         if intent is None:
-            intent = self.intent_analyzer.analyze(query)
+            intent = self.intent_analyzer.analyze(
+                query,
+                repo_id=str(repo_id) if repo_id else None,
+                db=self.db,
+            )
         logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
 
         strategy = intent.search_strategy
@@ -166,14 +170,11 @@ class Searcher:
         for hit in hits[:5]:
             if hit.symbol_id and hit.symbol_id not in seen_symbols:
                 seen_symbols.add(hit.symbol_id)
-                entry_points.append(SymbolEntry(
-                    id=str(hit.symbol_id),
-                    name=hit.symbol_name or "",
-                    type="function",
-                    file_path=hit.file_path,
-                    line=hit.line,
-                    relevance_score=hit.vector_score + hit.symbol_score,
-                ))
+                sym = self.db.query(Symbol).filter(Symbol.id == hit.symbol_id).first()
+                if sym:
+                    entry_point = self._symbol_entry_with_label(sym)
+                    entry_point.relevance_score = hit.vector_score + hit.symbol_score
+                    entry_points.append(entry_point)
 
         if strategy.include_callers or strategy.include_callees:
             if entry_points:
@@ -300,6 +301,26 @@ class Searcher:
 
         return self._fuse_multiple(all_hits)
 
+    def _symbol_entry_with_label(self, sym: Symbol) -> "SymbolEntry":
+        from schemas import SymbolEntry
+
+        label = (
+            self.db.query(SymbolFlowLabel)
+            .filter(SymbolFlowLabel.symbol_id == sym.id)
+            .first()
+        )
+        return SymbolEntry(
+            id=str(sym.id),
+            name=sym.name,
+            type=sym.type,
+            file_path=sym.file.path if sym.file else "",
+            line=sym.line,
+            layer=label.layer if label else None,
+            module=label.module if label else None,
+            chinese_name=label.chinese_name if label else None,
+            io_description=label.io_description if label else None,
+        )
+
     def _build_call_chain(
         self,
         root_symbol_id: UUID,
@@ -316,13 +337,7 @@ class Searcher:
                 upstream=[], downstream=[], depth=0,
             )
 
-        root_entry = SymbolEntry(
-            id=str(root.id),
-            name=root.name,
-            type=root.type,
-            file_path=root.file.path if root.file else "",
-            line=root.line,
-        )
+        root_entry = self._symbol_entry_with_label(root)
 
         upstream = []
         downstream = []
@@ -332,26 +347,14 @@ class Searcher:
             for cid in caller_ids:
                 sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
                 if sym:
-                    upstream.append(SymbolEntry(
-                        id=str(sym.id),
-                        name=sym.name,
-                        type=sym.type,
-                        file_path=sym.file.path if sym.file else "",
-                        line=sym.line,
-                    ))
+                    upstream.append(self._symbol_entry_with_label(sym))
 
         if include_callees:
             callee_ids = self._query_callees(root_symbol_id, depth)
             for cid in callee_ids:
                 sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
                 if sym:
-                    downstream.append(SymbolEntry(
-                        id=str(sym.id),
-                        name=sym.name,
-                        type=sym.type,
-                        file_path=sym.file.path if sym.file else "",
-                        line=sym.line,
-                    ))
+                    downstream.append(self._symbol_entry_with_label(sym))
 
         return CallChain(
             root=root_entry,
@@ -663,15 +666,20 @@ class Searcher:
                    f.language,
                    GREATEST(
                        ts_rank_cd(to_tsvector('english', e.content), plainto_tsquery('english', :query)),
-                       ts_rank_cd(to_tsvector('simple', e.content), plainto_tsquery('simple', :query))
+                       ts_rank_cd(to_tsvector('simple', e.content), plainto_tsquery('simple', :query)),
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), plainto_tsquery('simple', :query)), 0),
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), plainto_tsquery('simple', :query)), 0)
                    ) AS rank
             FROM embeddings e
             JOIN code_files f ON f.id = e.file_id
             JOIN repositories r ON r.id = e.repo_id
+            LEFT JOIN embedding_enrichments ee ON ee.embedding_id = e.id
             WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
               AND (
                   to_tsvector('english', e.content) @@ plainto_tsquery('english', :query)
                   OR to_tsvector('simple', e.content) @@ plainto_tsquery('simple', :query)
+                  OR to_tsvector('simple', ee.chinese_summary) @@ plainto_tsquery('simple', :query)
+                  OR to_tsvector('simple', ee.keywords) @@ plainto_tsquery('simple', :query)
               )
             ORDER BY rank DESC
             LIMIT :limit
