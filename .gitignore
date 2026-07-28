@@ -42,7 +42,6 @@ packages/macos/release/
 Thumbs.db
 
 # Docker
-docker-compose.override.yml
 *.dmg
 
 # SQLite 数据库
