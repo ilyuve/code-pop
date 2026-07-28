@@ -14,6 +14,13 @@ RUN apt-get update && apt-get install -y \
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/web ./packages/web
 
+# 降低并发、增加重试，避免弱网环境下 ECONNRESET 导致构建失败
+RUN pnpm config set network-concurrency 5 && \
+    pnpm config set fetch-retries 5 && \
+    pnpm config set fetch-retry-mintimeout 20000 && \
+    pnpm config set fetch-retry-maxtimeout 120000 && \
+    pnpm config set fetch-timeout 300000
+
 RUN pnpm install --frozen-lockfile
 
 WORKDIR /app/packages/web
