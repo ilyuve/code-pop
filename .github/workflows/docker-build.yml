@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev_625
+      - feature/chinese-llm-retrieval
     tags:
       - 'v*'
 
@@ -40,6 +41,7 @@ jobs:
           images: ${{ env.BACKEND_IMAGE }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=demo,enable=${{ github.ref == 'refs/heads/feature/chinese-llm-retrieval' }}
             type=ref,event=branch
             type=ref,event=tag
 
@@ -79,6 +81,7 @@ jobs:
           images: ${{ env.WEB_IMAGE }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=demo,enable=${{ github.ref == 'refs/heads/feature/chinese-llm-retrieval' }}
             type=ref,event=branch
             type=ref,event=tag
 
