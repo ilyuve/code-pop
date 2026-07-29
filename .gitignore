@@ -11,6 +11,8 @@ logs/
 # 数据库数据
 pgdata/
 postgres/
+*.db
+backend/codepop.db
 
 # 配置文件
 .env
