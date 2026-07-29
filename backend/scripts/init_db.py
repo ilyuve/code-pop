@@ -52,10 +52,11 @@ def init_db() -> None:
                 "ADD COLUMN IF NOT EXISTS error_message TEXT"
             )
         )
+        datetime_type = "DATETIME" if engine.dialect.name == "sqlite" else "TIMESTAMP WITHOUT TIME ZONE"
         conn.execute(
             text(
                 "ALTER TABLE IF EXISTS repositories "
-                "ADD COLUMN IF NOT EXISTS indexing_heartbeat_at DATETIME"
+                f"ADD COLUMN IF NOT EXISTS indexing_heartbeat_at {datetime_type}"
             )
         )
         conn.execute(
