@@ -27,7 +27,7 @@ from mcp_server.server import get_mcp_app, get_mcp_session_manager
 from database import SessionLocal, get_db
 from exceptions import CodePopException
 from models import RepoStatus, Repository
-from scripts.init_db import init_db
+from scripts.ensure_database import ensure_database
 from services.indexer import index_repo, shutdown_indexer
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 def _init_db_sync() -> None:
     """Synchronous database initialization wrapper."""
-    init_db()
+    ensure_database()
 
 
 async def _recover_indexing_repos() -> None:
@@ -82,7 +82,7 @@ async def _warmup_models() -> None:
 
 
 logger.info("Initializing database...")
-init_db()
+ensure_database()
 logger.info("CodePop backend ready")
 
 
