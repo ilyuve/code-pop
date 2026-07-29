@@ -105,9 +105,14 @@ async def _warmup_models() -> None:
         logger.error("Search will be unavailable until model is loaded.")
 
 
-logger.info("Initializing database...")
-ensure_database()
-logger.info("CodePop backend ready")
+_is_test = "pytest" in sys.modules
+
+if not _is_test:
+    logger.info("Initializing database...")
+    ensure_database()
+    logger.info("CodePop backend ready")
+else:
+    logger.info("Running under pytest; skipping database initialization at import time")
 
 
 @asynccontextmanager
