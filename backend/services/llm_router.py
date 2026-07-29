@@ -88,6 +88,9 @@ class LLMRouter:
         latency_ms: int,
         error_message: Optional[str] = None,
     ):
+        # Use a dedicated session so that committing the usage log never
+        # interferes with the caller's transaction (e.g. the indexer session).
+        db = SessionLocal()
         try:
             log = LlmUsageLog(
                 provider_id=provider_id,
@@ -99,11 +102,13 @@ class LLMRouter:
                 status=status,
                 error_message=error_message,
             )
-            self.db.add(log)
-            self.db.commit()
+            db.add(log)
+            db.commit()
         except Exception as e:
             logger.error("Failed to write LLM usage log: %s", e)
-            self.db.rollback()
+            db.rollback()
+        finally:
+            db.close()
 
     async def _try_provider_chat(
         self,
