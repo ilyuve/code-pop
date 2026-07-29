@@ -214,7 +214,7 @@ def aggregate_domain_synonyms(
                 )
                 db.add(row)
                 existing[term] = row
-    db.commit()
+    # Caller is responsible for committing the session.
 
 
 def load_domain_synonyms(db: Session, repo_id: UUID) -> Dict[str, List[str]]:

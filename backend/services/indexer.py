@@ -49,8 +49,15 @@ _index_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indexer-
 _active_indexing_tasks: Dict[str, asyncio.Future] = {}
 _indexing_locks: Dict[str, asyncio.Lock] = {}
 
+# Cancellation signals for synchronous indexing threads.
+_indexing_cancel_events: Dict[str, threading.Event] = {}
+
 # Store indexing logs per repository.
 _indexing_logs: Dict[str, List[Dict[str, Any]]] = {}
+
+
+class IndexingCancelledError(Exception):
+    """Raised when the user cancels an indexing task."""
 
 
 def _get_indexing_lock(repo_id: str) -> asyncio.Lock:
@@ -60,19 +67,51 @@ def _get_indexing_lock(repo_id: str) -> asyncio.Lock:
     return _indexing_locks[repo_id]
 
 
+def _get_cancel_event(repo_id: str) -> threading.Event:
+    """Get or create a cancellation event for a repository."""
+    if repo_id not in _indexing_cancel_events:
+        _indexing_cancel_events[repo_id] = threading.Event()
+    return _indexing_cancel_events[repo_id]
+
+
+def _is_cancelled(repo_id: str) -> bool:
+    """Return True if the indexing task for repo_id has been cancelled."""
+    event = _indexing_cancel_events.get(repo_id)
+    return event.is_set() if event else False
+
+
+def _check_cancelled(repo_id: str) -> None:
+    """Raise IndexingCancelledError if the repo indexing was cancelled."""
+    if _is_cancelled(repo_id):
+        raise IndexingCancelledError(f"Indexing cancelled for repository {repo_id}")
+
+
 def _cancel_indexing(repo_id: str) -> bool:
-    """Cancel an ongoing indexing task for a repository."""
+    """Cancel an ongoing indexing task for a repository.
+
+    Sets a threading event that the synchronous indexing thread polls at stage
+    boundaries. Also cancels the asyncio Future for completeness.
+    """
+    cancelled = False
+    event = _get_cancel_event(repo_id)
+    if not event.is_set():
+        event.set()
+        cancelled = True
+
     task = _active_indexing_tasks.get(repo_id)
     if task and not task.done():
         task.cancel()
-        return True
-    return False
+        cancelled = True
+
+    return cancelled
 
 
 def _clear_indexing_state(repo_id: str) -> None:
     """Clean up indexing state for a repository."""
     if repo_id in _active_indexing_tasks:
         del _active_indexing_tasks[repo_id]
+    if repo_id in _indexing_cancel_events:
+        del _indexing_cancel_events[repo_id]
 
 
 def _get_indexing_logs(repo_id: str) -> List[Dict[str, Any]]:
@@ -402,6 +441,7 @@ def _bulk_insert_symbols_and_embeddings(
             )
     else:
         for i in range(0, total_symbols, batch_size):
+            _check_cancelled(repo_id_str)
             batch = symbol_mappings[i : i + batch_size]
             db.bulk_insert_mappings(Symbol, batch)
             db.flush()
@@ -482,6 +522,7 @@ def _bulk_insert_symbols_and_embeddings(
     vectors: List[Any] = []
 
     for i in range(0, total_chunks, encode_batch_size):
+        _check_cancelled(repo_id_str)
         try:
             import psutil
             available_mb = psutil.virtual_memory().available / (1024 * 1024)
@@ -762,16 +803,21 @@ async def _enrich_chunks_for_indexing_async(
     )
 
     async def enrich_one(chunk_hash: str) -> None:
+        _check_cancelled(repo_id_str)
         content, language = unique_chunks[chunk_hash]
         async with semaphore:
+            _check_cancelled(repo_id_str)
             result = await enrich_chunk(router, content, language, repo_id=repo_id_str)
             if result:
                 cached[chunk_hash] = result
 
     tasks = [asyncio.create_task(enrich_one(h)) for h in missing_hashes]
     for task in asyncio.as_completed(tasks):
+        _check_cancelled(repo_id_str)
         try:
             await task
+        except IndexingCancelledError:
+            raise
         except Exception as e:
             logger.warning("Chinese enrichment task failed: %s", e)
         processed += 1
@@ -833,9 +879,12 @@ async def _enrich_repository_async(
                 synonym_batches.append(result.synonyms)
     if synonym_batches:
         try:
+            _check_cancelled(repo_id_str)
             aggregate_domain_synonyms(db, repo_id, synonym_batches)
         except Exception as e:
             logger.warning("Failed to aggregate domain synonyms: %s", e)
+
+    _check_cancelled(repo_id_str)
 
     if not enable_flow_label:
         _notify(
@@ -873,7 +922,9 @@ async def _enrich_repository_async(
     semaphore = asyncio.Semaphore(5)
 
     async def enrich_symbol_one(sym: Symbol) -> None:
+        _check_cancelled(repo_id_str)
         async with semaphore:
+            _check_cancelled(repo_id_str)
             content = file_embeddings.get(sym.file_id, sym.file.path)
             result = await enrich_symbol_flow(
                 router,
@@ -888,8 +939,11 @@ async def _enrich_repository_async(
 
     symbol_tasks = [asyncio.create_task(enrich_symbol_one(sym)) for sym in symbols]
     for task in asyncio.as_completed(symbol_tasks):
+        _check_cancelled(repo_id_str)
         try:
             await task
+        except IndexingCancelledError:
+            raise
         except Exception as e:
             logger.warning("Flow label task failed: %s", e)
         symbol_processed += 1
@@ -948,6 +1002,8 @@ def _enrich_repository(
                 enable_flow_label=enable_flow_label,
             )
         )
+    except IndexingCancelledError:
+        raise
     except Exception as e:
         logger.warning("Chinese enrichment stage failed: %s", e)
         get_degradation_tracker().record(
@@ -966,6 +1022,7 @@ def _rebuild_call_graph(
     loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Rebuild call graph edges ONLY for changed files."""
+    _check_cancelled(repo_id_str)
     if not file_records:
         return
 
@@ -1046,6 +1103,7 @@ def _rebuild_call_graph(
         batch_size = settings.index_batch_size
         total_edges = len(edges)
         for i in range(0, total_edges, batch_size):
+            _check_cancelled(repo_id_str)
             db.bulk_insert_mappings(CallGraphEdge, edges[i : i + batch_size])
             db.flush()
             inserted = min(i + batch_size, total_edges)
@@ -1126,6 +1184,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         repo.error_message = None
         db.commit()
         _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0, log_message="初始化索引状态", db=db)
+        _check_cancelled(repo_id_str)
 
         _notify(
             loop,
@@ -1162,6 +1221,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 log_message=f"代码同步完成，本地路径: {local_path}",
                 db=db,
             )
+            _check_cancelled(repo_id_str)
         except Exception as sync_exc:
             error_msg = f"代码同步失败: {str(sync_exc)}"
             _add_log(db, repo_id_str, "error", error_msg, "git_sync")
@@ -1189,6 +1249,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         )
 
         for file_path in source_files:
+            _check_cancelled(repo_id_str)
             try:
                 result = _index_file(db, repo_id, local_path, file_path)
                 if result:
@@ -1223,6 +1284,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 )
 
         _add_log(db, repo_id_str, "info", f"文件扫描完成，共处理 {processed} 个文件，跳过 {skipped} 个", "scan")
+        _check_cancelled(repo_id_str)
 
         llm_settings = get_effective_settings(db, repo_id)
         enable_index_enrich = llm_settings.get("enable_index_chinese_enrich", True)
@@ -1238,6 +1300,8 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                     _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop)
                 )
                 db.commit()
+            except IndexingCancelledError:
+                raise
             except Exception as enrich_exc:
                 logger.warning("Chunk enrichment failed: %s", enrich_exc)
                 get_degradation_tracker().record(
@@ -1247,6 +1311,8 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                     fallback_action="Continue indexing without Chinese enrichment",
                 )
                 chunk_enrichments = None
+
+        _check_cancelled(repo_id_str)
 
         if all_file_records:
             print(f"[INDEXER] flushing {len(all_file_records)} records for repo {repo_id}", flush=True)
@@ -1265,6 +1331,8 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             db.expire_all()
             gc.collect()
 
+        _check_cancelled(repo_id_str)
+
         _enrich_repository(
             db,
             repo_id,
@@ -1275,6 +1343,8 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             chunk_enrichments=chunk_enrichments,
             enable_flow_label=enable_flow_label,
         )
+
+        _check_cancelled(repo_id_str)
 
         _notify(
             loop,
@@ -1292,15 +1362,18 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             db=db,
         )
 
+        _check_cancelled(repo_id_str)
         _rebuild_call_graph(db, repo_id, repo_id_str, all_file_records, loop)
         db.commit()
 
         _add_log(db, repo_id_str, "info", "调用图构建完成", "call_graph")
 
+        _check_cancelled(repo_id_str)
         _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop)
         db.commit()
 
         _add_log(db, repo_id_str, "info", "框架路由解析完成", "routes")
+        _check_cancelled(repo_id_str)
 
         # ---- 清理已删除的文件 ----
         # 扫描仓库当前所有文件路径，删除数据库中不存在于仓库的记录
@@ -1331,13 +1404,25 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             skipped,
         )
 
+    except IndexingCancelledError as exc:
+        logger.info("Indexing cancelled for repository %s", repo_id)
+        try:
+            repo = db.query(Repository).filter(Repository.id == repo_id).first()
+            if repo:
+                repo.status = RepoStatus.pending.value
+                repo.error_message = "索引已取消"
+                db.commit()
+            _add_log(db, repo_id_str, "info", "索引已取消", "cancel")
+            _notify(loop, repo_id_str, RepoStatus.pending.value, 0.0, "索引已取消", db=db)
+        except Exception:
+            pass
     except Exception as exc:
         logger.exception("Failed to index repository %s: %s", repo_id, exc)
         full_traceback = traceback.format_exc()
         error_msg = str(exc)
         _add_log(db, repo_id_str, "error", f"索引失败: {error_msg}", "error")
         _add_log(db, repo_id_str, "error", f"详细堆栈:\n{full_traceback}", "error")
-        
+
         try:
             repo = db.query(Repository).filter(Repository.id == repo_id).first()
             if repo:
@@ -1363,11 +1448,15 @@ async def index_repo(repo_id: UUID) -> None:
     loop = asyncio.get_running_loop()
     
     lock = _get_indexing_lock(repo_id_str)
-    
+
     async with lock:
         if _cancel_indexing(repo_id_str):
             logger.info("Cancelled existing indexing task for repo %s", repo_id_str)
-        
+
+        # Start fresh: clear any stale cancellation signal from a previous run.
+        event = _get_cancel_event(repo_id_str)
+        event.clear()
+
         def _run_index():
             _sync_index_repo(repo_id, loop)
         
@@ -1409,6 +1498,7 @@ def _parse_framework_routes(
     db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == repo_id).delete(synchronize_session=False)
 
     for code_file, parsed in file_records:
+        _check_cancelled(repo_id_str)
         if parsed.language in ("python", "javascript", "typescript", "java"):
             try:
                 routes = router_parser.parse(parsed.content, parsed.language)

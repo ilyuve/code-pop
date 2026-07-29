@@ -1,12 +1,15 @@
 """CodePop FastAPI application entry point."""
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 
 import sys
 from pathlib import Path
@@ -32,6 +35,27 @@ from services.indexer import index_repo, shutdown_indexer
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
+
+
+class _TimezoneAwareJSONResponse(JSONResponse):
+    """Render naive UTC datetimes with explicit +00:00 offset.
+
+    The backend stores all timestamps as UTC (naive datetimes). Without an
+    offset, JavaScript's `new Date(isoString)` treats the value as local time.
+    Appending '+00:00' lets the browser convert it to the user's local timezone
+    automatically when using `toLocaleString()` / `toLocaleTimeString()`.
+    """
+
+    def render(self, content) -> bytes:
+        def _encode(obj):
+            if isinstance(obj, datetime):
+                # Naive datetime is assumed to be UTC; timezone-aware is kept as-is.
+                dt = obj.replace(tzinfo=timezone.utc) if obj.tzinfo is None else obj
+                return dt.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        encoded = jsonable_encoder(content, custom_encoder={datetime: _encode})
+        return json.dumps(encoded, ensure_ascii=False, default=_encode).encode("utf-8")
 
 
 def _init_db_sync() -> None:
@@ -103,6 +127,7 @@ app = FastAPI(
     description="AI Agent oriented code retrieval infrastructure",
     version=settings.api_version,
     lifespan=lifespan,
+    default_response_class=_TimezoneAwareJSONResponse,
 )
 
 

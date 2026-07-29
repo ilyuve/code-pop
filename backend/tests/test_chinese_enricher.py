@@ -70,7 +70,7 @@ class TestDomainSynonymAggregation:
         aggregate_domain_synonyms(db, repo_id, [{"骑士": ["骑手"]}])
 
         db.add.assert_called_once()
-        db.commit.assert_called_once()
+        db.commit.assert_not_called()
 
     def test_aggregate_merges_existing_term(self):
         db = MagicMock()
@@ -85,7 +85,7 @@ class TestDomainSynonymAggregation:
 
         assert "骑手" in json.loads(existing.synonyms)
         assert existing.hit_count == 2
-        db.commit.assert_called_once()
+        db.commit.assert_not_called()
 
     def test_load_domain_synonyms(self):
         db = MagicMock()
