@@ -55,6 +55,12 @@ def init_db() -> None:
         conn.execute(
             text(
                 "ALTER TABLE IF EXISTS repositories "
+                "ADD COLUMN IF NOT EXISTS indexing_heartbeat_at DATETIME"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS repositories "
                 "ALTER COLUMN git_url DROP NOT NULL"
             )
         )

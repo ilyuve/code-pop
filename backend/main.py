@@ -40,16 +40,28 @@ def _init_db_sync() -> None:
 
 
 async def _recover_indexing_repos() -> None:
-    """Recover repos that were in indexing state when server crashed."""
+    """Recover repos that were in indexing state when the server restarts.
+
+    A server restart means any previous indexing process is gone, so we
+    unconditionally reset indexing repos to pending.  The heartbeat column is
+    cleared so stale timestamps from the previous run do not confuse future
+    checks.  Stale heartbeats are not treated as errors here because the user
+    can simply re-trigger indexing once the server is back.
+    """
     db = SessionLocal()
     try:
         indexing_repos = db.query(Repository).filter(
             Repository.status == RepoStatus.indexing.value
         ).all()
         if indexing_repos:
-            logger.info("Found %d repos in indexing state, resetting to pending...", len(indexing_repos))
+            logger.info(
+                "Found %d repos stuck in indexing state after restart, resetting to pending...",
+                len(indexing_repos),
+            )
             for repo in indexing_repos:
                 repo.status = RepoStatus.pending.value
+                repo.error_message = None
+                repo.indexing_heartbeat_at = None
             db.commit()
         else:
             logger.info("No repos to recover from indexing state")

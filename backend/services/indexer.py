@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import logging
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal
-from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, SparseEmbedding, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, EmbeddingEnrichment, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, SparseEmbedding, Symbol
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.notifier import notifier
@@ -284,12 +285,28 @@ def _index_file(
             and db.query(Embedding.id).filter(Embedding.file_id == existing.id).first() is not None
         )
         if has_children:
-            print(f"[INDEXER] unchanged {rel_path}", flush=True)
-            return None
-        print(
-            f"[INDEXER] hash match but missing children for {rel_path}, re-indexing",
-            flush=True,
-        )
+            # Even with symbols/embeddings, a forced re-index may need to
+            # backfill Chinese semantic enrichment data if it was skipped
+            # previously (e.g. LLM provider not configured).
+            has_enrichment = (
+                db.query(EmbeddingEnrichment.id)
+                .join(Embedding, EmbeddingEnrichment.embedding_id == Embedding.id)
+                .filter(Embedding.file_id == existing.id)
+                .first()
+                is not None
+            )
+            if has_enrichment:
+                print(f"[INDEXER] unchanged {rel_path}", flush=True)
+                return None
+            print(
+                f"[INDEXER] hash match but missing enrichment for {rel_path}, re-indexing",
+                flush=True,
+            )
+        else:
+            print(
+                f"[INDEXER] hash match but missing children for {rel_path}, re-indexing",
+                flush=True,
+            )
         db.delete(existing)
         db.flush()
     elif existing:
@@ -1073,6 +1090,27 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
     all_file_records: List[Tuple[CodeFile, ParseResult]] = []
     total_inserted = 0
 
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat_worker() -> None:
+        """Periodically update the indexing heartbeat timestamp."""
+        while not heartbeat_stop.is_set():
+            try:
+                hb_db = SessionLocal()
+                try:
+                    repo = hb_db.query(Repository).filter(Repository.id == repo_id).first()
+                    if repo and repo.status == RepoStatus.indexing.value:
+                        repo.indexing_heartbeat_at = datetime.utcnow()
+                        hb_db.commit()
+                finally:
+                    hb_db.close()
+            except Exception as e:
+                logger.debug("Heartbeat update failed: %s", e)
+            heartbeat_stop.wait(timeout=30)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
+    heartbeat_thread.start()
+
     try:
         _clear_indexing_logs(repo_id_str)
         _add_log(db, repo_id_str, "info", "开始索引流程", "init")
@@ -1310,6 +1348,11 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         except Exception:
             pass
     finally:
+        heartbeat_stop.set()
+        try:
+            heartbeat_thread.join(timeout=2)
+        except Exception:
+            pass
         _clear_indexing_state(repo_id_str)
         db.close()
 

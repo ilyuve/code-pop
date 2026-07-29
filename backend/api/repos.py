@@ -12,8 +12,8 @@ from database import get_db
 from exceptions import RepoAlreadyExistsException, RepoNotFoundException, ValidationException
 from models import CodeFile, RepoStatus, Repository, Symbol
 from schemas import RepoCreate, RepoResponse
-from services.indexer import index_repo, _get_indexing_logs, _cancel_indexing
-from models import IndexingLog, IndexingProgress
+from services.indexer import index_repo, _get_indexing_logs, _cancel_indexing, _clear_indexing_logs, _clear_indexing_state
+from models import DomainSynonym, FrameworkRoute, IndexingLog, IndexingProgress, LlmSetting
 from services.repo_sync import is_valid_git_url
 
 logger = logging.getLogger(__name__)
@@ -89,9 +89,37 @@ def get_repo(repo_id: UUID, db: Session = Depends(get_db)) -> Repository:
 @router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_repo(repo_id: UUID, db: Session = Depends(get_db)) -> None:
     repo = _get_repo(db, repo_id)
-    db.delete(repo)
-    db.commit()
-    logger.info("Deleted repository %s", repo_id)
+    repo_id_str = str(repo_id)
+
+    # Cancel any running indexing task first so it doesn't keep writing to the
+    # database while we are trying to delete the repository.
+    if repo.status == RepoStatus.indexing.value:
+        _cancel_indexing(repo_id_str)
+
+    try:
+        # Explicitly clean up related records first.  This avoids subtle FK
+        # ordering issues and makes deletion work even if SQLAlchemy cascade
+        # relationships are not fully loaded.
+        db.query(IndexingProgress).filter(IndexingProgress.repo_id == repo_id).delete(synchronize_session=False)
+        db.query(IndexingLog).filter(IndexingLog.repo_id == repo_id).delete(synchronize_session=False)
+        db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == repo_id).delete(synchronize_session=False)
+        db.query(DomainSynonym).filter(DomainSynonym.repo_id == repo_id).delete(synchronize_session=False)
+        db.query(LlmSetting).filter(LlmSetting.repo_id == repo_id).delete(synchronize_session=False)
+
+        db.delete(repo)
+        db.commit()
+
+        # Clean up in-memory indexing state as well.
+        _clear_indexing_logs(repo_id_str)
+        _clear_indexing_state(repo_id_str)
+        logger.info("Deleted repository %s", repo_id)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to delete repository %s: %s", repo_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete repository: {str(exc)}",
+        )
 
 
 @router.post("/{repo_id}/index", status_code=status.HTTP_202_ACCEPTED)
