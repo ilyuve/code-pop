@@ -55,3 +55,4 @@ test_*.py
 
 # Trae 文档
 .trae/documents/
+.pnpm-store/
