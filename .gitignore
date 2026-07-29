@@ -44,9 +44,6 @@ Thumbs.db
 # Docker
 *.dmg
 
-# SQLite 数据库
-backend/codepop.db
-
 # 本地测试脚本
 test_*.py
 !backend/tests/test_*.py

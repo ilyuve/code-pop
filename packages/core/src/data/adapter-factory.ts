@@ -1,6 +1,6 @@
 import { DatabaseAdapter } from './adapter';
 
-export type DatabaseType = 'postgresql' | 'sqlite' | 'mock';
+export type DatabaseType = 'postgresql' | 'mock';
 
 export interface DatabaseConfig {
   type: DatabaseType;
@@ -28,11 +28,6 @@ export const initAdapters = async (): Promise<void> => {
   AdapterFactory.register('postgresql', async () => {
     const { PostgreSQLAdapter } = await import('./postgresql-adapter');
     return new PostgreSQLAdapter();
-  });
-
-  AdapterFactory.register('sqlite', async () => {
-    const { SQLiteAdapter } = await import('./sqlite-adapter');
-    return new SQLiteAdapter();
   });
 
   AdapterFactory.register('mock', async () => {

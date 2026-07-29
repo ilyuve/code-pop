@@ -432,10 +432,10 @@ export const RepoDetail = () => {
                       当前可用内存不足，尝试关闭其他应用或增加系统内存
                     </li>
                   ) : null}
-                  {repo.errorMessage?.includes('database') || repo.errorMessage?.includes('sqlite') ? (
+                  {repo.errorMessage?.includes('database') || repo.errorMessage?.includes('postgresql') ? (
                     <li className="flex items-start gap-2">
                       <span className="text-red-500">•</span>
-                      检查数据库文件权限，确保有读写权限
+                      检查 PostgreSQL 连接配置，确认数据库服务已启动且网络可达
                     </li>
                   ) : null}
                   <li className="flex items-start gap-2">

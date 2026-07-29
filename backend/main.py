@@ -199,14 +199,9 @@ def health_deep(db: Session = Depends(get_db)) -> dict:
 
 @app.get("/test-db")
 def test_db():
-    import os
-    db_path = "./codepop.db"
-    exists = os.path.exists(db_path)
-    size = os.path.getsize(db_path) if exists else 0
-    
     try:
         db = SessionLocal()
         repos = db.query(Repository).all()
-        return {"count": len(repos), "db_exists": exists, "db_size": size}
+        return {"count": len(repos), "connected": True}
     except Exception as e:
-        return {"error": str(e), "db_exists": exists, "db_size": size}
+        return {"error": str(e), "connected": False}
