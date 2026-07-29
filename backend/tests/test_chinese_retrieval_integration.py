@@ -171,3 +171,174 @@ class TestSearcherUsesExpandedTerms:
         params = call_args[0][1]
         # SQL is parameterized; the query text should appear in the bound parameters.
         assert params["query"] == query_text
+
+
+class TestDeleteRepo:
+    def test_delete_cancels_indexing_and_cleans_related_records(self):
+        """Deleting an indexing repository must cancel indexing and remove all
+        related rows without relying on FK cascades alone."""
+        from api.repos import delete_repo
+        from models import (
+            DomainSynonym,
+            FrameworkRoute,
+            IndexingLog,
+            IndexingProgress,
+            LlmSetting,
+            RepoStatus,
+            Repository,
+        )
+
+        repo_id = uuid4()
+        repo = Repository(
+            id=repo_id,
+            name="test-repo",
+            git_url="https://github.com/example/test-repo",
+            local_path="/tmp/test-repo",
+            status=RepoStatus.indexing.value,
+        )
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = repo
+        db.query.return_value.filter.return_value.delete.return_value = None
+
+        with patch("api.repos._cancel_indexing") as mock_cancel, \
+             patch("api.repos._clear_indexing_state") as mock_clear_state, \
+             patch("api.repos._clear_indexing_logs") as mock_clear_logs:
+            delete_repo(repo_id, db=db)
+
+        mock_cancel.assert_called_once_with(str(repo_id))
+        db.delete.assert_called_once_with(repo)
+        db.commit.assert_called_once()
+        mock_clear_state.assert_called_once_with(str(repo_id))
+        mock_clear_logs.assert_called_once_with(str(repo_id))
+
+        # Ensure all related tables are cleaned up explicitly.
+        cleanup_models = [
+            IndexingProgress,
+            IndexingLog,
+            FrameworkRoute,
+            DomainSynonym,
+            LlmSetting,
+        ]
+        queried_models = [call[0][0] for call in db.query.call_args_list]
+        for model in cleanup_models:
+            assert model in queried_models
+
+    def test_delete_nonexistent_repo_raises_404(self):
+        from api.repos import delete_repo
+        from exceptions import RepoNotFoundException
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+
+        with pytest.raises(RepoNotFoundException):
+            delete_repo(uuid4(), db=db)
+
+
+class TestForceReindexWhenEnrichmentMissing:
+    def test_reindexes_when_hash_matches_but_enrichment_missing(self, tmp_path):
+        """If a file hash matches but the previous run skipped Chinese enrichment,
+        _index_file must delete the stale row and re-process the file."""
+        import hashlib
+
+        from models import CodeFile, Embedding, EmbeddingEnrichment, Symbol as SymbolModel
+        from services.indexer import _index_file
+        from services.parser import Chunk, ParseResult, Symbol
+
+        repo_id = uuid4()
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        file_path = repo_path / "src" / "order.py"
+        file_path.parent.mkdir()
+        content = "def create_order(): pass"
+        file_path.write_text(content, encoding="utf-8")
+        content_bytes = content.encode("utf-8")
+        content_hash = hashlib.sha256(content_bytes).hexdigest()
+
+        existing = CodeFile(
+            id=uuid4(),
+            repo_id=repo_id,
+            path="src/order.py",
+            language="python",
+            content_hash=content_hash,
+            size_bytes=len(content_bytes),
+        )
+
+        db = MagicMock()
+
+        def _query_side_effect(model):
+            q = MagicMock()
+            if model is CodeFile:
+                q.filter.return_value.first.return_value = existing
+            elif model is SymbolModel.id:
+                q.filter.return_value.first.return_value = MagicMock()
+            elif model is Embedding.id:
+                q.filter.return_value.first.return_value = MagicMock()
+            elif model is EmbeddingEnrichment.id:
+                join_mock = MagicMock()
+                join_mock.filter.return_value.first.return_value = None
+                q.join.return_value = join_mock
+            return q
+
+        db.query.side_effect = _query_side_effect
+
+        parsed = ParseResult(
+            file_path="src/order.py",
+            language="python",
+            symbols=[
+                Symbol(
+                    name="create_order",
+                    type="function",
+                    kind="def",
+                    line=1,
+                    column=0,
+                    end_line=1,
+                    end_column=len(content),
+                    is_exported=True,
+                )
+            ],
+            chunks=[Chunk(content=content, start_line=1, end_line=1)],
+            size_bytes=len(content_bytes),
+            content_hash=content_hash,
+            calls=[],
+        )
+
+        with patch("services.indexer.parse_file", return_value=parsed):
+            result = _index_file(db, repo_id, repo_path, file_path)
+
+        assert result is not None
+        code_file, parse_result = result
+        assert code_file.path == "src/order.py"
+        assert parse_result.content_hash == content_hash
+        db.delete.assert_called_once_with(existing)
+
+
+class TestIndexingStateRecovery:
+    def test_recover_indexing_repos_resets_to_pending(self):
+        """After a server restart, repos stuck in indexing state must be reset to
+        pending so the UI does not stay frozen."""
+        from main import _recover_indexing_repos
+        from models import RepoStatus, Repository
+
+        repo1 = Repository(
+            id=uuid4(),
+            name="repo1",
+            status=RepoStatus.indexing.value,
+            indexing_heartbeat_at=datetime(2026, 7, 29, 18, 0, 0),
+        )
+        repo2 = Repository(
+            id=uuid4(),
+            name="repo2",
+            status=RepoStatus.indexed.value,
+        )
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [repo1]
+
+        with patch("main.SessionLocal", return_value=db):
+            asyncio.run(_recover_indexing_repos())
+
+        assert repo1.status == RepoStatus.pending.value
+        assert repo1.error_message is None
+        assert repo1.indexing_heartbeat_at is None
+        db.commit.assert_called_once()
