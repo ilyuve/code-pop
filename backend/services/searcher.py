@@ -285,9 +285,9 @@ class Searcher:
                 ))
                 # Always supplement with BM25 for Chinese semantic fields.
                 term_hits.extend(run_search(
-                    lambda: self._bm25_search(term, repo_id, limit=30),
+                    lambda: self._bm25_search(term, repo_id, top_k=30),
                     "bm25",
-                    lambda: self._like_search(term, repo_id, limit=30),
+                    lambda: self._like_search(term, repo_id, top_k=30),
                 ))
 
             elif strategy.primary == "symbol":
@@ -314,9 +314,9 @@ class Searcher:
 
             elif strategy.primary == "bm25":
                 term_hits.extend(run_search(
-                    lambda: self._bm25_search(term, repo_id, limit=30),
+                    lambda: self._bm25_search(term, repo_id, top_k=30),
                     "bm25",
-                    lambda: self._like_search(term, repo_id, limit=30),
+                    lambda: self._like_search(term, repo_id, top_k=30),
                 ))
 
             all_hits.extend(term_hits)
