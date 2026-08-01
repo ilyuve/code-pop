@@ -1,4 +1,4 @@
-"""Hybrid search engine with intent-aware retrieval and degradation fallback."""
+"""Hybrid search engine with intent-aware retrieval."""
 
 import collections
 import logging
@@ -14,7 +14,6 @@ from config import settings
 from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol, SymbolFlowLabel
 from schemas import SearchResultItem
 from services.embedder import Embedder
-from services.degradation_tracker import get_degradation_tracker
 from services.llm_router import LLMRouter
 from services.llm_settings_service import get_effective_settings
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
@@ -120,7 +119,7 @@ def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
 
 
 class Searcher:
-    """Intent-aware hybrid code search with degradation fallback."""
+    """Intent-aware hybrid code search."""
 
     def __init__(self, db: Session):
         self.db = db
@@ -128,18 +127,6 @@ class Searcher:
         self.embedding_repo = EmbeddingRepository(db)
         self.symbol_repo = SymbolRepository(db)
         self.intent_analyzer = get_intent_analyzer()
-        self._degraded_components: Set[str] = set()
-        self._degradation_reasons: List[str] = []
-
-    def _record_degradation(self, component: str, reason: str, fallback: str):
-        self._degraded_components.add(component)
-        self._degradation_reasons.append(reason)
-        get_degradation_tracker().record(
-            component=component,
-            error_type="SearchDegradation",
-            error_message=reason,
-            fallback_action=fallback,
-        )
 
     def search_with_context(
         self,
@@ -149,9 +136,6 @@ class Searcher:
         intent=None,
     ) -> "CodeContext":
         from schemas import CallChain, CodeContext, FileSummary, SymbolEntry
-
-        self._degraded_components = set()
-        self._degradation_reasons = []
 
         llm_settings = get_effective_settings(self.db, repo_id)
         enable_query_llm_expand = llm_settings.get("enable_query_llm_expand", True)
@@ -246,9 +230,6 @@ class Searcher:
             total_files=len(related_files),
             total_symbols=len(entry_points),
             search_latency_ms=0,
-            degraded=len(self._degraded_components) > 0,
-            degradation_reason="; ".join(self._degradation_reasons) if self._degradation_reasons else None,
-            unavailable_sources=list(self._degraded_components),
         )
 
     def _execute_strategy(
@@ -265,59 +246,40 @@ class Searcher:
         for term in search_terms[:5]:
             term_hits: List[_Hit] = []
 
-            def run_search(search_fn, source_name: str, fallback_fn=None):
-                try:
-                    return search_fn()
-                except Exception as e:
-                    logger.warning("%s search degraded for term '%s': %s", source_name, term, e)
-                    self._record_degradation(f"{source_name}_search", str(e), f"Skipping {source_name} search")
-                    if fallback_fn:
-                        try:
-                            return fallback_fn()
-                        except Exception as fallback_e:
-                            logger.warning("%s fallback failed for term '%s': %s", source_name, term, fallback_e)
-                    return []
-
             if strategy.primary == "vector":
-                term_hits.extend(run_search(
-                    lambda: self._vector_search(self.embedder.encode_query(term), repo_id, limit=30),
-                    "vector",
-                ))
+                # Dense vector search is a core requirement for semantic retrieval.
+                # If it fails, the whole search must fail instead of silently returning
+                # results from partial sources.
+                term_hits.extend(
+                    self._vector_search(self.embedder.encode_query(term), repo_id, limit=30)
+                )
                 # Always supplement with BM25 for Chinese semantic fields.
-                term_hits.extend(run_search(
-                    lambda: self._bm25_search(term, repo_id, top_k=30),
-                    "bm25",
-                    lambda: self._like_search(term, repo_id, top_k=30),
-                ))
+                term_hits.extend(self._bm25_search(term, repo_id, top_k=30))
 
             elif strategy.primary == "symbol":
-                term_hits.extend(run_search(
-                    lambda: self._symbol_search(term, repo_id, top_k=30),
-                    "symbol",
-                ))
+                term_hits.extend(self._symbol_search(term, repo_id, top_k=30))
 
             elif strategy.primary == "call_graph":
-                sym_hits = run_search(
-                    lambda: self._symbol_search(term, repo_id, top_k=10),
-                    "symbol",
-                )
+                sym_hits = self._symbol_search(term, repo_id, top_k=10)
                 term_hits.extend(sym_hits)
                 if strategy.include_callers or strategy.include_callees:
                     for h in sym_hits[:3]:
                         if h.symbol_id:
-                            term_hits.extend(run_search(
-                                lambda: self._graph_search_from_symbol(
-                                    h.symbol_id, repo_id, strategy.call_depth
-                                ),
-                                "graph",
-                            ))
+                            try:
+                                term_hits.extend(
+                                    self._graph_search_from_symbol(
+                                        h.symbol_id, repo_id, strategy.call_depth
+                                    )
+                                )
+                            except Exception as e:
+                                # Graph expansion is a non-critical enhancement.
+                                # Skip it for this symbol rather than failing the whole search.
+                                logger.warning(
+                                    "Graph expansion failed for symbol %s: %s", h.symbol_id, e
+                                )
 
             elif strategy.primary == "bm25":
-                term_hits.extend(run_search(
-                    lambda: self._bm25_search(term, repo_id, top_k=30),
-                    "bm25",
-                    lambda: self._like_search(term, repo_id, top_k=30),
-                ))
+                term_hits.extend(self._bm25_search(term, repo_id, top_k=30))
 
             all_hits.extend(term_hits)
 
@@ -556,53 +518,31 @@ class Searcher:
 
         start_time = time.time()
 
-        self._degraded_components = set()
-        self._degradation_reasons = []
-
         self.db.execute(text("SET hnsw.ef_search = 128"))
 
-        vector_results: List[_Hit] = []
-        symbol_results: List[_Hit] = []
-        bm25_results: List[_Hit] = []
-        graph_results: List[_Hit] = []
+        # Core retrieval paths: failures must propagate so the caller knows the
+        # search could not be completed correctly.
+        query_embedding = self.embedder.encode_query(query)
+        vector_results = self._vector_search(query_embedding, repo_id)
+
+        symbol_results = self._symbol_search(query, repo_id)
+        bm25_results = self._bm25_search(query, repo_id)
+
+        # Sparse and graph search are supplementary sources. If they fail, the
+        # search can still continue with the core results above.
         sparse_results: List[_Hit] = []
-
-        try:
-            query_embedding = self.embedder.encode_query(query)
-            vector_results = self._vector_search(query_embedding, repo_id)
-        except Exception as e:
-            logger.warning("Vector search degraded: %s", e)
-            self._record_degradation("vector_search", str(e), "Skipping vector search")
-
         try:
             query_sparse = self.embedder.encode_query_sparse(query)
             sparse_results = self._sparse_search(query_sparse, repo_id)
         except Exception as e:
-            logger.warning("Sparse search degraded: %s", e)
-            self._record_degradation("sparse_search", str(e), "Skipping sparse search")
+            logger.warning("Sparse search skipped: %s", e)
 
-        try:
-            symbol_results = self._symbol_search(query, repo_id)
-        except Exception as e:
-            logger.warning("Symbol search degraded: %s", e)
-            self._record_degradation("symbol_search", str(e), "Skipping symbol search")
-
-        try:
-            bm25_results = self._bm25_search(query, repo_id)
-        except Exception as e:
-            logger.warning("BM25 search degraded, falling back to LIKE: %s", e)
-            self._record_degradation("bm25_search", str(e), "Falling back to LIKE query")
-            try:
-                bm25_results = self._like_search(query, repo_id)
-            except Exception as like_e:
-                logger.warning("LIKE fallback also failed: %s", like_e)
-
+        graph_results: List[_Hit] = []
         try:
             if symbol_results:
                 graph_results = self._graph_search(symbol_results, repo_id)
         except Exception as e:
-            logger.warning("Graph search degraded: %s", e)
-            self._record_degradation("graph_search", str(e), "Skipping graph search")
+            logger.warning("Graph search skipped: %s", e)
 
         results_by_source = {
             "vector": vector_results,
@@ -757,60 +697,6 @@ class Searcher:
                     content=row.content,
                     line=row.start_line,
                     bm25_score=rank,
-                    sources={"bm25"},
-                )
-            )
-        return hits
-
-    def _like_search(
-        self,
-        query: str,
-        repo_id: Optional[UUID],
-        top_k: int = 50,
-    ) -> List[_Hit]:
-        sql = text(
-            """
-            SELECT e.id AS embedding_id,
-                   e.file_id,
-                   e.repo_id,
-                   r.name AS repo_name,
-                   e.content,
-                   e.start_line,
-                   e.end_line,
-                   f.path AS file_path,
-                   f.language,
-                   LENGTH(e.content) AS length
-            FROM embeddings e
-            JOIN code_files f ON f.id = e.file_id
-            JOIN repositories r ON r.id = e.repo_id
-            WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
-              AND e.content LIKE :pattern
-            ORDER BY length ASC
-            LIMIT :limit
-            """
-        )
-        rows = self.db.execute(
-            sql,
-            {
-                "pattern": f"%{query}%",
-                "repo_id": str(repo_id) if repo_id else None,
-                "limit": top_k,
-            },
-        ).fetchall()
-
-        hits: List[_Hit] = []
-        for row in rows:
-            hits.append(
-                _Hit(
-                    result_id=row.embedding_id,
-                    file_id=row.file_id,
-                    repo_id=row.repo_id,
-                    repo_name=row.repo_name,
-                    file_path=row.file_path,
-                    language=row.language,
-                    content=row.content,
-                    line=row.start_line,
-                    bm25_score=0.3,
                     sources={"bm25"},
                 )
             )

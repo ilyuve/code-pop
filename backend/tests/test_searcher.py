@@ -167,15 +167,8 @@ class TestSearchWithContext:
         assert passed_intent.expanded_terms == ["骑士配送", "骑手配送", "rider配送"]
         assert "骑手配送" in context.matched_concepts
 
-    def test_hybrid_search_degrades_when_embedder_fails(self, searcher):
+    def test_hybrid_search_propagates_embedder_failure(self, searcher):
         searcher.embedder.encode_query.side_effect = RuntimeError("model missing")
-        searcher._bm25_search = MagicMock(return_value=[_make_hit()])
-        searcher._like_search = MagicMock(return_value=[])
-        searcher._vector_search = MagicMock(return_value=[])
-        searcher._symbol_search = MagicMock(return_value=[])
-        searcher._sparse_search = MagicMock(return_value=[])
 
-        results = searcher.hybrid_search("登录", repo_id=uuid4(), limit=10)
-
-        assert searcher._degraded_components == {"vector_search"}
-        assert isinstance(results, list)
+        with pytest.raises(RuntimeError):
+            searcher.hybrid_search("登录", repo_id=uuid4(), limit=10)

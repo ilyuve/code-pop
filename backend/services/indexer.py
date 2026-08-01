@@ -814,12 +814,7 @@ async def _enrich_chunks_for_indexing_async(
     tasks = [asyncio.create_task(enrich_one(h)) for h in missing_hashes]
     for task in asyncio.as_completed(tasks):
         _check_cancelled(repo_id_str)
-        try:
-            await task
-        except IndexingCancelledError:
-            raise
-        except Exception as e:
-            logger.warning("Chinese enrichment task failed: %s", e)
+        await task
         processed += 1
         if processed % 5 == 0 or processed == total:
             pct = (processed / total * 100.0) if total else 100.0
@@ -878,11 +873,8 @@ async def _enrich_repository_async(
             if result.synonyms:
                 synonym_batches.append(result.synonyms)
     if synonym_batches:
-        try:
-            _check_cancelled(repo_id_str)
-            aggregate_domain_synonyms(db, repo_id, synonym_batches)
-        except Exception as e:
-            logger.warning("Failed to aggregate domain synonyms: %s", e)
+        _check_cancelled(repo_id_str)
+        aggregate_domain_synonyms(db, repo_id, synonym_batches)
 
     _check_cancelled(repo_id_str)
 
@@ -940,12 +932,7 @@ async def _enrich_repository_async(
     symbol_tasks = [asyncio.create_task(enrich_symbol_one(sym)) for sym in symbols]
     for task in asyncio.as_completed(symbol_tasks):
         _check_cancelled(repo_id_str)
-        try:
-            await task
-        except IndexingCancelledError:
-            raise
-        except Exception as e:
-            logger.warning("Flow label task failed: %s", e)
+        await task
         symbol_processed += 1
         if symbol_processed % 10 == 0 or symbol_processed == symbol_total:
             pct = (symbol_processed / symbol_total * 100.0) if symbol_total else 100.0
@@ -989,29 +976,18 @@ def _enrich_repository(
     enable_flow_label: bool = True,
 ) -> None:
     """Synchronous wrapper to run async enrichment in a worker thread."""
-    try:
-        asyncio.run(
-            _enrich_repository_async(
-                db,
-                repo_id,
-                repo_id_str,
-                file_records,
-                loop,
-                provider_id=provider_id,
-                chunk_enrichments=chunk_enrichments,
-                enable_flow_label=enable_flow_label,
-            )
+    asyncio.run(
+        _enrich_repository_async(
+            db,
+            repo_id,
+            repo_id_str,
+            file_records,
+            loop,
+            provider_id=provider_id,
+            chunk_enrichments=chunk_enrichments,
+            enable_flow_label=enable_flow_label,
         )
-    except IndexingCancelledError:
-        raise
-    except Exception as e:
-        logger.warning("Chinese enrichment stage failed: %s", e)
-        get_degradation_tracker().record(
-            component="indexer:chinese_enrichment",
-            error_type=type(e).__name__,
-            error_message=str(e),
-            fallback_action="Skipping enrichment, search falls back to baseline",
-        )
+    )
 
 
 def _rebuild_call_graph(
@@ -1295,22 +1271,10 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         enrichment_model_name = "unknown"
 
         if enable_index_enrich and all_file_records:
-            try:
-                enrichment_provider_id, enrichment_model_name, chunk_enrichments = asyncio.run(
-                    _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop)
-                )
-                db.commit()
-            except IndexingCancelledError:
-                raise
-            except Exception as enrich_exc:
-                logger.warning("Chunk enrichment failed: %s", enrich_exc)
-                get_degradation_tracker().record(
-                    component="indexer:chunk_enrichment",
-                    error_type=type(enrich_exc).__name__,
-                    error_message=str(enrich_exc),
-                    fallback_action="Continue indexing without Chinese enrichment",
-                )
-                chunk_enrichments = None
+            enrichment_provider_id, enrichment_model_name, chunk_enrichments = asyncio.run(
+                _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop)
+            )
+            db.commit()
 
         _check_cancelled(repo_id_str)
 

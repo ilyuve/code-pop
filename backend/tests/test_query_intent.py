@@ -1,5 +1,6 @@
 """Tests for query intent analysis and synonym expansion."""
 
+import pytest
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -83,14 +84,13 @@ class TestSearchStrategy:
         assert intent.search_strategy.primary == "vector"
 
 
-class TestDegradationFallback:
-    def test_returns_general_intent_on_error(self):
+class TestErrorPropagation:
+    def test_analysis_error_propagates(self):
         analyzer = QueryIntentAnalyzer()
         # Force the analysis to raise by breaking concept extraction.
         with patch.object(analyzer, "_extract_concepts", side_effect=RuntimeError("boom")):
-            intent = analyzer.analyze("test")
-        assert intent.degraded is True
-        assert intent.intent_type == "general"
+            with pytest.raises(RuntimeError):
+                analyzer.analyze("test")
 
 
 def test_get_intent_analyzer_singleton():
