@@ -1,4 +1,9 @@
-"""Local embedding generation using a real HuggingFace model with degradation fallback."""
+"""Local embedding generation using a real HuggingFace model.
+
+This module intentionally does NOT provide a degradation fallback. If the
+embedding model cannot be loaded, the service must fail fast so that operators
+can fix the environment instead of silently serving meaningless pseudo-vectors.
+"""
 
 import logging
 from typing import List, Optional
@@ -6,13 +11,12 @@ from typing import List, Optional
 import numpy as np
 
 from config import settings
-from services.degradation_tracker import get_degradation_tracker
 
 logger = logging.getLogger(__name__)
 
 
 class Embedder:
-    """Thin singleton wrapper around sentence-transformers with degradation fallback."""
+    """Thin singleton wrapper around sentence-transformers."""
 
     _instance: Optional["Embedder"] = None
 
@@ -20,69 +24,36 @@ class Embedder:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._model = None
-            cls._instance._degraded = False
         return cls._instance
-
-    @property
-    def is_degraded(self) -> bool:
-        return self._degraded
 
     @property
     def model(self):
         if self._model is None:
             model_name = settings.embedding_model
             logger.info("Loading embedding model: %s", model_name)
-            try:
-                from sentence_transformers import SentenceTransformer
-                import os
-                
-                cache_path = os.path.expanduser(f'~/.cache/huggingface/hub/models--{model_name.replace("/", "--")}/snapshots/main')
-                if os.path.exists(cache_path):
-                    logger.info(f"Loading model from cache: {cache_path}")
-                    self._model = SentenceTransformer(cache_path, device='cpu')
-                else:
-                    logger.info(f"Loading model from hub: {model_name}")
-                    self._model = SentenceTransformer(model_name, trust_remote_code=True, device='cpu')
-                logger.info(
-                    "Embedding model loaded successfully (dim=%d)", settings.embedding_dim
-                )
-            except Exception as exc:
-                logger.warning("Failed to load embedding model '%s': %s", model_name, exc)
-                self._degraded = True
-                get_degradation_tracker().record(
-                    component="embedder",
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    fallback_action="Using hash-based pseudo vectors",
-                )
-                raise RuntimeError(
-                    f"Failed to load embedding model '{model_name}'. "
-                    f"Run `python scripts/download_models.py` first to pre-download it, "
-                    f"or set HF_ENDPOINT=https://hf-mirror.com to use the mirror. "
-                    f"Original error: {exc}"
-                ) from exc
-        return self._model
+            from sentence_transformers import SentenceTransformer
+            import os
 
-    def _degraded_encode(self, texts: List[str]) -> List[List[float]]:
-        """Generate stable pseudo-vectors based on text hash."""
-        dim = settings.embedding_dim
-        results = []
-        for t in texts:
-            np.random.seed(hash(t) % 2**32)
-            v = np.random.normal(0, 0.01, dim).astype(np.float32)
-            norm = np.linalg.norm(v)
-            if norm > 0:
-                v = v / norm
-            results.append(v.tolist())
-        return results
+            cache_path = os.path.expanduser(
+                f"~/.cache/huggingface/hub/models--{model_name.replace('/', '--')}/snapshots/main"
+            )
+            if os.path.exists(cache_path):
+                logger.info("Loading model from cache: %s", cache_path)
+                self._model = SentenceTransformer(cache_path, device="cpu")
+            else:
+                logger.info("Loading model from hub: %s", model_name)
+                self._model = SentenceTransformer(
+                    model_name, trust_remote_code=True, device="cpu"
+                )
+            logger.info(
+                "Embedding model loaded successfully (dim=%d)", settings.embedding_dim
+            )
+        return self._model
 
     def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
         """Encode texts into normalized vectors."""
         if not texts:
             return []
-
-        if self._degraded:
-            return self._degraded_encode(texts)
 
         if is_query:
             texts = [
@@ -95,44 +66,31 @@ class Embedder:
                 for t in texts
             ]
 
-        try:
-            embeddings = self.model.encode(
-                texts,
-                batch_size=settings.embedding_batch_size,
-                show_progress_bar=False,
-                normalize_embeddings=True,
-            )
-            if isinstance(embeddings, np.ndarray):
-                return embeddings.astype(np.float32).tolist()
-            return embeddings
-        except Exception as exc:
-            logger.warning("Embedding encode failed, falling back to pseudo vectors: %s", exc)
-            self._degraded = True
-            get_degradation_tracker().record(
-                component="embedder",
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                fallback_action="Using hash-based pseudo vectors",
-            )
-            return self._degraded_encode(texts)
+        embeddings = self.model.encode(
+            texts,
+            batch_size=settings.embedding_batch_size,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        if isinstance(embeddings, np.ndarray):
+            return embeddings.astype(np.float32).tolist()
+        return embeddings
 
     def encode_sparse(self, texts: List[str]) -> List[dict]:
         """Return sparse embeddings (token weights) using BGEM3FlagModel."""
         if not texts:
             return []
 
-        if self._degraded:
-            return [{} for _ in texts]
-
         try:
             model_name = settings.embedding_model
 
-            if not hasattr(self, '_m3_model') or self._m3_model is None:
+            if not hasattr(self, "_m3_model") or self._m3_model is None:
                 from FlagEmbedding import BGEM3FlagModel
+
                 logger.info("Loading BGEM3FlagModel for sparse embeddings: %s", model_name)
                 self._m3_model = BGEM3FlagModel(
                     model_name,
-                    devices='cpu',
+                    devices="cpu",
                     use_fp16=False,
                 )
 
@@ -142,7 +100,7 @@ class Embedder:
                 return_sparse=True,
                 return_colbert_vecs=False,
             )
-            lexical_weights = output['lexical_weights']
+            lexical_weights = output["lexical_weights"]
 
             results = []
             for s in lexical_weights:
@@ -171,8 +129,6 @@ class Embedder:
 
     def count_tokens(self, text: str) -> int:
         """Count tokenizer tokens for a text."""
-        if self._degraded:
-            return max(1, len(text.split()))
         try:
             return len(self.model.tokenizer.encode(text, add_special_tokens=True))
         except Exception:

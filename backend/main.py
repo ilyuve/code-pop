@@ -94,15 +94,16 @@ async def _recover_indexing_repos() -> None:
 
 
 async def _warmup_models() -> None:
-    """Pre-load embedding model at startup to avoid cold-start latency."""
-    try:
-        from services.embedder import Embedder
-        embedder = Embedder()
-        _ = embedder.encode(["warmup"])
-        logger.info("Embedding model warmed up successfully")
-    except Exception as e:
-        logger.error("Failed to warm up embedding model: %s", e)
-        logger.error("Search will be unavailable until model is loaded.")
+    """Pre-load embedding model at startup to avoid cold-start latency.
+
+    The embedder intentionally has no degradation fallback: if the model cannot
+    be loaded, the service must fail fast rather than silently serve
+    meaningless pseudo-vectors.
+    """
+    from services.embedder import Embedder
+    embedder = Embedder()
+    _ = embedder.encode(["warmup"])
+    logger.info("Embedding model warmed up successfully")
 
 
 _is_test = "pytest" in sys.modules
@@ -207,21 +208,18 @@ def health_deep(db: Session = Depends(get_db)) -> dict:
     try:
         from services.embedder import Embedder
         embedder = Embedder()
-        if embedder.model is not None:
-            checks["embedding_model"]["status"] = "ok"
-            checks["embedding_model"]["model_name"] = settings.embedding_model
-            checks["embedding_model"]["dim"] = settings.embedding_dim
-        else:
-            checks["embedding_model"]["status"] = "degraded"
-            checks["embedding_model"]["error"] = "Model not loaded"
+        _ = embedder.encode(["health-check"])
+        checks["embedding_model"]["status"] = "ok"
+        checks["embedding_model"]["model_name"] = settings.embedding_model
+        checks["embedding_model"]["dim"] = settings.embedding_dim
     except Exception as e:
         checks["embedding_model"]["status"] = "error"
         checks["embedding_model"]["error"] = str(e)
 
-    all_ok = all(c["status"] in ("ok", "degraded") for c in checks.values())
+    all_ok = all(c["status"] == "ok" for c in checks.values())
 
     return {
-        "status": "ok" if all_ok else "degraded",
+        "status": "ok" if all_ok else "error",
         "version": settings.api_version,
         "checks": checks,
     }
