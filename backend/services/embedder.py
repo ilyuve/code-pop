@@ -87,9 +87,23 @@ class Embedder:
             if not hasattr(self, "_m3_model") or self._m3_model is None:
                 from FlagEmbedding import BGEM3FlagModel
 
-                logger.info("Loading BGEM3FlagModel for sparse embeddings: %s", model_name)
+                # Prefer the local cache path if the dense model has already
+                # been downloaded. This avoids repeated hub lookups and spurious
+                # 403 errors on non-model files (e.g. .DS_Store) when mirrors are
+                # used.
+                import glob
+                import os
+
+                hub_dir = os.path.expanduser(
+                    f"~/.cache/huggingface/hub/models--{model_name.replace('/', '--')}/snapshots"
+                )
+                snapshot_dirs = sorted(glob.glob(os.path.join(hub_dir, "*")))
+                local_cache = snapshot_dirs[0] if snapshot_dirs else None
+                model_path = local_cache if local_cache and os.path.isdir(local_cache) else model_name
+
+                logger.info("Loading BGEM3FlagModel for sparse embeddings from %s", model_path)
                 self._m3_model = BGEM3FlagModel(
-                    model_name,
+                    model_path,
                     devices="cpu",
                     use_fp16=False,
                 )
