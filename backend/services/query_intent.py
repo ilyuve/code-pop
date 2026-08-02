@@ -63,11 +63,14 @@ class QueryIntentAnalyzer:
         ],
     }
 
+    # Slimmed hard-coded Chinese-English mappings. These are high-frequency,
+    # cross-lingual terms that are expensive to learn from scratch for every
+    # repository. Niche or project-specific terms should come from
+    # ``domain_synonyms`` (generated during indexing) or from LLM expansion.
     SEMANTIC_MAP: Dict[str, List[str]] = {
         "登录": ["login", "authenticate", "auth", "sign_in", "signin", "session", "token"],
         "认证": ["authenticate", "auth", "verify", "validation", "check"],
         "注册": ["register", "signup", "sign_up", "create_user", "account_create"],
-        "注销": ["logout", "sign_out", "signout", "clear_session"],
         "密码": ["password", "passwd", "pwd", "credential"],
         "权限": ["permission", "role", "authority", "access_control", "rbac", "acl"],
         "jwt": ["jwt", "token", "bearer", "json_web_token"],
@@ -75,42 +78,33 @@ class QueryIntentAnalyzer:
         "订单": ["order", "purchase", "transaction", "checkout", "booking"],
         "支付": ["payment", "pay", "charge", "billing", "invoice"],
         "用户": ["user", "account", "member", "customer", "client"],
-        "商品": ["product", "item", "goods", "sku", "merchandise"],
-        "库存": ["inventory", "stock", "warehouse", "storage"],
         "数据库": ["database", "db", "sql", "query", "repository", "dao", "mapper"],
         "缓存": ["cache", "redis", "memcached", "cached", "lru"],
         "搜索": ["search", "query", "find", "lookup", "index", "elasticsearch"],
         "日志": ["log", "logging", "logger", "trace", "audit"],
-        "监控": ["monitor", "metric", "telemetry", "observability", "prometheus"],
         "配置": ["config", "configuration", "settings", "properties", "env", "yaml"],
         "任务": ["task", "job", "cron", "schedule", "worker", "queue"],
         "消息": ["message", "mq", "kafka", "rabbitmq", "queue", "event"],
-        "网关": ["gateway", "proxy", "router", "ingress", "nginx"],
         "服务": ["service", "svc", "microservice", "handler"],
         "接口": ["api", "interface", "endpoint", "controller", "handler", "rpc"],
         "请求": ["request", "req", "http", "call", "invoke"],
         "响应": ["response", "res", "resp", "reply", "return"],
-        "连接": ["connection", "conn", "connect", "pool", "client"],
         "创建": ["create", "new", "init", "insert", "add", "build"],
         "更新": ["update", "modify", "edit", "patch", "save", "upsert"],
         "删除": ["delete", "remove", "del", "drop", "clear", "destroy"],
         "查询": ["query", "select", "find", "get", "search", "lookup", "fetch"],
         "验证": ["validate", "verify", "check", "assert", "confirm", "test"],
-        "处理": ["handle", "process", "deal", "dispose", "manage"],
-        "异步": ["async", "await", "promise", "future", "callback", "deferred"],
-        "并发": ["concurrent", "parallel", "thread", "goroutine", "lock", "mutex"],
     }
 
+    # Generic role-word expansions that are relatively stable across projects.
+    # Project-specific naming conventions should be learned via ``domain_synonyms``.
     GENERIC_EXPAND: Dict[str, List[str]] = {
         "flow": ["process", "handler", "service", "chain"],
         "handler": ["controller", "service", "process", "handle"],
         "service": ["handler", "manager", "provider", "impl"],
         "controller": ["handler", "endpoint", "api", "route"],
         "repository": ["dao", "mapper", "store", "data"],
-        "manager": ["service", "handler", "provider"],
-        "util": ["helper", "utils", "tool", "common"],
         "config": ["configuration", "settings", "properties", "env"],
-        "test": ["spec", "unit", "integration", "e2e"],
     }
 
     def analyze(
@@ -207,10 +201,6 @@ class QueryIntentAnalyzer:
                 expanded.update(self.SEMANTIC_MAP[concept])
                 local_hit = True
 
-            if is_chinese and concept in self.SEMANTIC_MAP:
-                expanded.update(self.SEMANTIC_MAP[concept])
-                local_hit = True
-
             if concept_lower in self.GENERIC_EXPAND:
                 expanded.update(self.GENERIC_EXPAND[concept_lower])
                 local_hit = True
@@ -236,8 +226,10 @@ class QueryIntentAnalyzer:
             expanded.update(expand_query_with_synonyms(query, domain_synonyms))
             local_hit = True
 
-        # Fallback to LLM online expansion when local knowledge misses and feature is enabled.
-        if enable_llm_expand and llm_router and is_chinese and not local_hit:
+        # LLM online expansion for Chinese queries. It is *not* blocked by local hits,
+        # so domain synonyms and the slimmed SEMANTIC_MAP act as a safety net while
+        # the LLM can still fill coverage gaps (e.g. 骑手 -> rider).
+        if enable_llm_expand and llm_router and is_chinese:
             try:
                 llm_terms = self._expand_with_llm(query, concepts, llm_router)
                 expanded.update(llm_terms)
