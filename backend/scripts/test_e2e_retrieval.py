@@ -2,25 +2,37 @@
 
 不需要数据库，不需要入库，直接在内存中跑完整个检索主流程。
 
-用法示例（不调用 LLM，使用 mock 增强）：
+默认使用真实 LLM（OpenAI-compatible，如 DeepSeek）做中文增强，使用真实 BGE-M3 做向量编码，
+与生产主流程保持一致。只有在显式加 --mock-llm 或 --mock-embedder 时才会降级为 mock。
+
+用法示例（默认真实 LLM + 真实 embedder）：
     cd /workspace/backend
-    python -m scripts.test_e2e_retrieval sample/OrderService.java \
+    export LLM_BASE_URL=https://api.deepseek.com/v1
+    export LLM_API_KEY=$DEEPSEEK_API_KEY
+    export LLM_MODEL=deepseek-chat
+    python -m scripts.test_e2e_retrieval /path/to/project \
         --query "订单创建流程" \
         --query "create order logic"
 
-用法示例（调用在线 LLM 做中文语义切分）：
-    cd /workspace/backend
-    python -m scripts.test_e2e_retrieval sample/OrderService.java \
-        --query "订单创建流程" \
-        --use-llm \
-        --llm-base-url https://api.openai.com/v1 \
-        --llm-api-key $OPENAI_API_KEY \
-        --llm-model gpt-4o-mini
-
-用法示例（目录递归索引）：
+用法示例（显式传入 LLM 参数）：
     cd /workspace/backend
     python -m scripts.test_e2e_retrieval /path/to/project \
         --query "订单创建流程" \
+        --llm-base-url https://api.deepseek.com/v1 \
+        --llm-api-key $DEEPSEEK_API_KEY \
+        --llm-model deepseek-chat
+
+用法示例（仅 mock embedder，验证 pipeline 逻辑）：
+    cd /workspace/backend
+    python -m scripts.test_e2e_retrieval /path/to/project \
+        --query "订单创建流程" \
+        --mock-embedder
+
+用法示例（全部 mock，仅做冒烟测试）：
+    cd /workspace/backend
+    python -m scripts.test_e2e_retrieval /path/to/project \
+        --query "订单创建流程" \
+        --mock-llm \
         --mock-embedder
 
 输出：JSON 格式的检索结果，包含 entry_points、code_snippets、score_breakdown。
@@ -631,13 +643,26 @@ def _parse_args() -> argparse.Namespace:
         help="Search query (can be given multiple times).",
     )
     parser.add_argument(
-        "--use-llm",
+        "--mock-llm",
         action="store_true",
-        help="Call an online LLM for Chinese enrichment instead of using the mock router.",
+        help="Use a mock LLM router instead of calling a real online LLM "
+        "(only for smoke testing the pipeline).",
     )
-    parser.add_argument("--llm-base-url", default=None, help="OpenAI-compatible base URL.")
-    parser.add_argument("--llm-api-key", default=None, help="API key for the LLM provider.")
-    parser.add_argument("--llm-model", default=None, help="Model name, e.g. gpt-4o-mini.")
+    parser.add_argument(
+        "--llm-base-url",
+        default=None,
+        help="OpenAI-compatible base URL. Falls back to LLM_BASE_URL env var.",
+    )
+    parser.add_argument(
+        "--llm-api-key",
+        default=None,
+        help="API key for the LLM provider. Falls back to LLM_API_KEY env var.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        help="Model name, e.g. deepseek-chat. Falls back to LLM_MODEL env var.",
+    )
     parser.add_argument(
         "--llm-provider-type",
         default="openai_compatible",
@@ -664,17 +689,18 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_router(args: argparse.Namespace):
-    if args.use_llm:
-        base_url = args.llm_base_url or os.environ.get("LLM_BASE_URL")
-        api_key = args.llm_api_key or os.environ.get("LLM_API_KEY")
-        model = args.llm_model or os.environ.get("LLM_MODEL")
-        if not all([base_url, api_key, model]):
-            raise SystemExit(
-                "--use-llm requires --llm-base-url, --llm-api-key and --llm-model "
-                "(or LLM_BASE_URL, LLM_API_KEY, LLM_MODEL env vars)."
-            )
-        return LocalLLMRouter(base_url, api_key, model, args.llm_provider_type)
-    return MockLLMRouter()
+    if args.mock_llm:
+        return MockLLMRouter()
+
+    base_url = args.llm_base_url or os.environ.get("LLM_BASE_URL")
+    api_key = args.llm_api_key or os.environ.get("LLM_API_KEY")
+    model = args.llm_model or os.environ.get("LLM_MODEL")
+    if not all([base_url, api_key, model]):
+        raise SystemExit(
+            "Real LLM is required by default. Provide --llm-base-url, --llm-api-key and --llm-model "
+            "(or LLM_BASE_URL, LLM_API_KEY, LLM_MODEL env vars), or use --mock-llm."
+        )
+    return LocalLLMRouter(base_url, api_key, model, args.llm_provider_type)
 
 
 def _collect_files(target: Path) -> List[Path]:
@@ -696,6 +722,8 @@ def main() -> None:
     router = _build_router(args)
     embedder: Embedder = MockEmbedder() if args.mock_embedder else Embedder()
 
+    if args.mock_llm:
+        logger.warning("Using MOCK LLM router; Chinese enrichment will not reflect real LLM output.")
     if args.mock_embedder:
         logger.warning("Using MOCK embedder; vector/sparse scores are synthetic.")
     logger.info("Indexing %d source file(s) in memory (no DB writes)...", len(files))
