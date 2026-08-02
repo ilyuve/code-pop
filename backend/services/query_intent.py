@@ -154,29 +154,85 @@ class QueryIntentAnalyzer:
                     return intent_type
         return "general"
 
+    @staticmethod
+    def _split_identifier(name: str) -> List[str]:
+        """Split a code identifier into meaningful tokens.
+
+        Examples:
+            createOrder -> ["create", "order"]
+            OrderService -> ["order", "service"]
+            process_payment -> ["process", "payment"]
+            JWTToken -> ["jwt", "token"]
+        """
+        tokens: List[str] = []
+        for part in re.split(r"[._\-]", name):
+            if not part:
+                continue
+            # CamelCase / PascalCase: keep consecutive uppercase as one acronym,
+            # then split on title-case boundaries.
+            chunks = re.findall(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z][a-z]*|[a-z]+", part)
+            tokens.extend(ch.lower() for ch in chunks if ch)
+        return tokens
+
+    # Chinese stop-words and noise tokens that should not be treated as concepts.
+    _CN_STOP_WORDS = {
+        "的", "了", "在", "是", "我", "你", "他", "它", "们",
+        "怎么", "什么", "如何", "为什么", "哪里", "哪些", "怎么",
+        "请", "一下", "一个", "一些", "一下",
+    }
+
     def _extract_concepts(self, query: str, is_chinese: bool) -> List[str]:
-        concepts = []
+        """Extract searchable concepts from a query.
+
+        For Chinese queries we use jieba for natural-language segmentation and
+        also split any embedded English identifiers (camelCase / snake_case).
+        This lets ``SEMANTIC_MAP`` and ``domain_synonyms`` actually match terms
+        like ``订单`` and ``创建`` from the query ``订单创建流程``.
+        """
+        concepts: List[str] = []
+
         if is_chinese:
-            english_words = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*', query)
-            concepts.extend(english_words)
-            chinese_chars = re.findall(r'[\u4e00-\u9fff]{2,4}', query)
-            concepts.extend(chinese_chars)
+            # 1. English identifiers embedded in Chinese queries.
+            for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", query):
+                concepts.append(token)
+                concepts.extend(self._split_identifier(token))
+
+            # 2. Chinese segmentation.
+            try:
+                import jieba
+
+                tokens = jieba.lcut(query)
+            except Exception:
+                # Fallback: character-level tokens if jieba is not installed.
+                tokens = list(query)
+
+            for token in tokens:
+                token = token.strip().lower()
+                if not token or token in self._CN_STOP_WORDS:
+                    continue
+                if re.match(r"^[\u4e00-\u9fff]+$", token):
+                    concepts.append(token)
+
         else:
-            camel_cases = re.findall(r'[a-zA-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+', query)
-            concepts.extend(camel_cases)
-            snake_cases = re.findall(r'[a-zA-Z][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+', query)
-            concepts.extend(snake_cases)
-            stop_words = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
-                         "in", "on", "at", "to", "for", "of", "with", "by", "from",
-                         "how", "what", "where", "when", "why", "who", "which"}
-            words = re.findall(r'[a-zA-Z]+', query.lower())
+            # English queries: keep camelCase / snake_case identifiers as concepts
+            # and also split them into their constituent words.
+            for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", query):
+                concepts.append(token)
+                concepts.extend(self._split_identifier(token))
+
+            stop_words = {
+                "the", "a", "an", "is", "are", "was", "were", "be", "been",
+                "in", "on", "at", "to", "for", "of", "with", "by", "from",
+                "how", "what", "where", "when", "why", "who", "which",
+            }
+            words = re.findall(r"[a-zA-Z]+", query.lower())
             concepts.extend([w for w in words if w not in stop_words and len(w) > 2])
 
-        seen = set()
-        result = []
+        seen: Set[str] = set()
+        result: List[str] = []
         for c in concepts:
             key = c.lower()
-            if key not in seen:
+            if key and key not in seen:
                 seen.add(key)
                 result.append(c)
         return result
@@ -255,7 +311,7 @@ class QueryIntentAnalyzer:
         import asyncio
         import json as _json
 
-        response = asyncio.run(
+        response, _provider_id = asyncio.run(
             llm_router.chat(
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},

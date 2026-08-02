@@ -9,6 +9,7 @@ dependencies = [
     "flagembedding>=1.2.0",
     "httpx==0.28.0",
     "huggingface-hub==0.26.0",
+    "jieba>=0.42.1",
     "mcp>=1.9.0",
     "numpy==2.1.0",
     "pgvector==0.3.6",
