@@ -163,28 +163,24 @@ class Embedder:
         if not texts:
             return []
 
-        try:
-            output = self._load_m3_model().encode(
-                texts,
-                batch_size=settings.embedding_batch_size,
-                return_dense=False,
-                return_sparse=True,
-                return_colbert_vecs=False,
-            )
-            lexical_weights = output["lexical_weights"]
+        output = self._load_m3_model().encode(
+            texts,
+            batch_size=settings.embedding_batch_size,
+            return_dense=False,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        lexical_weights = output["lexical_weights"]
 
-            results = []
-            for s in lexical_weights:
-                sparse_dict = {}
-                for k, v in s.items():
-                    if float(v) > 0.0:
-                        sparse_dict[int(k)] = float(v)
-                results.append(sparse_dict)
+        results = []
+        for s in lexical_weights:
+            sparse_dict = {}
+            for k, v in s.items():
+                if float(v) > 0.0:
+                    sparse_dict[int(k)] = float(v)
+            results.append(sparse_dict)
 
-            return results
-        except Exception as exc:
-            logger.warning("Sparse embedding encode failed: %s", exc)
-            return [{} for _ in texts]
+        return results
 
     def encode_colbert(self, texts: List[str]) -> List[np.ndarray]:
         """Return ColBERT token-level vectors using BGEM3FlagModel."""
