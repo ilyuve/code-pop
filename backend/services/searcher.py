@@ -2,9 +2,10 @@
 
 import collections
 import logging
+import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from uuid import UUID
 
 from sqlalchemy import text
@@ -29,6 +30,8 @@ WEIGHT_GRAPH = 0.1
 BONUS_VECTOR_SYMBOL = 0.1
 
 RRF_K = 60
+
+MAX_CHUNKS_PER_FILE = 3
 
 
 def _min_max_normalize(scores: List[float]) -> List[float]:
@@ -185,28 +188,32 @@ class Searcher:
 
         flow_summary = call_chain.flow_summary if call_chain else None
 
-        seen_files = set()
-        for hit in hits[:limit]:
-            if hit.file_path not in seen_files:
-                seen_files.add(hit.file_path)
-                code_snippets.append(SearchResultItem(
-                    id=hit.result_id,
-                    file_id=hit.file_id,
-                    repo_id=hit.repo_id,
-                    repo_name=hit.repo_name,
-                    file_path=hit.file_path,
-                    language=hit.language,
-                    content=hit.content,
-                    line=hit.line,
-                    score=self._final_score(hit),
-                    score_breakdown={
-                        "vector": round(hit.vector_score, 4),
-                        "symbol": round(hit.symbol_score, 4),
-                        "bm25": round(hit.bm25_score, 4),
-                        "graph": round(hit.graph_score, 4),
-                        "final": round(self._final_score(hit), 4),
-                    },
-                ))
+        file_chunk_count: Dict[str, int] = {}
+        for hit in hits:
+            if len(code_snippets) >= limit:
+                break
+            cnt = file_chunk_count.get(hit.file_path, 0)
+            if cnt >= MAX_CHUNKS_PER_FILE:
+                continue
+            file_chunk_count[hit.file_path] = cnt + 1
+            code_snippets.append(SearchResultItem(
+                id=hit.result_id,
+                file_id=hit.file_id,
+                repo_id=hit.repo_id,
+                repo_name=hit.repo_name,
+                file_path=hit.file_path,
+                language=hit.language,
+                content=hit.content,
+                line=hit.line,
+                score=self._final_score(hit),
+                score_breakdown={
+                    "vector": round(hit.vector_score, 4),
+                    "symbol": round(hit.symbol_score, 4),
+                    "bm25": round(hit.bm25_score, 4),
+                    "graph": round(hit.graph_score, 4),
+                    "final": round(self._final_score(hit), 4),
+                },
+            ))
 
         if not related_files:
             for snippet in code_snippets[:8]:
@@ -254,7 +261,11 @@ class Searcher:
                     self._vector_search(self.embedder.encode_query(term), repo_id, limit=30)
                 )
                 # Always supplement with BM25 for Chinese semantic fields.
-                term_hits.extend(self._bm25_search(term, repo_id, top_k=30))
+                is_chinese = bool(re.search(r"[\u4e00-\u9fff]", term))
+                concepts = self.intent_analyzer._extract_concepts(term, is_chinese)
+                term_hits.extend(self._bm25_search(term, repo_id, top_k=30, concepts=concepts))
+                # General queries should also benefit from symbol matches (e.g. 订单 -> createOrder).
+                term_hits.extend(self._symbol_search(term, repo_id, top_k=20))
 
             elif strategy.primary == "symbol":
                 term_hits.extend(self._symbol_search(term, repo_id, top_k=30))
@@ -526,7 +537,9 @@ class Searcher:
         vector_results = self._vector_search(query_embedding, repo_id)
 
         symbol_results = self._symbol_search(query, repo_id)
-        bm25_results = self._bm25_search(query, repo_id)
+        is_chinese = bool(re.search(r"[\u4e00-\u9fff]", query))
+        bm25_concepts = self.intent_analyzer._extract_concepts(query, is_chinese)
+        bm25_results = self._bm25_search(query, repo_id, concepts=bm25_concepts)
 
         # Sparse and graph search are supplementary sources. If they fail, the
         # search can still continue with the core results above.
@@ -622,7 +635,11 @@ class Searcher:
         for sym in symbols:
             embeddings = self._file_embeddings(sym.file_id)
             hit = _symbol_to_hit(sym, embeddings)
-            if SymbolNormalizer.match(query, sym.name):
+            preset_score = getattr(sym, "_search_score", None)
+            if preset_score is not None:
+                # Score comes from SymbolRepository (e.g. Chinese flow-label match).
+                hit.symbol_score = preset_score
+            elif SymbolNormalizer.match(query, sym.name):
                 if SymbolNormalizer.normalize(query) == SymbolNormalizer.normalize(sym.name):
                     hit.symbol_score = 1.0
                 elif SymbolNormalizer.normalize(query) in SymbolNormalizer.normalize(sym.name):
@@ -639,9 +656,34 @@ class Searcher:
         query: str,
         repo_id: Optional[UUID],
         top_k: int = 50,
+        concepts: Optional[List[str]] = None,
     ) -> List[_Hit]:
+        like_clauses: List[str] = []
+        params: Dict[str, Any] = {
+            "query": query,
+            "repo_id": str(repo_id) if repo_id else None,
+            "limit": top_k,
+        }
+
+        # Direct phrase match bonus.
+        params["query_like"] = f"%{query}%"
+        for attr in ("e.content", "ee.chinese_summary", "ee.keywords"):
+            like_clauses.append(f"{attr} ILIKE :query_like")
+
+        # Concept-level fuzzy fallback for Chinese and short terms.
+        for idx, concept in enumerate(concepts or []):
+            if len(concept) < 2:
+                continue
+            key = f"concept_{idx}_like"
+            params[key] = f"%{concept}%"
+            like_clauses.append(f"ee.chinese_summary ILIKE :{key}")
+            like_clauses.append(f"ee.keywords ILIKE :{key}")
+            like_clauses.append(f"e.content ILIKE :{key}")
+
+        concept_where = " OR ".join(like_clauses) if like_clauses else "FALSE"
+
         sql = text(
-            """
+            f"""
             SELECT e.id AS embedding_id,
                    e.file_id,
                    e.repo_id,
@@ -655,7 +697,10 @@ class Searcher:
                        ts_rank_cd(to_tsvector('english', e.content), plainto_tsquery('english', :query)),
                        ts_rank_cd(to_tsvector('simple', e.content), plainto_tsquery('simple', :query)),
                        COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), plainto_tsquery('simple', :query)), 0),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), plainto_tsquery('simple', :query)), 0)
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), plainto_tsquery('simple', :query)), 0),
+                       CASE WHEN e.content ILIKE :query_like THEN 0.2 ELSE 0 END,
+                       CASE WHEN ee.chinese_summary ILIKE :query_like THEN 0.6 ELSE 0 END,
+                       CASE WHEN ee.keywords ILIKE :query_like THEN 0.9 ELSE 0 END
                    ) AS rank
             FROM embeddings e
             JOIN code_files f ON f.id = e.file_id
@@ -667,6 +712,7 @@ class Searcher:
                   OR to_tsvector('simple', e.content) @@ plainto_tsquery('simple', :query)
                   OR to_tsvector('simple', ee.chinese_summary) @@ plainto_tsquery('simple', :query)
                   OR to_tsvector('simple', ee.keywords) @@ plainto_tsquery('simple', :query)
+                  OR {concept_where}
               )
             ORDER BY rank DESC
             LIMIT :limit
@@ -674,11 +720,7 @@ class Searcher:
         )
         rows = self.db.execute(
             sql,
-            {
-                "query": query,
-                "repo_id": str(repo_id) if repo_id else None,
-                "limit": top_k,
-            },
+            params,
         ).fetchall()
 
         hits: List[_Hit] = []
