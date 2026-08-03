@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim-bookworm
 
 WORKDIR /app
@@ -7,11 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 
 COPY requirements.txt .
 
-# torch 必须走官方 CPU 源，否则变成 2-3GB 的 CUDA 版
-# 其余依赖走清华镜像加速
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && \
-    pip install --no-cache-dir modelscope
+# Use a BuildKit cache mount for pip so interrupted downloads can resume on
+# the next build. Show a progress bar even when Docker build is not a TTY.
+ENV PIP_PROGRESS_BAR=ascii
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && \
+    pip install modelscope
 
 # Patch FlagEmbedding: XLMRobertaModel expects `torch_dtype`, not `dtype`.
 # This is a known upstream bug when loading BGE-M3 with newer transformers.
