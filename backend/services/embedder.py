@@ -58,13 +58,13 @@ class Embedder:
         from huggingface_hub import hf_hub_download
 
         flag_dir = os.path.expanduser("~/.cache/huggingface/bge-m3-flagembedding")
-        # Default to the public HF mirror so users behind the GFW do not need
-        # to set the env var manually. Also strip accidental backticks/quotes
-        # that can sneak in when users copy-paste commands.
-        raw_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        # Default to the official HF endpoint. If the user is behind the GFW,
+        # the HuggingFace download will fail and we fall back to ModelScope.
+        # We also strip accidental backticks/quotes from copy-pasted commands.
+        raw_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
         endpoint = raw_endpoint.strip().strip("`'\"").strip()
         if not endpoint.startswith(("http://", "https://")):
-            endpoint = "https://hf-mirror.com"
+            endpoint = "https://huggingface.co"
         os.environ["HF_ENDPOINT"] = endpoint
 
         if os.path.isdir(flag_dir) and self._has_required_m3_files(flag_dir):
@@ -113,10 +113,26 @@ class Embedder:
                 logger.warning("Weight file %s not available: %s", filename, e)
 
         if not downloaded_weight:
-            raise RuntimeError(
-                f"Could not download BGE-M3 weights for {model_name} "
-                f"from {endpoint}: {last_error}"
+            logger.warning(
+                "HuggingFace download failed for %s, trying ModelScope fallback", model_name
             )
+            try:
+                from modelscope import snapshot_download
+
+                snapshot_download(model_name, local_dir=flag_dir)
+                downloaded_weight = True
+                logger.info("Downloaded BGE-M3 from ModelScope fallback")
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"Could not download BGE-M3 weights for {model_name} "
+                    f"from {endpoint}: {last_error}. "
+                    f"ModelScope fallback is available but not installed: {exc}"
+                ) from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Could not download BGE-M3 weights for {model_name} "
+                    f"from HuggingFace ({endpoint}) or ModelScope: {exc}"
+                ) from exc
 
         return flag_dir
 

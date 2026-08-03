@@ -119,14 +119,29 @@ def main() -> int:
             last_error = exc
             print(f"    WARNING: {exc}")
 
-    if not weight_ok:
+    if not downloaded_weight:
         print()
-        print("ERROR: Could not download model weights.", file=sys.stderr)
-        print(f"  Last error: {last_error}", file=sys.stderr)
-        print("  Troubleshooting:", file=sys.stderr)
-        print("    1. Check network / VPN / proxy", file=sys.stderr)
-        print("    2. Try a mirror: HF_ENDPOINT=https://hf-mirror.com uv run python scripts/download_bge_m3.py", file=sys.stderr)
-        return 1
+        print("HuggingFace download failed, trying ModelScope fallback ...")
+        try:
+            from modelscope import snapshot_download
+
+            snapshot_download(MODEL_NAME, local_dir=LOCAL_DIR)
+            downloaded_weight = True
+            print("OK: downloaded from ModelScope fallback")
+        except ImportError as exc:
+            print()
+            print("ERROR: Could not download model weights.", file=sys.stderr)
+            print(f"  Last error: {last_error}", file=sys.stderr)
+            print("  ModelScope fallback is available but not installed.", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            print("  Install it: pip install modelscope", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print()
+            print("ERROR: Could not download model weights.", file=sys.stderr)
+            print(f"  HuggingFace error: {last_error}", file=sys.stderr)
+            print(f"  ModelScope error: {exc}", file=sys.stderr)
+            return 1
 
     if failed_optional:
         print()
