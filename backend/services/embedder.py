@@ -59,9 +59,13 @@ class Embedder:
 
         flag_dir = os.path.expanduser("~/.cache/huggingface/bge-m3-flagembedding")
         # Default to the public HF mirror so users behind the GFW do not need
-        # to set the env var manually.
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-        endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        # to set the env var manually. Also strip accidental backticks/quotes
+        # that can sneak in when users copy-paste commands.
+        raw_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        endpoint = raw_endpoint.strip().strip("`'\"").strip()
+        if not endpoint.startswith(("http://", "https://")):
+            endpoint = "https://hf-mirror.com"
+        os.environ["HF_ENDPOINT"] = endpoint
 
         if os.path.isdir(flag_dir) and self._has_required_m3_files(flag_dir):
             return flag_dir
