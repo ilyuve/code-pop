@@ -50,16 +50,30 @@ class Embedder:
         """Download only the files BGEM3FlagModel needs, avoiding 403 junk files.
 
         The public HF mirror returns 403 for non-model files such as
-        ``imgs/.DS_Store``. ``snapshot_download`` would try to fetch everything,
-        so we use ``allow_patterns`` to pull only the weights, tokenizer and
-        heads required by BGE-M3.
+        ``imgs/.DS_Store``. We download files individually and ignore optional
+        SentenceTransformer packaging files that may not exist on the mirror.
         """
         import os
 
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import hf_hub_download
 
         flag_dir = os.path.expanduser("~/.cache/huggingface/bge-m3-flagembedding")
-        allow_patterns = [
+        # Default to the public HF mirror so users behind the GFW do not need
+        # to set the env var manually.
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+
+        if os.path.isdir(flag_dir) and self._has_required_m3_files(flag_dir):
+            return flag_dir
+
+        os.makedirs(flag_dir, exist_ok=True)
+        logger.info(
+            "Downloading BGE-M3 model files to %s (HF_ENDPOINT=%s)", flag_dir, endpoint
+        )
+
+        # Files required by BGEM3FlagModel. Some ST packaging files may be
+        # absent from mirrors; we warn but do not fail for those.
+        required_files = [
             "config.json",
             "tokenizer.json",
             "tokenizer_config.json",
@@ -67,23 +81,39 @@ class Embedder:
             "special_tokens_map.json",
             "config_sentence_transformers.json",
             "sentence_bert_config.json",
-            "pytorch_model.bin",
-            "model.safetensors",
             "colbert_linear.pt",
             "sparse_linear.pt",
         ]
+        for filename in required_files:
+            try:
+                hf_hub_download(
+                    repo_id=model_name, filename=filename, local_dir=flag_dir
+                )
+            except Exception as e:
+                logger.warning("Optional file %s not downloaded: %s", filename, e)
 
-        if os.path.isdir(flag_dir) and self._has_required_m3_files(flag_dir):
-            return flag_dir
+        # Model weights: prefer Safetensors, fall back to PyTorch bin.
+        weight_files = ["model.safetensors", "pytorch_model.bin"]
+        downloaded_weight = False
+        last_error: Optional[Exception] = None
+        for filename in weight_files:
+            try:
+                hf_hub_download(
+                    repo_id=model_name, filename=filename, local_dir=flag_dir
+                )
+                downloaded_weight = True
+                logger.info("Downloaded model weights: %s", filename)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("Weight file %s not available: %s", filename, e)
 
-        os.makedirs(flag_dir, exist_ok=True)
-        logger.info("Downloading BGE-M3 model files to %s", flag_dir)
-        snapshot_download(
-            repo_id=model_name,
-            local_dir=flag_dir,
-            allow_patterns=allow_patterns,
-            local_dir_use_symlinks=False,
-        )
+        if not downloaded_weight:
+            raise RuntimeError(
+                f"Could not download BGE-M3 weights for {model_name} "
+                f"from {endpoint}: {last_error}"
+            )
+
         return flag_dir
 
     def _m3_model_path(self, model_name: str) -> str:
