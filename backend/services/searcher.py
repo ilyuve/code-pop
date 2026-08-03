@@ -34,20 +34,6 @@ RRF_K = 60
 MAX_CHUNKS_PER_FILE = 3
 
 
-def _combined_score(hit: _Hit) -> float:
-    """Compute the weighted combined score used for ranking and tie-breaking."""
-    score = (
-        WEIGHT_VECTOR * hit.vector_score
-        + WEIGHT_SYMBOL * hit.symbol_score
-        + WEIGHT_BM25 * hit.bm25_score
-        + WEIGHT_GRAPH * hit.graph_score
-        + hit.sparse_score * 0.1
-    )
-    if "vector" in hit.sources and "symbol" in hit.sources:
-        score += BONUS_VECTOR_SYMBOL
-    return score
-
-
 @dataclass
 class _Hit:
     result_id: UUID
@@ -67,6 +53,20 @@ class _Hit:
     symbol_id: Optional[UUID] = None
     symbol_name: Optional[str] = None
     rrf_score: float = 0.0
+
+
+def _combined_score(hit: _Hit) -> float:
+    """Compute the weighted combined score used for ranking and tie-breaking."""
+    score = (
+        WEIGHT_VECTOR * hit.vector_score
+        + WEIGHT_SYMBOL * hit.symbol_score
+        + WEIGHT_BM25 * hit.bm25_score
+        + WEIGHT_GRAPH * hit.graph_score
+        + hit.sparse_score * 0.1
+    )
+    if "vector" in hit.sources and "symbol" in hit.sources:
+        score += BONUS_VECTOR_SYMBOL
+    return score
 
 
 def _choose_representative_hit(current: _Hit, candidate: _Hit) -> _Hit:
