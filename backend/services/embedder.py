@@ -32,6 +32,20 @@ class Embedder:
             cls._instance._m3_model = None
         return cls._instance
 
+    def _has_required_m3_files(self, path: str) -> bool:
+        """Check that a local directory contains the M3 heads and model weights."""
+        import os
+
+        required = (
+            "colbert_linear.pt",
+            "sparse_linear.pt",
+            "tokenizer.json",
+        )
+        weight_files = ("pytorch_model.bin", "model.safetensors")
+        has_heads = all(os.path.exists(os.path.join(path, name)) for name in required)
+        has_weights = any(os.path.exists(os.path.join(path, name)) for name in weight_files)
+        return has_heads and has_weights
+
     def _ensure_local_m3_files(self, model_name: str) -> str:
         """Download only the files BGEM3FlagModel needs, avoiding 403 junk files.
 
@@ -45,7 +59,7 @@ class Embedder:
         from huggingface_hub import snapshot_download
 
         flag_dir = os.path.expanduser("~/.cache/huggingface/bge-m3-flagembedding")
-        required = [
+        allow_patterns = [
             "config.json",
             "tokenizer.json",
             "tokenizer_config.json",
@@ -59,9 +73,7 @@ class Embedder:
             "sparse_linear.pt",
         ]
 
-        if os.path.isdir(flag_dir) and all(
-            os.path.exists(os.path.join(flag_dir, name)) for name in required
-        ):
+        if os.path.isdir(flag_dir) and self._has_required_m3_files(flag_dir):
             return flag_dir
 
         os.makedirs(flag_dir, exist_ok=True)
@@ -69,17 +81,15 @@ class Embedder:
         snapshot_download(
             repo_id=model_name,
             local_dir=flag_dir,
-            allow_patterns=required,
+            allow_patterns=allow_patterns,
             local_dir_use_symlinks=False,
         )
         return flag_dir
 
     def _m3_model_path(self, model_name: str) -> str:
-        """Pick a local BGE-M3 checkpoint that has the M3 heads *and* tokenizer."""
+        """Pick a local BGE-M3 checkpoint that has the M3 heads *and* weights."""
         import glob
         import os
-
-        required = ("colbert_linear.pt", "sparse_linear.pt", "tokenizer.json")
 
         candidates = [
             os.path.expanduser("~/.cache/huggingface/bge-m3-flagembedding"),
@@ -91,9 +101,7 @@ class Embedder:
         candidates.extend(sorted(glob.glob(os.path.join(hub_dir, "*"))))
 
         for path in candidates:
-            if os.path.isdir(path) and all(
-                os.path.exists(os.path.join(path, name)) for name in required
-            ):
+            if os.path.isdir(path) and self._has_required_m3_files(path):
                 return path
 
         # No usable local checkpoint: prepare a minimal local copy before
