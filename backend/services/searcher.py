@@ -34,14 +34,18 @@ RRF_K = 60
 MAX_CHUNKS_PER_FILE = 3
 
 
-def _min_max_normalize(scores: List[float]) -> List[float]:
-    if not scores:
-        return scores
-    min_score = min(scores)
-    max_score = max(scores)
-    if max_score == min_score:
-        return [1.0 for _ in scores]
-    return [(s - min_score) / (max_score - min_score) for s in scores]
+def _combined_score(hit: _Hit) -> float:
+    """Compute the weighted combined score used for ranking and tie-breaking."""
+    score = (
+        WEIGHT_VECTOR * hit.vector_score
+        + WEIGHT_SYMBOL * hit.symbol_score
+        + WEIGHT_BM25 * hit.bm25_score
+        + WEIGHT_GRAPH * hit.graph_score
+        + hit.sparse_score * 0.1
+    )
+    if "vector" in hit.sources and "symbol" in hit.sources:
+        score += BONUS_VECTOR_SYMBOL
+    return score
 
 
 @dataclass
@@ -65,16 +69,54 @@ class _Hit:
     rrf_score: float = 0.0
 
 
+def _choose_representative_hit(current: _Hit, candidate: _Hit) -> _Hit:
+    """Keep the most informative hit for a given (file, line) location.
+
+    Symbol information is critical because CallGraph relies on hit.symbol_id.
+    When both hits have (or lack) symbol info, fall back to the combined score.
+    """
+    has_current_symbol = bool(current.symbol_id)
+    has_candidate_symbol = bool(candidate.symbol_id)
+    if has_candidate_symbol and not has_current_symbol:
+        return candidate
+    if has_current_symbol and not has_candidate_symbol:
+        return current
+    return candidate if _combined_score(candidate) > _combined_score(current) else current
+
+
+def _dedup_source_hits(hits: List[_Hit], source: str) -> List[_Hit]:
+    """Deduplicate hits within one source by (file_id, line) and sort by score."""
+    by_key: Dict[tuple, _Hit] = {}
+    score_attr = f"{source}_score"
+    for hit in hits:
+        key = (hit.file_id, hit.line)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = hit
+            continue
+        # Preserve symbol metadata even if the higher-scored hit lacks it.
+        if hit.symbol_id and not existing.symbol_id:
+            existing.symbol_id = hit.symbol_id
+            existing.symbol_name = hit.symbol_name
+        existing.sources.update(hit.sources)
+        candidate_score = getattr(hit, score_attr, 0.0)
+        if candidate_score > getattr(existing, score_attr, 0.0):
+            setattr(existing, score_attr, candidate_score)
+    return sorted(by_key.values(), key=lambda h: getattr(h, score_attr, 0.0), reverse=True)
+
+
 def _rrf_fuse(results_by_source: Dict[str, List[_Hit]]) -> List[_Hit]:
     rrf_scores = collections.defaultdict(float)
-    hit_by_key = {}
+    hit_by_key: Dict[tuple, _Hit] = {}
 
     for source_name, hits in results_by_source.items():
         for rank, hit in enumerate(hits, start=1):
             key = (hit.file_id, hit.line)
             rrf_scores[key] += 1.0 / (RRF_K + rank)
-            if key not in hit_by_key or hit.vector_score > hit_by_key[key].vector_score:
+            if key not in hit_by_key:
                 hit_by_key[key] = hit
+            else:
+                hit_by_key[key] = _choose_representative_hit(hit_by_key[key], hit)
 
     sorted_keys = sorted(rrf_scores.keys(), key=lambda k: -rrf_scores[k])
 
@@ -169,7 +211,7 @@ class Searcher:
                 sym = self.db.query(Symbol).filter(Symbol.id == hit.symbol_id).first()
                 if sym:
                     entry_point = self._symbol_entry_with_label(sym)
-                    entry_point.relevance_score = hit.vector_score + hit.symbol_score
+                    entry_point.relevance_score = _combined_score(hit)
                     entry_points.append(entry_point)
 
         if strategy.include_callers or strategy.include_callees:
@@ -211,6 +253,8 @@ class Searcher:
                     "symbol": round(hit.symbol_score, 4),
                     "bm25": round(hit.bm25_score, 4),
                     "graph": round(hit.graph_score, 4),
+                    "sparse": round(hit.sparse_score, 4),
+                    "rrf": round(hit.rrf_score, 4),
                     "final": round(self._final_score(hit), 4),
                 },
             ))
@@ -246,38 +290,42 @@ class Searcher:
         limit: int,
     ) -> List[_Hit]:
         strategy = intent.search_strategy
-        all_hits: List[_Hit] = []
+        results_by_source: Dict[str, List[_Hit]] = collections.defaultdict(list)
 
         search_terms = intent.expanded_terms if strategy.expand_synonyms else [intent.original]
 
         for term in search_terms[:5]:
-            term_hits: List[_Hit] = []
-
             if strategy.primary == "vector":
                 # Dense vector search is a core requirement for semantic retrieval.
                 # If it fails, the whole search must fail instead of silently returning
                 # results from partial sources.
-                term_hits.extend(
+                results_by_source["vector"].extend(
                     self._vector_search(self.embedder.encode_query(term), repo_id, limit=30)
                 )
                 # Always supplement with BM25 for Chinese semantic fields.
                 is_chinese = bool(re.search(r"[\u4e00-\u9fff]", term))
                 concepts = self.intent_analyzer._extract_concepts(term, is_chinese)
-                term_hits.extend(self._bm25_search(term, repo_id, top_k=30, concepts=concepts))
+                results_by_source["bm25"].extend(
+                    self._bm25_search(term, repo_id, top_k=30, concepts=concepts)
+                )
                 # General queries should also benefit from symbol matches (e.g. 订单 -> createOrder).
-                term_hits.extend(self._symbol_search(term, repo_id, top_k=20))
+                results_by_source["symbol"].extend(
+                    self._symbol_search(term, repo_id, top_k=20)
+                )
 
             elif strategy.primary == "symbol":
-                term_hits.extend(self._symbol_search(term, repo_id, top_k=30))
+                results_by_source["symbol"].extend(
+                    self._symbol_search(term, repo_id, top_k=30)
+                )
 
             elif strategy.primary == "call_graph":
                 sym_hits = self._symbol_search(term, repo_id, top_k=10)
-                term_hits.extend(sym_hits)
+                results_by_source["symbol"].extend(sym_hits)
                 if strategy.include_callers or strategy.include_callees:
                     for h in sym_hits[:3]:
                         if h.symbol_id:
                             try:
-                                term_hits.extend(
+                                results_by_source["graph"].extend(
                                     self._graph_search_from_symbol(
                                         h.symbol_id, repo_id, strategy.call_depth
                                     )
@@ -290,11 +338,15 @@ class Searcher:
                                 )
 
             elif strategy.primary == "bm25":
-                term_hits.extend(self._bm25_search(term, repo_id, top_k=30))
+                results_by_source["bm25"].extend(
+                    self._bm25_search(term, repo_id, top_k=30)
+                )
 
-            all_hits.extend(term_hits)
-
-        return self._fuse_multiple(all_hits)
+        ranked_by_source = {
+            name: _dedup_source_hits(hits, name)
+            for name, hits in results_by_source.items()
+        }
+        return _rrf_fuse(ranked_by_source)
 
     def _symbol_entry_with_label(self, sym: Symbol) -> "SymbolEntry":
         from schemas import SymbolEntry
@@ -502,22 +554,6 @@ class Searcher:
         if "middleware" in name or "interceptor" in name or "filter" in name:
             return "middleware"
         return "other"
-
-    def _fuse_multiple(self, hits: List[_Hit]) -> List[_Hit]:
-        by_id: Dict[UUID, _Hit] = {}
-
-        for hit in hits:
-            if hit.result_id in by_id:
-                existing = by_id[hit.result_id]
-                existing.vector_score = max(existing.vector_score, hit.vector_score)
-                existing.symbol_score = max(existing.symbol_score, hit.symbol_score)
-                existing.bm25_score = max(existing.bm25_score, hit.bm25_score)
-                existing.graph_score = max(existing.graph_score, hit.graph_score)
-                existing.sources.update(hit.sources)
-            else:
-                by_id[hit.result_id] = hit
-
-        return list(by_id.values())
 
     def hybrid_search(
         self,
@@ -833,53 +869,8 @@ class Searcher:
             ))
         return hits
 
-    def _fuse(
-        self,
-        vector_results: List[_Hit],
-        symbol_results: List[_Hit],
-        bm25_results: List[_Hit],
-        graph_results: List[_Hit],
-    ) -> List[_Hit]:
-        by_id: Dict[UUID, _Hit] = {}
-
-        def merge(hit: _Hit, source_score_attr: str) -> _Hit:
-            existing = by_id.get(hit.result_id)
-            if existing:
-                setattr(existing, source_score_attr, max(getattr(existing, source_score_attr), getattr(hit, source_score_attr)))
-                existing.sources.update(hit.sources)
-                return existing
-            by_id[hit.result_id] = hit
-            return hit
-
-        for hit in vector_results:
-            merge(hit, "vector_score")
-        for hit in symbol_results:
-            merge(hit, "symbol_score")
-        for hit in bm25_results:
-            merge(hit, "bm25_score")
-        for hit in graph_results:
-            merge(hit, "graph_score")
-
-        hits = list(by_id.values())
-        for attr in ("vector_score", "symbol_score", "bm25_score", "graph_score"):
-            scores = [getattr(h, attr) for h in hits]
-            normalized = _min_max_normalize(scores)
-            for hit, norm in zip(hits, normalized):
-                setattr(hit, attr, norm)
-
-        return hits
-
     def _final_score(self, hit: _Hit) -> float:
-        score = (
-            WEIGHT_VECTOR * hit.vector_score
-            + WEIGHT_SYMBOL * hit.symbol_score
-            + WEIGHT_BM25 * hit.bm25_score
-            + WEIGHT_GRAPH * hit.graph_score
-            + hit.sparse_score * 0.1
-        )
-        if "vector" in hit.sources and "symbol" in hit.sources:
-            score += BONUS_VECTOR_SYMBOL
-        return score
+        return _combined_score(hit)
 
     def _to_schema(self, hit: _Hit) -> SearchResultItem:
         final_score = getattr(hit, 'rrf_score', self._final_score(hit))
