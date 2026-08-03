@@ -12,6 +12,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
+# Patch FlagEmbedding: XLMRobertaModel expects `torch_dtype`, not `dtype`.
+# This is a known upstream bug when loading BGE-M3 with newer transformers.
+RUN sed -i 's/dtype=dtype/torch_dtype=dtype/' \
+    /usr/local/lib/python3.11/site-packages/FlagEmbedding/finetune/embedder/encoder_only/m3/runner.py
+
 COPY . .
 
 RUN mkdir -p /app/repos
