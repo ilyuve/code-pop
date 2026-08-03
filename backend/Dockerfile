@@ -10,7 +10,7 @@ COPY requirements.txt .
 
 # Use a BuildKit cache mount for pip so interrupted downloads can resume on
 # the next build. Show a progress bar even when Docker build is not a TTY.
-ENV PIP_PROGRESS_BAR=ascii
+ENV PIP_PROGRESS_BAR=on
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && \
