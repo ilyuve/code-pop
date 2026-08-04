@@ -15,8 +15,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install -r requirements.txt --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install --no-cache-dir --index-url https://pypi.org/simple mcp==1.9.0 && \
-    pip install uv modelscope
+    pip install --no-cache-dir --force-reinstall --index-url https://pypi.org/simple mcp==1.9.0 && \
+    pip install uv modelscope && \
+    python -c "from mcp.server.fastmcp import FastMCP; print('mcp fastmcp ok')"
 
 # Patch FlagEmbedding: XLMRobertaModel expects `torch_dtype`, not `dtype`.
 # This is a known upstream bug when loading BGE-M3 with newer transformers.
