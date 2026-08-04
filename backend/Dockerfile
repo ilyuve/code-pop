@@ -15,6 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install -r requirements.txt --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install --no-cache-dir --index-url https://pypi.org/simple mcp==1.9.0 && \
     pip install uv modelscope
 
 # Patch FlagEmbedding: XLMRobertaModel expects `torch_dtype`, not `dtype`.
