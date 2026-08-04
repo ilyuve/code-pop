@@ -37,6 +37,7 @@ httpx==0.28.0
 # Utilities
 python-dotenv==1.0.0
 numpy==2.1.0
+cryptography==42.0.8
 
 # Testing
 pytest==8.3.0
