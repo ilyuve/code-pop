@@ -27,8 +27,9 @@ tree-sitter-java==0.23.0
 tree-sitter-rust==0.23.0
 tree-sitter-cpp==0.23.0
 
-# MCP server SDK
-mcp>=1.9.0
+# MCP server SDK is installed separately in Dockerfile with a pinned version
+# to avoid stale mirror caches.
+# mcp==1.9.0
 
 # HTTP client (for webhooks / GitHub API)
 httpx==0.28.0
