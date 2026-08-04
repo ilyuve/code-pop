@@ -20,12 +20,12 @@ services:
       - codepop-network
 
   backend:
-    # Pre-built image for "docker compose up" without local build.
+    # Build from local source by default. The image tag is kept so the local
+    # build can still be referenced as ghcr.io/ilyuve/codepop-backend:latest.
     image: ghcr.io/ilyuve/codepop-backend:latest
-    # Uncomment to build locally instead of pulling the pre-built image.
-    # build:
-    #   context: ./backend
-    #   dockerfile: Dockerfile
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: codepop-backend
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-codepop123}@postgres:5432/codepop
