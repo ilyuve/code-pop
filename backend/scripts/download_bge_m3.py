@@ -119,14 +119,14 @@ def main() -> int:
             last_error = exc
             print(f"    WARNING: {exc}")
 
-    if not downloaded_weight:
+    if not weight_ok:
         print()
         print("HuggingFace download failed, trying ModelScope fallback ...")
         try:
             from modelscope import snapshot_download
 
             snapshot_download(MODEL_NAME, local_dir=LOCAL_DIR)
-            downloaded_weight = True
+            weight_ok = True
             print("OK: downloaded from ModelScope fallback")
         except ImportError as exc:
             print()

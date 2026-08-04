@@ -1,8 +1,6 @@
 # Local development override: build images from source instead of pulling
 # pre-built images from GHCR. This file is automatically picked up by
 # `docker compose up` when present in the same directory as docker-compose.yml.
-version: '3.8'
-
 services:
   backend:
     build:

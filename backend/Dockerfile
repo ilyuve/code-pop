@@ -12,9 +12,10 @@ COPY requirements.txt .
 # the next build. Show a progress bar even when Docker build is not a TTY.
 ENV PIP_PROGRESS_BAR=on
 RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
     pip install torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && \
-    pip install modelscope
+    pip install -r requirements.txt --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install uv modelscope
 
 # Patch FlagEmbedding: XLMRobertaModel expects `torch_dtype`, not `dtype`.
 # This is a known upstream bug when loading BGE-M3 with newer transformers.

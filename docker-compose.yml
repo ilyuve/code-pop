@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     # Mirrored from pgvector/pgvector:pg16 so all images come from GHCR.
