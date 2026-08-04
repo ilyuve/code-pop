@@ -792,7 +792,7 @@ class Searcher:
         if not symbol_hits:
             return []
 
-        symbol_ids = [h.result_id for h in symbol_hits if h.sources == {"symbol"}]
+        symbol_ids = [h.symbol_id for h in symbol_hits if h.symbol_id and h.sources == {"symbol"}]
         if symbol_ids:
             related_symbols = self.symbol_repo.get_related_by_edges(symbol_ids, top_k)
         else:
