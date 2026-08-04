@@ -1,7 +1,7 @@
 """Offline benchmark script for CodePop retrieval quality.
 
 Usage:
-    python -m scripts.benchmark path/to/benchmark_queries.json --repo-id <uuid>
+    python -m scripts.verify.benchmark path/to/benchmark_queries.json --repo-id <uuid>
 
 benchmark_queries.json format:
 [

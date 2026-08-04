@@ -9,7 +9,7 @@ so this verifier uses the official recommended mix:
     score = 0.4 * dense_sim + 0.2 * sparse_sim + 0.4 * colbert_sim
 
 Usage:
-    HF_ENDPOINT=https://hf-mirror.com python -m scripts.verify_embedder
+    HF_ENDPOINT=https://hf-mirror.com python -m scripts.models.verify_embedder
 """
 
 import sys

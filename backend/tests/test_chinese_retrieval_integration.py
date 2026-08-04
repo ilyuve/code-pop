@@ -139,7 +139,7 @@ class TestSearcherUsesExpandedTerms:
             mock_embedder_cls.return_value = mock_embedder
             yield Searcher(db)
 
-    def test_execute_strategy_receives_expanded_terms(self, searcher):
+    def test_unified_pipeline_used_with_expanded_terms(self, searcher):
         from services.query_intent import QueryIntent, SearchStrategy
 
         repo_id = uuid4()
@@ -151,13 +151,18 @@ class TestSearcherUsesExpandedTerms:
             search_strategy=SearchStrategy(primary="bm25", secondary="symbol"),
         )
 
-        searcher._execute_strategy = MagicMock(return_value=[])
+        searcher._search_and_fuse = MagicMock(return_value=[])
         searcher._infer_file_role = MagicMock(return_value="service")
 
-        searcher.search_with_context("骑士配送", repo_id=repo_id, intent=intent)
+        context = searcher.search_with_context("骑士配送", repo_id=repo_id, intent=intent)
 
-        passed_intent = searcher._execute_strategy.call_args[0][0]
-        assert passed_intent.expanded_terms == ["骑士配送", "骑手配送", "rider配送"]
+        # The unified RRF pipeline is called with the original query plus the
+        # expanded terms, and the expanded terms flow into matched concepts.
+        searcher._search_and_fuse.assert_called_once_with(
+            "骑士配送", repo_id, 20,
+            search_terms=["骑士配送", "骑手配送", "rider配送"],
+        )
+        assert "骑手配送" in context.matched_concepts
 
     def test_bm25_search_query_text_passed_as_param(self, searcher):
         repo_id = uuid4()

@@ -30,7 +30,7 @@ from mcp_server.server import get_mcp_app, get_mcp_session_manager
 from database import SessionLocal, get_db
 from exceptions import CodePopException
 from models import RepoStatus, Repository
-from scripts.ensure_database import ensure_database
+from scripts.db.ensure_database import ensure_database
 from services.indexer import index_repo, shutdown_indexer
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))

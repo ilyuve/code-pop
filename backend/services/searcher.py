@@ -197,7 +197,7 @@ class Searcher:
         logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
 
         strategy = intent.search_strategy
-        hits = self._execute_strategy(intent, repo_id, limit)
+        hits = self._search_and_fuse(query, repo_id, limit, search_terms=intent.expanded_terms)
 
         entry_points = []
         call_chain = None
@@ -282,71 +282,6 @@ class Searcher:
             total_symbols=len(entry_points),
             search_latency_ms=0,
         )
-
-    def _execute_strategy(
-        self,
-        intent,
-        repo_id: Optional[UUID],
-        limit: int,
-    ) -> List[_Hit]:
-        strategy = intent.search_strategy
-        results_by_source: Dict[str, List[_Hit]] = collections.defaultdict(list)
-
-        search_terms = intent.expanded_terms if strategy.expand_synonyms else [intent.original]
-
-        for term in search_terms[:5]:
-            if strategy.primary == "vector":
-                # Dense vector search is a core requirement for semantic retrieval.
-                # If it fails, the whole search must fail instead of silently returning
-                # results from partial sources.
-                results_by_source["vector"].extend(
-                    self._vector_search(self.embedder.encode_query(term), repo_id, limit=30)
-                )
-                # Always supplement with BM25 for Chinese semantic fields.
-                is_chinese = bool(re.search(r"[\u4e00-\u9fff]", term))
-                concepts = self.intent_analyzer._extract_concepts(term, is_chinese)
-                results_by_source["bm25"].extend(
-                    self._bm25_search(term, repo_id, top_k=30, concepts=concepts)
-                )
-                # General queries should also benefit from symbol matches (e.g. 订单 -> createOrder).
-                results_by_source["symbol"].extend(
-                    self._symbol_search(term, repo_id, top_k=20)
-                )
-
-            elif strategy.primary == "symbol":
-                results_by_source["symbol"].extend(
-                    self._symbol_search(term, repo_id, top_k=30)
-                )
-
-            elif strategy.primary == "call_graph":
-                sym_hits = self._symbol_search(term, repo_id, top_k=10)
-                results_by_source["symbol"].extend(sym_hits)
-                if strategy.include_callers or strategy.include_callees:
-                    for h in sym_hits[:3]:
-                        if h.symbol_id:
-                            try:
-                                results_by_source["graph"].extend(
-                                    self._graph_search_from_symbol(
-                                        h.symbol_id, repo_id, strategy.call_depth
-                                    )
-                                )
-                            except Exception as e:
-                                # Graph expansion is a non-critical enhancement.
-                                # Skip it for this symbol rather than failing the whole search.
-                                logger.warning(
-                                    "Graph expansion failed for symbol %s: %s", h.symbol_id, e
-                                )
-
-            elif strategy.primary == "bm25":
-                results_by_source["bm25"].extend(
-                    self._bm25_search(term, repo_id, top_k=30)
-                )
-
-        ranked_by_source = {
-            name: _dedup_source_hits(hits, name)
-            for name, hits in results_by_source.items()
-        }
-        return _rrf_fuse(ranked_by_source)
 
     def _symbol_entry_with_label(self, sym: Symbol) -> "SymbolEntry":
         from schemas import SymbolEntry
@@ -555,16 +490,24 @@ class Searcher:
             return "middleware"
         return "other"
 
-    def hybrid_search(
+    def _search_and_fuse(
         self,
         query: str,
-        repo_id: Optional[UUID] = None,
-        limit: int = 20,
-    ) -> List[SearchResultItem]:
-        logger.info("Hybrid search query=%s repo_id=%s", query, repo_id)
+        repo_id: Optional[UUID],
+        limit: int,
+        search_terms: Optional[List[str]] = None,
+    ) -> List[_Hit]:
+        """Unified retrieval pipeline: vector + sparse + symbol + bm25 + graph,
+        then RRF fusion and two-stage reranking.
 
-        start_time = time.time()
+        This is the shared core used by both ``hybrid_search`` and
+        ``search_with_context`` so that intent-aware searches benefit from
+        the same semantic-rerank quality.
 
+        ``search_terms`` carries the expanded query terms (e.g. SEMANTIC_MAP
+        English mappings such as 订单 -> order). They feed the symbol and
+        BM25 paths so Chinese queries can match English code identifiers.
+        """
         self.db.execute(text("SET hnsw.ef_search = 128"))
 
         # Core retrieval paths: failures must propagate so the caller knows the
@@ -572,9 +515,12 @@ class Searcher:
         query_embedding = self.embedder.encode_query(query)
         vector_results = self._vector_search(query_embedding, repo_id)
 
-        symbol_results = self._symbol_search(query, repo_id)
+        symbol_results = self._symbol_search_multi(query, search_terms, repo_id)
         is_chinese = bool(re.search(r"[\u4e00-\u9fff]", query))
         bm25_concepts = self.intent_analyzer._extract_concepts(query, is_chinese)
+        for term in search_terms or []:
+            if term != query and term not in bm25_concepts:
+                bm25_concepts.append(term)
         bm25_results = self._bm25_search(query, repo_id, concepts=bm25_concepts)
 
         # Sparse and graph search are supplementary sources. If they fail, the
@@ -606,9 +552,35 @@ class Searcher:
         reranked = CodeReranker().rerank(query, schema_results)
 
         m3_reranker = get_m3_reranker()
-        final = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
+        final_schemas = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
 
-        return final
+        # Map reranked schemas back to _Hit objects so callers can still
+        # access hit.symbol_id and other internal metadata.
+        hit_by_id = {hit.result_id: hit for hit in hits}
+        final_hits: List[_Hit] = []
+        for schema in final_schemas:
+            hit = hit_by_id.get(schema.id)
+            if hit:
+                final_hits.append(hit)
+        return final_hits
+
+    def hybrid_search(
+        self,
+        query: str,
+        repo_id: Optional[UUID] = None,
+        limit: int = 20,
+    ) -> List[SearchResultItem]:
+        logger.info("Hybrid search query=%s repo_id=%s", query, repo_id)
+        # Analyze without LLM expansion (network call) so the hot path stays
+        # fast; SEMANTIC_MAP / domain-synonym expansions still apply.
+        intent = self.intent_analyzer.analyze(
+            query,
+            repo_id=str(repo_id) if repo_id else None,
+            db=self.db,
+            enable_llm_expand=False,
+        )
+        hits = self._search_and_fuse(query, repo_id, limit, search_terms=intent.expanded_terms)
+        return [self._to_schema(hit) for hit in hits[:limit]]
 
     def symbol_search(
         self,
@@ -686,6 +658,37 @@ class Searcher:
                 hit.symbol_score = 0.5
             hits.append(hit)
         return hits
+
+    def _symbol_search_multi(
+        self,
+        query: str,
+        search_terms: Optional[List[str]],
+        repo_id: Optional[UUID],
+        top_k: int = 50,
+    ) -> List[_Hit]:
+        """Symbol search over the raw query plus expanded terms.
+
+        A Chinese query like ``订单创建流程`` never matches an English symbol
+        name directly; the expanded terms (SEMANTIC_MAP mappings such as
+        ``订单 -> order``) let us find symbols like ``createOrder``. Results
+        are merged by symbol, keeping the highest score, so duplicates from
+        overlapping terms do not inflate the RRF input.
+        """
+        terms: List[str] = [query]
+        for term in search_terms or []:
+            if len(terms) >= 10:  # cap fan-out to bound DB work
+                break
+            if term != query and len(term) >= 2:
+                terms.append(term)
+
+        best: Dict[UUID, _Hit] = {}
+        for term in terms:
+            for hit in self._symbol_search(term, repo_id, top_k):
+                key = hit.symbol_id or hit.result_id
+                existing = best.get(key)
+                if existing is None or hit.symbol_score > existing.symbol_score:
+                    best[key] = hit
+        return sorted(best.values(), key=lambda h: h.symbol_score, reverse=True)[:top_k]
 
     def _bm25_search(
         self,

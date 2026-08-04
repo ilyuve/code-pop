@@ -1,7 +1,7 @@
 """Compare BGE-M3 embeddings loaded via SentenceTransformer vs BGEM3FlagModel.
 
 Usage:
-    HF_ENDPOINT=https://hf-mirror.com python -m scripts.compare_bge_m3_loaders
+    HF_ENDPOINT=https://hf-mirror.com python -m scripts.models.compare_bge_m3_loaders
 """
 
 import glob

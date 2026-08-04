@@ -42,6 +42,13 @@ class TestConceptExtraction:
         concepts = analyzer._extract_concepts("order order Order", is_chinese=False)
         assert concepts.count("order") == 1
 
+    def test_substring_fallback_for_compound_words(self):
+        analyzer = QueryIntentAnalyzer()
+        concepts = analyzer._extract_concepts("订单创建流程", is_chinese=True)
+        assert "订单" in concepts
+        assert "创建" in concepts
+        assert "流程" in concepts
+
 
 class TestSynonymExpansion:
     def test_expands_with_semantic_map(self):
@@ -67,6 +74,22 @@ class TestSynonymExpansion:
         analyzer = QueryIntentAnalyzer()
         intent = analyzer.analyze("测试查询")
         assert "测试查询" in intent.expanded_terms
+
+    def test_expanded_terms_are_prioritized(self):
+        analyzer = QueryIntentAnalyzer()
+        intent = analyzer.analyze("订单创建流程")
+        terms = intent.expanded_terms
+        # Original query must come first.
+        assert terms[0] == "订单创建流程"
+        # Concepts should appear before generic/LLM expansions.
+        concept_idx = terms.index("订单") if "订单" in terms else len(terms)
+        generic_idx = terms.index("process") if "process" in terms else len(terms)
+        assert concept_idx < generic_idx
+
+    def test_expanded_terms_are_capped(self):
+        analyzer = QueryIntentAnalyzer()
+        intent = analyzer.analyze("订单创建流程")
+        assert len(intent.expanded_terms) <= 20
 
 
 class TestSearchStrategy:

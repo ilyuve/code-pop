@@ -24,6 +24,7 @@ repos/
 
 # 模型缓存
 models/
+!backend/scripts/models/
 
 # 构建产物
 dist/
@@ -50,6 +51,7 @@ Thumbs.db
 test_*.py
 !backend/tests/test_*.py
 !backend/scripts/test_*.py
+!backend/scripts/verify/test_*.py
 
 # Claude 配置
 .claude/

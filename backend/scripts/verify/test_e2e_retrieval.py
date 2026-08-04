@@ -10,13 +10,13 @@
     export LLM_BASE_URL=https://api.deepseek.com/v1
     export LLM_API_KEY=$DEEPSEEK_API_KEY
     export LLM_MODEL=deepseek-chat
-    python -m scripts.test_e2e_retrieval /path/to/project \
+    python -m scripts.verify.test_e2e_retrieval /path/to/project \
         --query "订单创建流程" \
         --query "create order logic"
 
 用法示例（显式传入 LLM 参数）：
     cd /workspace/backend
-    python -m scripts.test_e2e_retrieval /path/to/project \
+    python -m scripts.verify.test_e2e_retrieval /path/to/project \
         --query "订单创建流程" \
         --llm-base-url https://api.deepseek.com/v1 \
         --llm-api-key $DEEPSEEK_API_KEY \
@@ -24,13 +24,13 @@
 
 用法示例（仅 mock embedder，验证 pipeline 逻辑）：
     cd /workspace/backend
-    python -m scripts.test_e2e_retrieval /path/to/project \
+    python -m scripts.verify.test_e2e_retrieval /path/to/project \
         --query "订单创建流程" \
         --mock-embedder
 
 用法示例（全部 mock，仅做冒烟测试）：
     cd /workspace/backend
-    python -m scripts.test_e2e_retrieval /path/to/project \
+    python -m scripts.verify.test_e2e_retrieval /path/to/project \
         --query "订单创建流程" \
         --mock-llm \
         --mock-embedder

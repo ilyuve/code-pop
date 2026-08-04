@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 # Patch DB initialization before importing the main app.
-with patch("scripts.init_db.init_db"):
+with patch("scripts.db.init_db.init_db"):
     from main import app
     from api.admin import llm as admin_llm
 
