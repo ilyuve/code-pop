@@ -273,4 +273,34 @@ export const fetchLLMCost = async (
   return response.data;
 };
 
+export const fetchLLMSettings = async (): Promise<any> => {
+  const response = await apiClient.get('/admin/llm/settings');
+  return response.data.settings;
+};
+
+export const saveLLMSettings = async (settings: any): Promise<any> => {
+  const response = await apiClient.put('/admin/llm/settings', settings);
+  return response.data.settings;
+};
+
+export const saveLLMProvider = async (provider: any): Promise<any> => {
+  const url = provider.id ? `/admin/llm/providers/${provider.id}` : '/admin/llm/providers';
+  const method = provider.id ? 'put' : 'post';
+  const response = await apiClient.request({
+    method,
+    url,
+    data: provider,
+  });
+  return response.data;
+};
+
+export const deleteLLMProvider = async (id: string): Promise<void> => {
+  await apiClient.delete(`/admin/llm/providers/${id}`);
+};
+
+export const testLLMProvider = async (id: string): Promise<any> => {
+  const response = await apiClient.post(`/admin/llm/providers/${id}/test`);
+  return response.data;
+};
+
 export default apiClient;

@@ -1,6 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Save, RotateCcw, Sun, Moon, Server, Brain, Plus, Trash2, Play, AlertCircle, CheckCircle2, Loader2, TrendingUp } from 'lucide-react';
 import { useStore } from '../store';
+import {
+  fetchLLMProviders,
+  fetchLLMUsage,
+  fetchLLMSettings,
+  fetchLLMCost,
+  saveLLMSettings,
+  saveLLMProvider,
+  deleteLLMProvider,
+  testLLMProvider,
+} from '../api';
 import { clsx } from 'clsx';
 
 interface LLMProvider {
@@ -60,7 +70,6 @@ interface LLMCostEstimate {
 
 export const Settings = () => {
   const { settings, updateSettings } = useStore();
-  const [apiEndpoint, setApiEndpoint] = useState(settings.apiEndpoint);
   const [embeddingProvider, setEmbeddingProvider] = useState(settings.embeddingProvider);
   const [theme, setTheme] = useState(settings.theme);
   const [hasChanges, setHasChanges] = useState(false);
@@ -79,54 +88,49 @@ export const Settings = () => {
 
   useEffect(() => {
     const changed =
-      apiEndpoint !== settings.apiEndpoint ||
       embeddingProvider !== settings.embeddingProvider ||
       theme !== settings.theme;
     setHasChanges(changed);
-  }, [apiEndpoint, embeddingProvider, theme, settings]);
+  }, [embeddingProvider, theme, settings]);
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true);
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/providers`);
-      const data = await resp.json();
-      setProviders(data.providers || []);
+      const data = await fetchLLMProviders();
+      setProviders(data);
     } catch (e) {
       console.error('Failed to load providers', e);
     } finally {
       setLoadingProviders(false);
     }
-  }, [apiEndpoint]);
+  }, []);
 
   const fetchUsage = useCallback(async () => {
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/usage?minutes=60`);
-      const data = await resp.json();
+      const data = await fetchLLMUsage(60);
       setUsage(data);
     } catch (e) {
       console.error('Failed to load usage', e);
     }
-  }, [apiEndpoint]);
+  }, []);
 
   const fetchLlmSettings = useCallback(async () => {
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/settings`);
-      const data = await resp.json();
-      setLlmSettings(data.settings);
+      const data = await fetchLLMSettings();
+      setLlmSettings(data);
     } catch (e) {
       console.error('Failed to load LLM settings', e);
     }
-  }, [apiEndpoint]);
+  }, []);
 
   const fetchCost = useCallback(async () => {
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/cost?minutes=${costPeriod}`);
-      const data = await resp.json();
+      const data = await fetchLLMCost(costPeriod);
       setCost(data);
     } catch (e) {
       console.error('Failed to load cost', e);
     }
-  }, [apiEndpoint, costPeriod]);
+  }, [costPeriod]);
 
   useEffect(() => {
     fetchProviders();
@@ -139,14 +143,8 @@ export const Settings = () => {
     if (!llmSettings) return;
     setSavingSettings(true);
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(llmSettings),
-      });
-      if (!resp.ok) throw new Error('Save failed');
-      const data = await resp.json();
-      setLlmSettings(data.settings);
+      const data = await saveLLMSettings(llmSettings);
+      setLlmSettings(data);
     } catch (e) {
       alert('保存设置失败：' + (e as Error).message);
     } finally {
@@ -156,11 +154,9 @@ export const Settings = () => {
 
   const handleSave = () => {
     updateSettings({
-      apiEndpoint,
       embeddingProvider,
       theme,
     });
-    localStorage.setItem('codepop-api-endpoint', apiEndpoint);
     document.documentElement.classList.toggle('dark', theme === 'dark');
     setHasChanges(false);
     setSaved(true);
@@ -168,7 +164,6 @@ export const Settings = () => {
   };
 
   const handleReset = () => {
-    setApiEndpoint('http://localhost:8080/api');
     setEmbeddingProvider('openai');
     setTheme('dark');
     setHasChanges(true);
@@ -212,17 +207,8 @@ export const Settings = () => {
 
   const handleSaveProvider = async () => {
     if (!editingProvider) return;
-    const url = editingProvider.id
-      ? `${apiEndpoint}/admin/llm/providers/${editingProvider.id}`
-      : `${apiEndpoint}/admin/llm/providers`;
-    const method = editingProvider.id ? 'PUT' : 'POST';
     try {
-      const resp = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editingProvider),
-      });
-      if (!resp.ok) throw new Error('Save failed');
+      await saveLLMProvider(editingProvider);
       await fetchProviders();
       setEditingProvider(null);
     } catch (e) {
@@ -233,8 +219,7 @@ export const Settings = () => {
   const handleDeleteProvider = async (id: string) => {
     if (!confirm('确定删除这个 Provider 吗？')) return;
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/providers/${id}`, { method: 'DELETE' });
-      if (!resp.ok) throw new Error('Delete failed');
+      await deleteLLMProvider(id);
       await fetchProviders();
     } catch (e) {
       alert('删除失败：' + (e as Error).message);
@@ -245,8 +230,7 @@ export const Settings = () => {
     setTestingId(id);
     setTestResult(null);
     try {
-      const resp = await fetch(`${apiEndpoint}/admin/llm/providers/${id}/test`, { method: 'POST' });
-      const data = await resp.json();
+      const data = await testLLMProvider(id);
       setTestResult({
         id,
         ok: data.ok,
@@ -265,29 +249,6 @@ export const Settings = () => {
 
   return (
     <div className="space-y-6 animate-fadeIn max-w-4xl">
-      {/* API Configuration */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg">
-            <Server className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-          </div>
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">API 配置</h2>
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-            API 端点地址
-          </label>
-          <input
-            type="text"
-            value={apiEndpoint}
-            onChange={(e) => setApiEndpoint(e.target.value)}
-            placeholder="http://localhost:8080/api"
-            className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">CodePop 后端服务的 API 地址</p>
-        </div>
-      </section>
-
       {/* LLM Provider Management */}
       <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
         <div className="flex items-center justify-between mb-6">

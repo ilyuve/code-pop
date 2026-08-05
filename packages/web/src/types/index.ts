@@ -37,7 +37,6 @@ export interface SearchResult {
 
 // Settings types
 export interface Settings {
-  apiEndpoint: string;
   embeddingProvider: 'openai' | 'local';
   theme: 'light' | 'dark';
 }
