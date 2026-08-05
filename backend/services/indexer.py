@@ -666,7 +666,7 @@ def _bulk_insert_symbols_and_embeddings(
     
     for text_idx, sparse_vector in enumerate(sparse_vectors):
         if sparse_vector:
-            file_id, chunk_index, _, _, _ = meta[text_idx]
+            file_id, chunk_index = meta[text_idx][0], meta[text_idx][1]
             embedding_id = embedding_meta.get((file_id, chunk_index))
             if embedding_id:
                 for token_id, weight in sparse_vector.items():

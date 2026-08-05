@@ -380,7 +380,7 @@ class SymbolFlowLabel(Base):
 
 
 # Wire up reverse relationships
-Embedding.enrichment = relationship("EmbeddingEnrichment", back_populates="embedding", uselist=False)
+Embedding.enrichment = relationship("EmbeddingEnrichment", back_populates="embedding", uselist=False, cascade="all, delete-orphan")
 Symbol.flow_label = relationship("SymbolFlowLabel", back_populates="symbol", uselist=False)
 Repository.llm_usage_logs = relationship("LlmUsageLog", back_populates="repo")
 Repository.domain_synonyms = relationship("DomainSynonym", back_populates="repo", cascade="all, delete-orphan")
