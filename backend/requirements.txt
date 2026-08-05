@@ -31,11 +31,10 @@ tree-sitter-cpp==0.23.0
 # Chinese word segmentation (required for Chinese query concept extraction)
 jieba==0.42.1
 
-# MCP server SDK is installed separately in Dockerfile with a pinned version
-# to avoid stale mirror caches.
-# mcp==1.9.0
+# MCP server SDK
+mcp==1.9.0
 
-# HTTP client (for webhooks / GitHub API)
+# HTTP client (for webhooks / GitHub API / MCP SSE)
 httpx==0.28.0
 
 # Utilities
