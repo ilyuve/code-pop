@@ -2,11 +2,20 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj):
+    """Serialize datetime objects as ISO 8601 with explicit UTC offset."""
+    if isinstance(obj, datetime):
+        dt = obj.replace(tzinfo=timezone.utc) if obj.tzinfo is None else obj
+        return dt.isoformat()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 class WSNotifier:
@@ -33,7 +42,7 @@ class WSNotifier:
         """Broadcast a JSON message to all connected clients."""
         if not self._connections:
             return
-        payload = json.dumps(message)
+        payload = json.dumps(message, default=_json_default)
         disconnected: List[WebSocket] = []
         for conn in self._connections:
             try:
@@ -69,7 +78,7 @@ class WSNotifier:
             payload["log"] = {
                 "message": log_message,
                 "level": log_level,
-                "timestamp": json.dumps({"__type__": "datetime", "value": None}),
+                "timestamp": datetime.utcnow(),
             }
         
         await self.broadcast({k: v for k, v in payload.items() if v is not None})

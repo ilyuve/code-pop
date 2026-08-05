@@ -130,7 +130,7 @@ def _add_log(db: Optional[Session], repo_id: str, level: str, message: str, stag
     if repo_id not in _indexing_logs:
         _indexing_logs[repo_id] = []
     log_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.utcnow(),
         "level": level,
         "message": message,
         "stage": stage,
@@ -1162,6 +1162,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
 
         repo.status = RepoStatus.indexing.value
         repo.error_message = None
+        repo.indexing_started_at = datetime.utcnow()
         db.commit()
         _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0, log_message="初始化索引状态", db=db)
         _check_cancelled(repo_id_str)

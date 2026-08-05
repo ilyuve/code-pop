@@ -1,6 +1,7 @@
 """Repository management endpoints."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -17,6 +18,17 @@ from models import DomainSynonym, FrameworkRoute, IndexingLog, IndexingProgress,
 from services.repo_sync import is_valid_git_url
 
 logger = logging.getLogger(__name__)
+
+
+def _format_dt(dt: Optional[datetime]) -> Optional[str]:
+    """Format a naive UTC datetime as ISO 8601 with explicit +00:00 offset."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
 
@@ -143,7 +155,7 @@ def list_repo_files(repo_id: UUID, db: Session = Depends(get_db)) -> List[Dict[s
             "path": f.path,
             "language": f.language,
             "size_bytes": f.size_bytes,
-            "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+            "updated_at": _format_dt(f.updated_at),
         }
         for f in files
     ]
@@ -189,7 +201,7 @@ def get_indexing_logs(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[str,
     
     db_logs_list = [
         {
-            "timestamp": log.created_at.isoformat(),
+            "timestamp": _format_dt(log.created_at),
             "level": log.level,
             "message": log.message,
             "stage": log.stage,
@@ -200,7 +212,11 @@ def get_indexing_logs(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[str,
     seen = set()
     all_logs = []
     for log in db_logs_list + in_memory_logs:
-        key = f"{log['timestamp']}-{log['message']}"
+        ts = log["timestamp"]
+        if isinstance(ts, datetime):
+            ts = _format_dt(ts)
+            log = {**log, "timestamp": ts}
+        key = f"{ts}-{log['message']}"
         if key not in seen:
             seen.add(key)
             all_logs.append(log)
@@ -238,17 +254,26 @@ def get_indexing_progress(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[
         for stage in stages:
             latest_stages[stage.stage] = stage
         
-        stage_order = ["git_sync", "scan", "symbols", "embeddings", "call_graph"]
+        # Actual execution order: git_sync -> scan -> chinese_enrichment -> symbols -> embeddings -> flow_labels -> call_graph
+        stage_order = ["git_sync", "scan", "chinese_enrichment", "symbols", "embeddings", "flow_labels", "call_graph"]
         
-        max_progress_stage = None
-        max_progress = -1
+        # The current stage is the last stage in order that has any progress record.
         for stage_name in stage_order:
-            if stage_name in latest_stages and latest_stages[stage_name].progress > max_progress:
-                max_progress = latest_stages[stage_name].progress
-                max_progress_stage = stage_name
+            if stage_name in latest_stages:
+                current_stage = stage_name
         
-        current_stage = max_progress_stage
-        overall_progress = max_progress if max_progress_stage else 0
+        if current_stage:
+            overall_progress = latest_stages[current_stage].progress
+    
+    elapsed_seconds: Optional[float] = None
+    estimated_remaining_seconds: Optional[float] = None
+    if repo.indexing_started_at and repo.status == RepoStatus.indexing.value:
+        started_at = repo.indexing_started_at
+        if started_at.tzinfo is not None:
+            started_at = started_at.replace(tzinfo=None)
+        elapsed_seconds = (datetime.utcnow() - started_at).total_seconds()
+        if 0 < overall_progress < 100:
+            estimated_remaining_seconds = elapsed_seconds * (100 - overall_progress) / overall_progress
     
     return {
         "repo_id": str(repo_id),
@@ -256,7 +281,10 @@ def get_indexing_progress(repo_id: UUID, db: Session = Depends(get_db)) -> Dict[
         "overall_progress": round(overall_progress, 2),
         "current_stage": current_stage,
         "stage_progress": stage_progress,
-        "last_indexed_at": repo.last_indexed_at.isoformat() if repo.last_indexed_at else None,
+        "last_indexed_at": _format_dt(repo.last_indexed_at),
+        "indexing_started_at": _format_dt(repo.indexing_started_at),
+        "elapsed_seconds": round(elapsed_seconds, 2) if elapsed_seconds is not None else None,
+        "estimated_remaining_seconds": round(estimated_remaining_seconds, 2) if estimated_remaining_seconds is not None else None,
     }
 
 

@@ -1,10 +1,17 @@
 """Pydantic request / response schemas."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+def _format_datetime(dt: datetime) -> str:
+    """Serialize naive UTC datetimes with explicit +00:00 offset."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 class RepoCreate(BaseModel):
@@ -28,6 +35,7 @@ class RepoResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class SearchQuery(BaseModel):
@@ -86,6 +94,7 @@ class SearchHistoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class BenchmarkCreate(BaseModel):
@@ -110,6 +119,7 @@ class BenchmarkResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class BenchmarkSummary(BaseModel):
@@ -151,6 +161,7 @@ class SearchHistoryRecentItem(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class WebhookPayload(BaseModel):

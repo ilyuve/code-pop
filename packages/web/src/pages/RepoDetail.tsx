@@ -20,7 +20,7 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
-import { useIndexing } from '../hooks/useIndexing';
+import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
 import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing } from '../api';
@@ -32,7 +32,7 @@ export const RepoDetail = () => {
   const navigate = useNavigate();
   const { deleteRepo, reindex, isDeleting, isReindexing } = useRepos();
   const { data: repo, isLoading, error } = useRepo(id!);
-  const { isIndexing, progress, stageProgress, currentStageLabel, error: indexingError, logs } = useIndexing(id!, repo);
+  const { isIndexing, progress, stageProgress, currentStageLabel, timing, error: indexingError, logs } = useIndexing(id!, repo);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [showLogs, setShowLogs] = useState(false);
@@ -78,6 +78,16 @@ export const RepoDetail = () => {
       default:
         return 'text-slate-600 dark:text-slate-400';
     }
+  };
+
+  const formatDuration = (seconds: number | null | undefined) => {
+    if (seconds === null || seconds === undefined || seconds < 0) return '-';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
   };
 
   const { data: files = [] } = useQuery({
@@ -311,9 +321,21 @@ export const RepoDetail = () => {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-sm font-medium text-slate-700 dark:text-slate-300">总进度</span>
-              <span className="text-sm font-semibold text-indigo-600 dark:text-indigo-400">
-                {progress.percentage}%
-              </span>
+              <div className="flex items-center gap-3 text-xs">
+                {timing && (
+                  <>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      已用时 <span className="font-medium text-slate-700 dark:text-slate-300">{formatDuration(timing.elapsedSeconds)}</span>
+                    </span>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      预计剩余 <span className="font-medium text-slate-700 dark:text-slate-300">{formatDuration(timing.estimatedRemainingSeconds)}</span>
+                    </span>
+                  </>
+                )}
+                <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                  {progress.percentage}%
+                </span>
+              </div>
             </div>
             <div className="h-3 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
@@ -323,23 +345,32 @@ export const RepoDetail = () => {
             </div>
           </div>
 
-          {/* Stage progress */}
+          {/* Stage pipeline */}
           {stageProgress && (
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                  {currentStageLabel}阶段
-                </span>
-                <span className="text-sm text-slate-500 dark:text-slate-400">
-                  {stageProgress.current} / {stageProgress.total} ({Math.round(stageProgress.percentage)}%)
-                </span>
-              </div>
-              <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-                  style={{ width: `${stageProgress.percentage}%` }}
-                />
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {STAGE_ORDER.map((stage, idx) => {
+                const isCurrent = stageProgress.stage === stage;
+                const isPast = STAGE_ORDER.indexOf(stageProgress.stage) > idx;
+                return (
+                  <div key={stage} className="flex items-center gap-2">
+                    <span
+                      className={clsx(
+                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors',
+                        isCurrent
+                          ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400'
+                          : isPast
+                            ? 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400'
+                            : 'text-slate-400 dark:text-slate-500'
+                      )}
+                    >
+                      {STAGE_LABELS[stage] ?? stage}
+                    </span>
+                    {idx < STAGE_ORDER.length - 1 && (
+                      <ChevronRight className="w-3 h-3 text-slate-300 dark:text-slate-600" />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 

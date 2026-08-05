@@ -46,6 +46,7 @@ class Repository(Base):
     error_message = Column(Text, nullable=True)
     last_indexed_at = Column(DateTime, nullable=True)
     indexing_heartbeat_at = Column(DateTime, nullable=True)
+    indexing_started_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
