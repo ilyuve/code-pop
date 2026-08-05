@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# (syntax directive removed: BuildKit built-in frontend supports RUN --mount=type=cache)
 FROM python:3.11-slim-bookworm
 
 WORKDIR /app
@@ -27,9 +27,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url https://pypi.org/simple uv modelscope
 
-# Patch FlagEmbedding: XLMRobertaModel expects `torch_dtype`, not `dtype`.
-# This is a known upstream bug when loading BGE-M3 with newer transformers.
-RUN sed -i 's/dtype=dtype/torch_dtype=dtype/' \
+# Patch FlagEmbedding: AutoModel.from_pretrained expects `torch_dtype`, not
+# `dtype`, with transformers 4.50. FlagEmbedding 1.2/1.3 writes `dtype=dtype`
+# and 1.4 writes `dtype=torch_dtype`; normalize only inside the
+# from_pretrained(...) call so torch.nn.Linear(dtype=...) stays untouched.
+RUN sed -i -E '/from_pretrained\(/,/^\s*\)\s*$/ s/\bdtype=(dtype|torch_dtype)/torch_dtype=\1/g' \
     /usr/local/lib/python3.11/site-packages/FlagEmbedding/finetune/embedder/encoder_only/m3/runner.py
 
 COPY . .
