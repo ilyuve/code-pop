@@ -253,8 +253,8 @@ def _index_file(
     repo_id: UUID,
     repo_path: Path,
     file_path: Path,
-) -> Optional[Tuple[CodeFile, ParseResult]]:
-    """Index a single source file with degradation fallback. Returns inserted CodeFile and parse result."""
+) -> Optional[Tuple[CodeFile, ParseResult, str]]:
+    """Index a single source file with degradation fallback. Returns inserted CodeFile, parse result and raw content."""
     rel_path = str(file_path.relative_to(repo_path))
 
     if should_skip_path(rel_path):
@@ -365,7 +365,7 @@ def _index_file(
     db.flush()  # obtain code_file.id
     print(f"[INDEXER] inserted {rel_path} symbols={len(parsed.symbols)} chunks={len(parsed.chunks)}", flush=True)
 
-    return code_file, parsed
+    return code_file, parsed, content
 
 
 def _build_enriched_text(content: str, enrichment: Optional[EnrichmentResult]) -> str:
@@ -846,6 +846,7 @@ async def _enrich_repository_async(
     provider_id: Optional[UUID] = None,
     chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
     enable_flow_label: bool = True,
+    file_contents: Optional[Dict[UUID, str]] = None,
 ) -> None:
     """Aggregate domain synonyms and generate symbol flow labels via LLM."""
     router = LLMRouter(db)
@@ -907,9 +908,9 @@ async def _enrich_repository_async(
         db=db,
     )
 
-    file_embeddings = {}
-    for code_file, parsed in file_records:
-        file_embeddings[code_file.id] = parsed.content
+    file_embeddings: Dict[UUID, str] = {}
+    if file_contents:
+        file_embeddings.update(file_contents)
 
     semaphore = asyncio.Semaphore(5)
 
@@ -974,6 +975,7 @@ def _enrich_repository(
     provider_id: Optional[UUID] = None,
     chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
     enable_flow_label: bool = True,
+    file_contents: Optional[Dict[UUID, str]] = None,
 ) -> None:
     """Synchronous wrapper to run async enrichment in a worker thread."""
     asyncio.run(
@@ -986,6 +988,7 @@ def _enrich_repository(
             provider_id=provider_id,
             chunk_enrichments=chunk_enrichments,
             enable_flow_label=enable_flow_label,
+            file_contents=file_contents,
         )
     )
 
@@ -1122,6 +1125,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
     repo_id_str = str(repo_id)
     file_records: List[Tuple[CodeFile, ParseResult]] = []
     all_file_records: List[Tuple[CodeFile, ParseResult]] = []
+    file_contents: Dict[UUID, str] = {}
     total_inserted = 0
 
     heartbeat_stop = threading.Event()
@@ -1229,8 +1233,10 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             try:
                 result = _index_file(db, repo_id, local_path, file_path)
                 if result:
-                    file_records.append(result)
-                    all_file_records.append(result)
+                    code_file, parsed, content = result
+                    file_records.append((code_file, parsed))
+                    all_file_records.append((code_file, parsed))
+                    file_contents[code_file.id] = content
                 else:
                     skipped += 1
             except Exception as exc:
@@ -1306,6 +1312,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             provider_id=enrichment_provider_id,
             chunk_enrichments=chunk_enrichments,
             enable_flow_label=enable_flow_label,
+            file_contents=file_contents,
         )
 
         _check_cancelled(repo_id_str)
@@ -1333,7 +1340,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         _add_log(db, repo_id_str, "info", "调用图构建完成", "call_graph")
 
         _check_cancelled(repo_id_str)
-        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop)
+        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop, file_contents=file_contents)
         db.commit()
 
         _add_log(db, repo_id_str, "info", "框架路由解析完成", "routes")
@@ -1454,6 +1461,7 @@ def _parse_framework_routes(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    file_contents: Optional[Dict[UUID, str]] = None,
 ) -> None:
     """解析框架路由并写入数据库。"""
     router_parser = RouterParser()
@@ -1465,7 +1473,8 @@ def _parse_framework_routes(
         _check_cancelled(repo_id_str)
         if parsed.language in ("python", "javascript", "typescript", "java"):
             try:
-                routes = router_parser.parse(parsed.content, parsed.language)
+                content = file_contents.get(code_file.id, "") if file_contents else ""
+                routes = router_parser.parse(content, parsed.language)
                 for route in routes:
                     db_route = FrameworkRoute(
                         repo_id=repo_id,
