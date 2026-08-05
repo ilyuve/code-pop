@@ -160,6 +160,7 @@ export interface CodeContext {
   matched_concepts: string[];
   entry_points: SymbolEntry[];
   call_chain: CallChain | null;
+  flow_summary: string | null;
   related_files: FileSummary[];
   code_snippets: SearchResult[];
   total_files: number;
@@ -174,4 +175,70 @@ export interface CodeContextResponse {
   context: CodeContext;
   success: boolean;
   error?: string;
+}
+
+// Debug search (retrieval testing center) types
+export interface DebugPathOverrides {
+  enabled?: string[];
+  top_k?: Record<string, number>;
+}
+
+export interface DebugSearchHit {
+  id: string;
+  file_path: string;
+  line: number;
+  language: string;
+  content: string;
+  score: number;
+  symbol_name?: string | null;
+  sources: string[];
+}
+
+export interface DebugPathSnapshot {
+  name: string;
+  enabled: boolean;
+  top_k: number;
+  latency_ms: number;
+  hit_count: number;
+  hits: DebugSearchHit[];
+}
+
+export interface DebugFusionHit extends DebugSearchHit {
+  rrf_score: number;
+  vector_score: number;
+  symbol_score: number;
+  bm25_score: number;
+  sparse_score: number;
+  graph_score: number;
+}
+
+export interface DebugFusionSnapshot {
+  rrf_k: number;
+  hit_count: number;
+  hits: DebugFusionHit[];
+}
+
+export interface DebugRerankStage {
+  input_count: number;
+  output_count: number;
+  output: SearchResult[];
+}
+
+export interface DebugRerankSnapshot {
+  code_reranker: DebugRerankStage;
+  m3_reranker: DebugRerankStage;
+}
+
+export interface DebugSearchResponse {
+  query_analysis: {
+    intent_type: string;
+    is_chinese: boolean;
+    concepts: string[];
+    expanded_terms: string[];
+  };
+  paths: DebugPathSnapshot[];
+  fusion: DebugFusionSnapshot;
+  rerank: DebugRerankSnapshot;
+  final_context: CodeContext;
+  total_latency_ms: number;
 }

@@ -12,7 +12,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from main import app
-from schemas import SearchResultItem
+from schemas import CodeContext, SearchResultItem
+from api import search as search_api
 from services.indexer import (
     IndexingCancelledError,
     _cancel_indexing,
@@ -161,6 +162,8 @@ class TestSearcherUsesExpandedTerms:
         searcher._search_and_fuse.assert_called_once_with(
             "骑士配送", repo_id, 20,
             search_terms=["骑士配送", "骑手配送", "rider配送"],
+            path_overrides=None,
+            trace=None,
         )
         assert "骑手配送" in context.matched_concepts
 
@@ -347,3 +350,154 @@ class TestIndexingStateRecovery:
         assert repo1.error_message is None
         assert repo1.indexing_heartbeat_at is None
         db.commit.assert_called_once()
+
+
+class TestDebugSearchConsistency:
+    """Debug endpoint must return the same final context as /search/context."""
+
+    @pytest.fixture
+    def client(self):
+        return TestClient(app)
+
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        app.dependency_overrides[search_api.get_db] = lambda: db
+        yield db
+        app.dependency_overrides.clear()
+
+    def test_debug_and_context_return_same_final_snippets(self, client, mock_db):
+        repo_id = uuid4()
+        snippet_id = uuid4()
+        file_id = uuid4()
+
+        fake_context = SearchResultItem(
+            id=snippet_id,
+            file_id=file_id,
+            repo_id=repo_id,
+            repo_name="test-repo",
+            file_path="src/order.py",
+            language="python",
+            content="def create_order(): pass",
+            line=1,
+            score=0.95,
+            score_breakdown={"vector": 0.9, "final": 0.95},
+        )
+
+        fake_code_context = CodeContext(
+            query="订单创建流程",
+            query_intent="general",
+            matched_concepts=["订单", "order"],
+            entry_points=[],
+            call_chain=None,
+            flow_summary=None,
+            related_files=[],
+            code_snippets=[fake_context],
+            total_files=1,
+            total_symbols=0,
+        )
+
+        with patch("api.search.Searcher") as mock_searcher_cls:
+            instance = MagicMock()
+            instance.search_with_context.return_value = fake_code_context
+            instance.debug_search.return_value = (
+                fake_code_context,
+                MagicMock(
+                    query_analysis={},
+                    paths=[],
+                    fusion={
+                        "rrf_k": 60,
+                        "hit_count": 1,
+                        "hits": [{"id": str(snippet_id), "score": 0.95}],
+                    },
+                    rerank={
+                        "code_reranker": {
+                            "input_count": 1,
+                            "output_count": 1,
+                            "output": [{"id": str(snippet_id), "score": 0.95}],
+                        },
+                        "m3_reranker": {
+                            "input_count": 1,
+                            "output_count": 1,
+                            "output": [{"id": str(snippet_id), "score": 0.95}],
+                        },
+                    },
+                    final_context=fake_code_context,
+                ),
+            )
+            mock_searcher_cls.return_value = instance
+
+            context_resp = client.post("/api/search/context", json={
+                "query": "订单创建流程",
+                "repo_id": str(repo_id),
+                "limit": 20,
+            })
+            debug_resp = client.post("/api/search/debug", json={
+                "query": "订单创建流程",
+                "repo_id": str(repo_id),
+                "limit": 20,
+            })
+
+        assert context_resp.status_code == 200
+        assert debug_resp.status_code == 200
+
+        context_snippets = context_resp.json()["context"]["code_snippets"]
+        debug_snippets = debug_resp.json()["final_context"]["code_snippets"]
+        assert len(context_snippets) == len(debug_snippets) == 1
+        assert context_snippets[0]["id"] == debug_snippets[0]["id"]
+        assert context_snippets[0]["file_path"] == debug_snippets[0]["file_path"]
+
+    def test_debug_endpoint_does_not_record_history(self, client, mock_db):
+        repo_id = uuid4()
+
+        fake_code_context = CodeContext(
+            query="订单创建流程",
+            query_intent="general",
+            matched_concepts=[],
+            entry_points=[],
+            call_chain=None,
+            flow_summary=None,
+            related_files=[],
+            code_snippets=[],
+            total_files=0,
+            total_symbols=0,
+        )
+
+        with patch("api.search.Searcher") as mock_searcher_cls:
+            instance = MagicMock()
+            instance.debug_search.return_value = (
+                fake_code_context,
+                MagicMock(
+                    query_analysis={},
+                    paths=[],
+                    fusion={
+                        "rrf_k": 60,
+                        "hit_count": 0,
+                        "hits": [],
+                    },
+                    rerank={
+                        "code_reranker": {
+                            "input_count": 0,
+                            "output_count": 0,
+                            "output": [],
+                        },
+                        "m3_reranker": {
+                            "input_count": 0,
+                            "output_count": 0,
+                            "output": [],
+                        },
+                    },
+                    final_context=fake_code_context,
+                ),
+            )
+            mock_searcher_cls.return_value = instance
+
+            resp = client.post("/api/search/debug", json={
+                "query": "订单创建流程",
+                "repo_id": str(repo_id),
+                "limit": 20,
+            })
+
+        assert resp.status_code == 200
+        mock_db.add.assert_not_called()
+        mock_db.commit.assert_not_called()

@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from schemas import SearchResultItem, SymbolEntry
-from services.searcher import Searcher, _Hit
+from services.searcher import Searcher, _Hit, SearchTrace
 
 
 def _make_symbol(symbol_id=None, name="foo", repo=None, file=None):
@@ -288,3 +288,71 @@ class TestSearchAndFuse:
         assert "订单" in search_terms
         assert "order" in search_terms
         assert len(context.code_snippets) == 1
+
+
+class TestDebugSearch:
+    def test_debug_search_returns_trace_and_context(self, searcher):
+        repo_id = uuid4()
+        hit = _make_hit()
+        searcher._search_and_fuse = MagicMock(return_value=[hit])
+        searcher._infer_file_role = MagicMock(return_value="service")
+
+        context, trace = searcher.debug_search("订单创建流程", repo_id=repo_id, limit=20)
+
+        assert trace is not None
+        assert "expanded_terms" in trace.query_analysis
+        assert context.query == "订单创建流程"
+        assert len(context.code_snippets) == 1
+
+    def test_disabled_paths_are_excluded_from_retrieval(self, searcher):
+        repo_id = uuid4()
+        hit = _make_hit()
+        searcher._vector_search = MagicMock(return_value=[hit])
+        searcher._symbol_search = MagicMock(return_value=[hit])
+        searcher._bm25_search = MagicMock(return_value=[hit])
+        searcher._sparse_search = MagicMock(return_value=[hit])
+        searcher._graph_search = MagicMock(return_value=[])
+
+        with patch("services.searcher.CodeReranker") as mock_code_reranker_cls, \
+             patch("services.searcher.get_m3_reranker") as mock_get_m3_reranker:
+            mock_code_reranker_cls.return_value.rerank.return_value = []
+            mock_get_m3_reranker.return_value.rerank.return_value = []
+
+            trace = SearchTrace()
+            searcher._search_and_fuse(
+                "订单创建流程", repo_id, 20,
+                path_overrides={"enabled": {"vector", "symbol"}},
+                trace=trace,
+            )
+
+        assert searcher._bm25_search.call_count == 0
+        assert searcher._sparse_search.call_count == 0
+        assert searcher._graph_search.call_count == 0
+
+        # Trace should include all five paths so UI can show disabled ones.
+        path_names = {p.name for p in trace.paths}
+        assert path_names == {"vector", "symbol", "bm25", "sparse", "graph"}
+        enabled_names = {p.name for p in trace.paths if p.enabled}
+        assert enabled_names == {"vector", "symbol"}
+
+    def test_top_k_override_propagates_to_paths(self, searcher):
+        repo_id = uuid4()
+        hit = _make_hit()
+        searcher._vector_search = MagicMock(return_value=[])
+        searcher._symbol_search = MagicMock(return_value=[])
+        searcher._bm25_search = MagicMock(return_value=[])
+        searcher._sparse_search = MagicMock(return_value=[])
+        searcher._graph_search = MagicMock(return_value=[])
+
+        with patch("services.searcher.CodeReranker") as mock_code_reranker_cls, \
+             patch("services.searcher.get_m3_reranker") as mock_get_m3_reranker:
+            mock_code_reranker_cls.return_value.rerank.return_value = []
+            mock_get_m3_reranker.return_value.rerank.return_value = []
+
+            searcher._search_and_fuse(
+                "订单", repo_id, 10,
+                path_overrides={"top_k": {"vector": 7, "bm25": 13}},
+            )
+
+        assert searcher._vector_search.call_args[1]["top_k"] == 7
+        assert searcher._bm25_search.call_args[1]["top_k"] == 13

@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
 from sqlalchemy import text
@@ -53,6 +53,128 @@ class _Hit:
     symbol_id: Optional[UUID] = None
     symbol_name: Optional[str] = None
     rrf_score: float = 0.0
+
+
+@dataclass
+class SearchPathSnapshot:
+    """A single retrieval path's intermediate results for debugging."""
+
+    name: str
+    enabled: bool
+    top_k: int
+    latency_ms: int
+    hit_count: int
+    hits: List[Dict[str, Any]]
+
+
+@dataclass
+class SearchTrace:
+    """Container for the full retrieval pipeline trace.
+
+    Passed through :meth:`Searcher._search_and_fuse`; when ``None`` the
+    pipeline behaves exactly like before.
+    """
+
+    query_analysis: Dict[str, Any] = field(default_factory=dict)
+    paths: List[SearchPathSnapshot] = field(default_factory=list)
+    fusion: Dict[str, Any] = field(default_factory=dict)
+    rerank: Dict[str, Any] = field(default_factory=dict)
+    final_context: Optional[Any] = None
+
+    def add_path(
+        self,
+        name: str,
+        enabled: bool,
+        top_k: int,
+        latency_ms: int,
+        hits: List[_Hit],
+    ) -> None:
+        self.paths.append(
+            SearchPathSnapshot(
+                name=name,
+                enabled=enabled,
+                top_k=top_k,
+                latency_ms=latency_ms,
+                hit_count=len(hits),
+                hits=[self._hit_to_debug_dict(h, name) for h in hits],
+            )
+        )
+
+    @staticmethod
+    def _hit_to_debug_dict(hit: _Hit, source_name: str) -> Dict[str, Any]:
+        score_attr = f"{source_name}_score"
+        score = getattr(hit, score_attr, 0.0) if source_name != "symbol" else hit.symbol_score
+        if source_name == "vector":
+            score = hit.vector_score
+        elif source_name == "sparse":
+            score = hit.sparse_score
+        elif source_name == "symbol":
+            score = hit.symbol_score
+        elif source_name == "bm25":
+            score = hit.bm25_score
+        elif source_name == "graph":
+            score = hit.graph_score
+        return {
+            "id": str(hit.result_id),
+            "file_path": hit.file_path,
+            "line": hit.line,
+            "language": hit.language,
+            "content": hit.content[:400],
+            "score": round(float(score), 4),
+            "symbol_name": hit.symbol_name,
+            "sources": sorted(hit.sources),
+        }
+
+    def set_fusion(self, rrf_k: int, hits: List[_Hit]) -> None:
+        self.fusion = {
+            "rrf_k": rrf_k,
+            "hit_count": len(hits),
+            "hits": [
+                {
+                    "id": str(h.result_id),
+                    "file_path": h.file_path,
+                    "line": h.line,
+                    "rrf_score": round(float(h.rrf_score), 4),
+                    "vector_score": round(float(h.vector_score), 4),
+                    "symbol_score": round(float(h.symbol_score), 4),
+                    "bm25_score": round(float(h.bm25_score), 4),
+                    "sparse_score": round(float(h.sparse_score), 4),
+                    "graph_score": round(float(h.graph_score), 4),
+                    "sources": sorted(h.sources),
+                }
+                for h in hits
+            ],
+        }
+
+    def set_rerank(
+        self,
+        code_reranker_input_count: int,
+        code_reranker_output: List[SearchResultItem],
+        m3_reranker_input_count: int,
+        m3_reranker_output: List[SearchResultItem],
+    ) -> None:
+        self.rerank = {
+            "code_reranker": {
+                "input_count": code_reranker_input_count,
+                "output_count": len(code_reranker_output),
+                "output": [self._schema_to_debug_dict(s) for s in code_reranker_output],
+            },
+            "m3_reranker": {
+                "input_count": m3_reranker_input_count,
+                "output_count": len(m3_reranker_output),
+                "output": [self._schema_to_debug_dict(s) for s in m3_reranker_output],
+            },
+        }
+
+    @staticmethod
+    def _schema_to_debug_dict(item: SearchResultItem) -> Dict[str, Any]:
+        return {
+            "id": str(item.id),
+            "file_path": item.file_path,
+            "line": item.line,
+            "score": round(float(item.score), 4),
+            "score_breakdown": item.score_breakdown,
+        }
 
 
 def _combined_score(hit: _Hit) -> float:
@@ -179,6 +301,8 @@ class Searcher:
         repo_id: Optional[UUID] = None,
         limit: int = 20,
         intent=None,
+        path_overrides: Optional[Dict[str, Any]] = None,
+        trace: Optional[SearchTrace] = None,
     ) -> "CodeContext":
         from schemas import CallChain, CodeContext, FileSummary, SymbolEntry
 
@@ -197,7 +321,12 @@ class Searcher:
         logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
 
         strategy = intent.search_strategy
-        hits = self._search_and_fuse(query, repo_id, limit, search_terms=intent.expanded_terms)
+        hits = self._search_and_fuse(
+            query, repo_id, limit,
+            search_terms=intent.expanded_terms,
+            path_overrides=path_overrides,
+            trace=trace,
+        )
 
         entry_points = []
         call_chain = None
@@ -496,6 +625,8 @@ class Searcher:
         repo_id: Optional[UUID],
         limit: int,
         search_terms: Optional[List[str]] = None,
+        path_overrides: Optional[Dict[str, Any]] = None,
+        trace: Optional[SearchTrace] = None,
     ) -> List[_Hit]:
         """Unified retrieval pipeline: vector + sparse + symbol + bm25 + graph,
         then RRF fusion and two-stage reranking.
@@ -507,37 +638,87 @@ class Searcher:
         ``search_terms`` carries the expanded query terms (e.g. SEMANTIC_MAP
         English mappings such as 订单 -> order). They feed the symbol and
         BM25 paths so Chinese queries can match English code identifiers.
+
+        ``path_overrides`` lets debug callers tune the pipeline per request
+        without changing global constants. Expected keys: ``enabled`` (set of
+        path names), ``top_k`` (path -> int). When absent all paths default
+        to enabled with their standard top_k.
+
+        ``trace`` collects intermediate results for the debug endpoint. When
+        ``None`` the pipeline is byte-for-byte identical to the original path.
         """
         self.db.execute(text("SET hnsw.ef_search = 128"))
+
+        overrides = path_overrides or {}
+        enabled_paths: Set[str] = set(overrides.get("enabled", {
+            "vector", "sparse", "symbol", "bm25", "graph",
+        }))
+        top_k_overrides: Dict[str, int] = overrides.get("top_k", {})
+
+        def _top_k(name: str, default: int = 50) -> int:
+            return top_k_overrides.get(name, default)
+
+        def _run_path(name: str, runner) -> List[_Hit]:
+            """Execute one retrieval path, honouring enabled_paths and tracing."""
+            if name not in enabled_paths:
+                if trace is not None:
+                    trace.add_path(name, False, _top_k(name), 0, [])
+                return []
+            start = time.perf_counter()
+            try:
+                results = runner(_top_k(name))
+            except Exception as e:
+                logger.warning("%s search failed: %s", name, e)
+                results = []
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            if trace is not None:
+                trace.add_path(name, True, _top_k(name), latency_ms, results)
+            return results
 
         # Core retrieval paths: failures must propagate so the caller knows the
         # search could not be completed correctly.
         query_embedding = self.embedder.encode_query(query)
-        vector_results = self._vector_search(query_embedding, repo_id)
+        vector_results = _run_path(
+            "vector", lambda top_k: self._vector_search(query_embedding, repo_id, top_k=top_k)
+        )
 
-        symbol_results = self._symbol_search_multi(query, search_terms, repo_id)
+        symbol_results = _run_path(
+            "symbol", lambda top_k: self._symbol_search_multi(query, search_terms, repo_id, top_k=top_k)
+        )
+
         is_chinese = bool(re.search(r"[\u4e00-\u9fff]", query))
         bm25_concepts = self.intent_analyzer._extract_concepts(query, is_chinese)
         for term in search_terms or []:
             if term != query and term not in bm25_concepts:
                 bm25_concepts.append(term)
-        bm25_results = self._bm25_search(query, repo_id, concepts=bm25_concepts)
+        bm25_results = _run_path(
+            "bm25", lambda top_k: self._bm25_search(query, repo_id, top_k=top_k, concepts=bm25_concepts)
+        )
 
         # Sparse and graph search are supplementary sources. If they fail, the
         # search can still continue with the core results above.
-        sparse_results: List[_Hit] = []
-        try:
-            query_sparse = self.embedder.encode_query_sparse(query)
-            sparse_results = self._sparse_search(query_sparse, repo_id)
-        except Exception as e:
-            logger.warning("Sparse search skipped: %s", e)
+        def _sparse_runner(top_k: int) -> List[_Hit]:
+            try:
+                query_sparse = self.embedder.encode_query_sparse(query)
+            except Exception as e:
+                logger.warning("Sparse encoding failed: %s", e)
+                return []
+            if not query_sparse:
+                return []
+            return self._sparse_search(query_sparse, repo_id, top_k=top_k)
+
+        sparse_results = _run_path("sparse", _sparse_runner)
 
         graph_results: List[_Hit] = []
-        try:
-            if symbol_results:
-                graph_results = self._graph_search(symbol_results, repo_id)
-        except Exception as e:
-            logger.warning("Graph search skipped: %s", e)
+        if "graph" in enabled_paths and symbol_results:
+            try:
+                graph_results = _run_path(
+                    "graph", lambda top_k: self._graph_search(symbol_results, repo_id, top_k=top_k)
+                )
+            except Exception as e:
+                logger.warning("Graph search skipped: %s", e)
+        elif trace is not None:
+            trace.add_path("graph", False, _top_k("graph"), 0, [])
 
         results_by_source = {
             "vector": vector_results,
@@ -547,12 +728,22 @@ class Searcher:
             "graph": graph_results,
         }
         hits = _rrf_fuse(results_by_source)
+        if trace is not None:
+            trace.set_fusion(RRF_K, hits)
 
         schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
         reranked = CodeReranker().rerank(query, schema_results)
 
         m3_reranker = get_m3_reranker()
         final_schemas = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
+
+        if trace is not None:
+            trace.set_rerank(
+                code_reranker_input_count=len(schema_results),
+                code_reranker_output=reranked,
+                m3_reranker_input_count=len(reranked),
+                m3_reranker_output=final_schemas,
+            )
 
         # Map reranked schemas back to _Hit objects so callers can still
         # access hit.symbol_id and other internal metadata.
@@ -563,6 +754,56 @@ class Searcher:
             if hit:
                 final_hits.append(hit)
         return final_hits
+
+    def debug_search(
+        self,
+        query: str,
+        repo_id: UUID,
+        limit: int = 20,
+        path_overrides: Optional[Dict[str, Any]] = None,
+        enable_llm_expand: bool = False,
+    ) -> Tuple["CodeContext", SearchTrace]:
+        """Run the full search pipeline and return both the final context
+        and a complete trace of every retrieval / fusion / rerank stage.
+
+        This is intended for the retrieval testing center UI. It reuses
+        :meth:`search_with_context` so the final output is identical to what
+        the MCP / chat endpoints receive.
+        """
+        llm_settings = get_effective_settings(self.db, repo_id)
+        use_llm_expand = enable_llm_expand and llm_settings.get(
+            "enable_query_llm_expand", True
+        )
+        llm_router = LLMRouter(self.db) if use_llm_expand else None
+
+        intent = self.intent_analyzer.analyze(
+            query,
+            repo_id=str(repo_id),
+            db=self.db,
+            enable_llm_expand=use_llm_expand,
+            llm_router=llm_router,
+        )
+
+        trace = SearchTrace()
+        trace.query_analysis = {
+            "intent_type": intent.intent_type,
+            "is_chinese": bool(re.search(r"[\u4e00-\u9fff]", query)),
+            "concepts": self.intent_analyzer._extract_concepts(
+                query, bool(re.search(r"[\u4e00-\u9fff]", query))
+            ),
+            "expanded_terms": intent.expanded_terms,
+        }
+
+        context = self.search_with_context(
+            query=query,
+            repo_id=repo_id,
+            limit=limit,
+            intent=intent,
+            path_overrides=path_overrides,
+            trace=trace,
+        )
+        trace.final_context = context
+        return context, trace
 
     def hybrid_search(
         self,

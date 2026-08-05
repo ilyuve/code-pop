@@ -14,6 +14,8 @@ from schemas import (
     BenchmarkResponse,
     BenchmarkSummary,
     CodeContextResponse,
+    DebugSearchRequest,
+    DebugSearchResponse,
     ImpactRequest,
     ImpactResponse,
     RouteSearchRequest,
@@ -76,6 +78,59 @@ def search(query: SearchQuery, db: Session = Depends(get_db)) -> List[SearchResu
 
     _record_history(db, query.query, query.repo_id, query.mode, len(results), latency_ms, results)
     return results
+
+
+@router.post("/debug", response_model=DebugSearchResponse)
+def debug_search(
+    request: DebugSearchRequest,
+    db: Session = Depends(get_db),
+) -> DebugSearchResponse:
+    """Debug endpoint for the retrieval testing center.
+
+    Returns the full pipeline trace: query analysis, per-path results,
+    RRF fusion, rerank stages, and the final CodeContext that would be
+    sent to the LLM. Does NOT record to search history.
+    """
+    if request.limit > settings.search_max_limit:
+        raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
+
+    start = time.perf_counter()
+    searcher = Searcher(db)
+
+    path_overrides = None
+    if request.path_overrides:
+        path_overrides = {
+            "enabled": set(request.path_overrides.enabled) if request.path_overrides.enabled else None,
+            "top_k": request.path_overrides.top_k or {},
+        }
+
+    context, trace = searcher.debug_search(
+        query=request.query,
+        repo_id=request.repo_id,
+        limit=request.limit,
+        path_overrides=path_overrides,
+        enable_llm_expand=request.enable_llm_expand,
+    )
+    total_latency_ms = int((time.perf_counter() - start) * 1000)
+
+    def _snapshot(snapshot):
+        return {
+            "name": snapshot.name,
+            "enabled": snapshot.enabled,
+            "top_k": snapshot.top_k,
+            "latency_ms": snapshot.latency_ms,
+            "hit_count": snapshot.hit_count,
+            "hits": snapshot.hits,
+        }
+
+    return DebugSearchResponse(
+        query_analysis=trace.query_analysis,
+        paths=[_snapshot(p) for p in trace.paths],
+        fusion=trace.fusion,
+        rerank=trace.rerank,
+        final_context=context,
+        total_latency_ms=total_latency_ms,
+    )
 
 
 @router.post("/symbol", response_model=List[SearchResultItem])

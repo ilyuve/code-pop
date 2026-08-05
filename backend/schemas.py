@@ -218,7 +218,60 @@ class CodeContext(BaseModel):
     code_snippets: List[SearchResultItem] = []
     total_files: int = 0
     total_symbols: int = 0
-    search_latency_ms: int = 0
+
+
+class DebugPathOverrides(BaseModel):
+    enabled: Optional[List[str]] = Field(
+        default=None,
+        description="Paths to run; defaults to all five paths when omitted.",
+    )
+    top_k: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Per-path top_k overrides, e.g. {'vector': 30}.",
+    )
+
+
+class DebugSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    repo_id: UUID
+    limit: int = Field(default=20, ge=1, le=100)
+    path_overrides: Optional[DebugPathOverrides] = None
+    enable_llm_expand: bool = False
+
+
+class DebugPathSnapshot(BaseModel):
+    name: str
+    enabled: bool
+    top_k: int
+    latency_ms: int
+    hit_count: int
+    hits: List[Dict[str, Any]]
+
+
+class DebugFusionSnapshot(BaseModel):
+    rrf_k: int
+    hit_count: int
+    hits: List[Dict[str, Any]]
+
+
+class DebugRerankStage(BaseModel):
+    input_count: int
+    output_count: int
+    output: List[Dict[str, Any]]
+
+
+class DebugRerankSnapshot(BaseModel):
+    code_reranker: DebugRerankStage
+    m3_reranker: DebugRerankStage
+
+
+class DebugSearchResponse(BaseModel):
+    query_analysis: Dict[str, Any]
+    paths: List[DebugPathSnapshot]
+    fusion: DebugFusionSnapshot
+    rerank: DebugRerankSnapshot
+    final_context: CodeContext
+    total_latency_ms: int
 
 
 class CodeContextResponse(BaseModel):

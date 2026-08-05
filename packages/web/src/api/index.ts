@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext, LLMCostEstimate } from '../types';
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext, LLMCostEstimate, DebugSearchResponse, DebugPathOverrides } from '../types';
 
 const apiClient = axios.create({
   baseURL: '/api',
@@ -131,6 +131,25 @@ export const searchContext = async (query: string, repoId?: string, limit: numbe
   context.code_snippets = context.code_snippets.map((snippet: any) => mapSearchResult(snippet));
   
   return context;
+};
+
+export const debugSearch = async (
+  query: string,
+  repoId: string,
+  limit: number = 20,
+  pathOverrides?: DebugPathOverrides,
+): Promise<DebugSearchResponse> => {
+  const response = await apiClient.post('/search/debug', {
+    query,
+    repo_id: repoId,
+    limit,
+    path_overrides: pathOverrides,
+  });
+  const data = response.data;
+  data.final_context.code_snippets = (data.final_context.code_snippets || []).map(mapSearchResult);
+  data.rerank.code_reranker.output = (data.rerank.code_reranker.output || []).map(mapSearchResult);
+  data.rerank.m3_reranker.output = (data.rerank.m3_reranker.output || []).map(mapSearchResult);
+  return data;
 };
 
 export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => {
