@@ -80,7 +80,7 @@ class QueryIntentAnalyzer:
         "用户": ["user", "account", "member", "customer", "client"],
         "数据库": ["database", "db", "sql", "query", "repository", "dao", "mapper"],
         "缓存": ["cache", "redis", "memcached", "cached", "lru"],
-        "搜索": ["search", "query", "find", "lookup", "index", "elasticsearch"],
+        "搜索": ["search", "query", "find"],
         "日志": ["log", "logging", "logger", "trace", "audit"],
         "配置": ["config", "configuration", "settings", "properties", "env", "yaml"],
         "任务": ["task", "job", "cron", "schedule", "worker", "queue"],
@@ -105,6 +105,16 @@ class QueryIntentAnalyzer:
         "controller": ["handler", "endpoint", "api", "route"],
         "repository": ["dao", "mapper", "store", "data"],
         "config": ["configuration", "settings", "properties", "env"],
+    }
+
+    # Terms that should never be propagated to downstream search paths.
+    # These are either generic platform noise from the LLM or technologies
+    # not used by the current codebase.
+    EXPANSION_DENYLIST: Set[str] = {
+        "medium",
+        "elasticsearch",
+        "platform",
+        "system",
     }
 
     def analyze(
@@ -326,12 +336,12 @@ class QueryIntentAnalyzer:
         result: List[str] = []
         for term in ordered:
             key = term.lower() if term.isascii() else term
-            if key and key not in seen:
+            if key and key not in seen and key not in self.EXPANSION_DENYLIST:
                 seen.add(key)
                 result.append(term)
 
         # Hard cap to avoid overwhelming downstream pipelines.
-        max_terms = 20
+        max_terms = 12
         return result[:max_terms]
 
     def _expand_with_llm(
@@ -340,9 +350,14 @@ class QueryIntentAnalyzer:
         """Ask LLM for synonyms and English code keywords for the given query."""
         prompt = (
             "You are a code search assistant. Given a Chinese user query about code, "
-            "return a JSON object with keys 'synonyms' (list of Chinese synonyms) and "
-            "'code_terms' (list of likely English code identifiers/keywords). "
-            "Keep each list short and relevant.\n\n"
+            "return a JSON object with:\n"
+            "- 'synonyms': Chinese synonyms that preserve the original intent\n"
+            "- 'code_terms': English identifiers/keywords likely to appear in the codebase\n\n"
+            "Rules:\n"
+            "1. Only return terms clearly related to the query.\n"
+            "2. Avoid generic words like 'medium', 'platform', 'system' unless explicitly mentioned.\n"
+            "3. Prefer concrete code terms (function names, class names, API names) over abstract concepts.\n"
+            "4. Keep each list short (<= 5 items).\n\n"
             f"Query: {query}\n"
             f"Concepts: {', '.join(concepts)}\n\n"
             "Return JSON only, no markdown."

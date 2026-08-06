@@ -89,7 +89,31 @@ class TestSynonymExpansion:
     def test_expanded_terms_are_capped(self):
         analyzer = QueryIntentAnalyzer()
         intent = analyzer.analyze("订单创建流程")
-        assert len(intent.expanded_terms) <= 20
+        assert len(intent.expanded_terms) <= 12
+
+    def test_semantic_map_does_not_expand_elasticsearch(self):
+        analyzer = QueryIntentAnalyzer()
+        intent = analyzer.analyze("中文搜索是怎么实现的")
+        assert "elasticsearch" not in intent.expanded_terms
+        assert "search" in intent.expanded_terms
+
+    def test_denylist_filters_noise_terms(self):
+        analyzer = QueryIntentAnalyzer()
+        # Directly drive _expand_synonyms with domain synonyms containing both
+        # noise and valid terms, so the test is independent of the 12-term cap
+        # and LLM availability.
+        terms = analyzer._expand_synonyms(
+            concepts=["测试"],
+            query="测试",
+            is_chinese=True,
+            domain_synonyms={"测试": ["medium", "platform", "system", "valid_term"]},
+            enable_llm_expand=False,
+            llm_router=None,
+        )
+        assert "medium" not in terms
+        assert "platform" not in terms
+        assert "system" not in terms
+        assert "valid_term" in terms
 
 
 class TestSearchStrategy:
