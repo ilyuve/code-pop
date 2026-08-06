@@ -1104,7 +1104,7 @@ class Searcher:
                 file_id=emb.file_id,
                 repo_id=emb.repo_id,
                 repo_name=emb.repo.name if emb.repo else "",
-                file_path=emb.file_path,
+                file_path=emb.file.path if emb.file else "",
                 language=emb.file.language if emb.file else "",
                 content=emb.content,
                 line=emb.start_line,

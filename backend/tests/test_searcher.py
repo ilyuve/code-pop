@@ -356,3 +356,37 @@ class TestDebugSearch:
 
         assert searcher._vector_search.call_args[1]["top_k"] == 7
         assert searcher._bm25_search.call_args[1]["top_k"] == 13
+
+
+class TestSparseSearch:
+    def test_sparse_search_uses_file_path_from_embedding_file(self, searcher):
+        """_sparse_search must read file_path from emb.file.path, not emb.file_path."""
+        repo_id = uuid4()
+        embedding_id = uuid4()
+        file_id = uuid4()
+
+        file_mock = MagicMock()
+        file_mock.path = "src/order.py"
+        file_mock.language = "python"
+
+        emb = MagicMock()
+        emb.id = embedding_id
+        emb.file_id = file_id
+        emb.repo_id = repo_id
+        emb.repo = MagicMock(name="test-repo")
+        emb.file = file_mock
+        emb.content = "def create_order(): pass"
+        emb.start_line = 1
+
+        # First query returns the sparse token rows; second query returns embeddings.
+        query = searcher.db.query
+        query.return_value.filter.return_value.join.return_value.filter.return_value.all.return_value = [
+            MagicMock(embedding_id=embedding_id, token_id=1, weight=0.5),
+        ]
+        query.return_value.filter.return_value.all.return_value = [emb]
+
+        results = searcher._sparse_search({1: 0.8}, repo_id, top_k=10)
+
+        assert len(results) == 1
+        assert results[0].file_path == "src/order.py"
+        assert results[0].language == "python"
