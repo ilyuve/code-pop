@@ -1,5 +1,6 @@
 # Web framework
 fastapi==0.115.6
+starlette==0.41.3
 uvicorn[standard]==0.34.0
 python-multipart==0.0.18
 
@@ -27,15 +28,19 @@ tree-sitter-java==0.23.0
 tree-sitter-rust==0.23.0
 tree-sitter-cpp==0.23.0
 
-# MCP server SDK
-mcp>=1.9.0
+# Chinese word segmentation (required for Chinese query concept extraction)
+jieba==0.42.1
 
-# HTTP client (for webhooks / GitHub API)
+# MCP server SDK
+mcp==1.9.0
+
+# HTTP client (for webhooks / GitHub API / MCP SSE)
 httpx==0.28.0
 
 # Utilities
 python-dotenv==1.0.0
 numpy==2.1.0
+cryptography==42.0.8
 
 # Testing
 pytest==8.3.0

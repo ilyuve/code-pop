@@ -1,12 +1,15 @@
 """CodePop FastAPI application entry point."""
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 
 import sys
 from pathlib import Path
@@ -21,34 +24,68 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from api import repos, search, webhook, ws
+from api.admin import llm as admin_llm
 from config import settings
 from mcp_server.server import get_mcp_app, get_mcp_session_manager
 from database import SessionLocal, get_db
 from exceptions import CodePopException
 from models import RepoStatus, Repository
-from scripts.init_db import init_db
+from scripts.db.ensure_database import ensure_database
 from services.indexer import index_repo, shutdown_indexer
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
 
+class _TimezoneAwareJSONResponse(JSONResponse):
+    """Render naive UTC datetimes with explicit +00:00 offset.
+
+    The backend stores all timestamps as UTC (naive datetimes). Without an
+    offset, JavaScript's `new Date(isoString)` treats the value as local time.
+    Appending '+00:00' lets the browser convert it to the user's local timezone
+    automatically when using `toLocaleString()` / `toLocaleTimeString()`.
+    """
+
+    def render(self, content) -> bytes:
+        def _encode(obj):
+            if isinstance(obj, datetime):
+                # Naive datetime is assumed to be UTC; timezone-aware is kept as-is.
+                dt = obj.replace(tzinfo=timezone.utc) if obj.tzinfo is None else obj
+                return dt.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        encoded = jsonable_encoder(content, custom_encoder={datetime: _encode})
+        return json.dumps(encoded, ensure_ascii=False, default=_encode).encode("utf-8")
+
+
 def _init_db_sync() -> None:
     """Synchronous database initialization wrapper."""
-    init_db()
+    ensure_database()
 
 
 async def _recover_indexing_repos() -> None:
-    """Recover repos that were in indexing state when server crashed."""
+    """Recover repos that were in indexing state when the server restarts.
+
+    A server restart means any previous indexing process is gone, so we
+    unconditionally reset indexing repos to pending.  The heartbeat column is
+    cleared so stale timestamps from the previous run do not confuse future
+    checks.  Stale heartbeats are not treated as errors here because the user
+    can simply re-trigger indexing once the server is back.
+    """
     db = SessionLocal()
     try:
         indexing_repos = db.query(Repository).filter(
             Repository.status == RepoStatus.indexing.value
         ).all()
         if indexing_repos:
-            logger.info("Found %d repos in indexing state, resetting to pending...", len(indexing_repos))
+            logger.info(
+                "Found %d repos stuck in indexing state after restart, resetting to pending...",
+                len(indexing_repos),
+            )
             for repo in indexing_repos:
                 repo.status = RepoStatus.pending.value
+                repo.error_message = None
+                repo.indexing_heartbeat_at = None
             db.commit()
         else:
             logger.info("No repos to recover from indexing state")
@@ -57,20 +94,26 @@ async def _recover_indexing_repos() -> None:
 
 
 async def _warmup_models() -> None:
-    """Pre-load embedding model at startup to avoid cold-start latency."""
-    try:
-        from services.embedder import Embedder
-        embedder = Embedder()
-        _ = embedder.encode(["warmup"])
-        logger.info("Embedding model warmed up successfully")
-    except Exception as e:
-        logger.error("Failed to warm up embedding model: %s", e)
-        logger.error("Search will be unavailable until model is loaded.")
+    """Pre-load embedding model at startup to avoid cold-start latency.
+
+    The embedder intentionally has no degradation fallback: if the model cannot
+    be loaded, the service must fail fast rather than silently serve
+    meaningless pseudo-vectors.
+    """
+    from services.embedder import Embedder
+    embedder = Embedder()
+    _ = embedder.encode(["warmup"])
+    logger.info("Embedding model warmed up successfully")
 
 
-logger.info("Initializing database...")
-init_db()
-logger.info("CodePop backend ready")
+_is_test = "pytest" in sys.modules
+
+if not _is_test:
+    logger.info("Initializing database...")
+    ensure_database()
+    logger.info("CodePop backend ready")
+else:
+    logger.info("Running under pytest; skipping database initialization at import time")
 
 
 @asynccontextmanager
@@ -90,6 +133,7 @@ app = FastAPI(
     description="AI Agent oriented code retrieval infrastructure",
     version=settings.api_version,
     lifespan=lifespan,
+    default_response_class=_TimezoneAwareJSONResponse,
 )
 
 
@@ -119,6 +163,7 @@ app.include_router(repos.router)
 app.include_router(search.router)
 app.include_router(webhook.router)
 app.include_router(ws.router)
+app.include_router(admin_llm.router)
 
 mcp_app = get_mcp_app()
 app.mount("/mcp", mcp_app)
@@ -163,21 +208,18 @@ def health_deep(db: Session = Depends(get_db)) -> dict:
     try:
         from services.embedder import Embedder
         embedder = Embedder()
-        if embedder.model is not None:
-            checks["embedding_model"]["status"] = "ok"
-            checks["embedding_model"]["model_name"] = settings.embedding_model
-            checks["embedding_model"]["dim"] = settings.embedding_dim
-        else:
-            checks["embedding_model"]["status"] = "degraded"
-            checks["embedding_model"]["error"] = "Model not loaded"
+        _ = embedder.encode(["health-check"])
+        checks["embedding_model"]["status"] = "ok"
+        checks["embedding_model"]["model_name"] = settings.embedding_model
+        checks["embedding_model"]["dim"] = settings.embedding_dim
     except Exception as e:
         checks["embedding_model"]["status"] = "error"
         checks["embedding_model"]["error"] = str(e)
 
-    all_ok = all(c["status"] in ("ok", "degraded") for c in checks.values())
+    all_ok = all(c["status"] == "ok" for c in checks.values())
 
     return {
-        "status": "ok" if all_ok else "degraded",
+        "status": "ok" if all_ok else "error",
         "version": settings.api_version,
         "checks": checks,
     }
@@ -185,14 +227,9 @@ def health_deep(db: Session = Depends(get_db)) -> dict:
 
 @app.get("/test-db")
 def test_db():
-    import os
-    db_path = "./codepop.db"
-    exists = os.path.exists(db_path)
-    size = os.path.getsize(db_path) if exists else 0
-    
     try:
         db = SessionLocal()
         repos = db.query(Repository).all()
-        return {"count": len(repos), "db_exists": exists, "db_size": size}
+        return {"count": len(repos), "connected": True}
     except Exception as e:
-        return {"error": str(e), "db_exists": exists, "db_size": size}
+        return {"error": str(e), "connected": False}

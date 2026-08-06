@@ -35,8 +35,6 @@ interface AppStore {
   // WebSocket State
   wsStatus: WebSocketStatus;
   setWsStatus: (status: WebSocketStatus) => void;
-  wsUrl: string;
-  setWsUrl: (url: string) => void;
   realTimeUpdates: Record<string, unknown>;
   addRealTimeUpdate: (key: string, data: unknown) => void;
   clearRealTimeUpdates: () => void;
@@ -77,7 +75,6 @@ export const useStore = create<AppStore>()(
 
       // Settings State
       settings: {
-        apiEndpoint: 'http://localhost:8080/api',
         embeddingProvider: 'openai',
         theme: 'dark',
       },
@@ -93,8 +90,6 @@ export const useStore = create<AppStore>()(
       // WebSocket State
       wsStatus: 'disconnected',
       setWsStatus: (status) => set({ wsStatus: status }),
-      wsUrl: 'ws://localhost:8080/ws',
-      setWsUrl: (url) => set({ wsUrl: url }),
       realTimeUpdates: {},
       addRealTimeUpdate: (key, data) =>
         set((state) => ({
@@ -131,7 +126,6 @@ export const useStore = create<AppStore>()(
         settings: state.settings,
         recentSearches: state.recentSearches,
         sidebarOpen: state.sidebarOpen,
-        wsUrl: state.wsUrl,
       }),
     }
   )

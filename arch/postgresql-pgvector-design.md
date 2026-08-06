@@ -2425,7 +2425,7 @@ echo "✓ 部署脚本生成完成！"
 | 框架 | SwiftUI + UIKit | 原生性能 |
 | 架构 | MVVM + Combine | 响应式 |
 | 网络 | URLSession | 原生 HTTP |
-| 本地存储 | UserDefaults + SQLite | 轻量持久化 |
+| 本地存储 | UserDefaults | 轻量持久化 |
 | 发布 | App Store + DMG | 多渠道 |
 | 安装包 | Homebrew | `brew install codepop` |
 

@@ -22,13 +22,25 @@ export interface LogEntry {
   stage: string | null;
 }
 
-const STAGE_LABELS: Record<string, string> = {
+export const STAGE_LABELS: Record<string, string> = {
   git_sync: '代码同步',
   scan: '文件扫描',
   symbols: '符号解析',
   embeddings: '向量生成',
+  chinese_enrichment: '中文增强',
+  flow_labels: '流程标签',
   call_graph: '调用图构建',
 };
+
+export const STAGE_ORDER = [
+  'git_sync',
+  'scan',
+  'chinese_enrichment',
+  'symbols',
+  'embeddings',
+  'flow_labels',
+  'call_graph',
+];
 
 export interface RepoData {
   status: string;
@@ -107,11 +119,21 @@ export const useIndexing = (repoId: string, repo: RepoData | undefined) => {
     return STAGE_LABELS[stageProgress.stage] ?? stageProgress.stage;
   }, [stageProgress, isIndexing]);
 
+  const timing = useMemo(() => {
+    if (!isIndexing || !progressData) return null;
+    return {
+      elapsedSeconds: progressData.elapsed_seconds ?? null,
+      estimatedRemainingSeconds: progressData.estimated_remaining_seconds ?? null,
+      startedAt: progressData.indexing_started_at ?? null,
+    };
+  }, [isIndexing, progressData]);
+
   return {
     isIndexing,
     progress,
     stageProgress,
     currentStageLabel,
+    timing,
     error: repo?.errorMessage,
     logs: logs || [],
   };

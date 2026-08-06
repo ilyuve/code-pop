@@ -1,10 +1,17 @@
 """Pydantic request / response schemas."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+def _format_datetime(dt: datetime) -> str:
+    """Serialize naive UTC datetimes with explicit +00:00 offset."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 class RepoCreate(BaseModel):
@@ -28,6 +35,7 @@ class RepoResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class SearchQuery(BaseModel):
@@ -86,6 +94,7 @@ class SearchHistoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class BenchmarkCreate(BaseModel):
@@ -110,6 +119,7 @@ class BenchmarkResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class BenchmarkSummary(BaseModel):
@@ -151,6 +161,7 @@ class SearchHistoryRecentItem(BaseModel):
 
     class Config:
         from_attributes = True
+        json_encoders = {datetime: _format_datetime}
 
 
 class WebhookPayload(BaseModel):
@@ -174,6 +185,10 @@ class SymbolEntry(BaseModel):
     file_path: str
     line: int
     relevance_score: float = 0.0
+    layer: Optional[str] = None
+    module: Optional[str] = None
+    chinese_name: Optional[str] = None
+    io_description: Optional[str] = None
 
 
 class CallChain(BaseModel):
@@ -181,6 +196,7 @@ class CallChain(BaseModel):
     upstream: List[SymbolEntry] = []
     downstream: List[SymbolEntry] = []
     depth: int = 0
+    flow_summary: Optional[str] = None
 
 
 class FileRole(str):
@@ -208,14 +224,65 @@ class CodeContext(BaseModel):
     matched_concepts: List[str] = []
     entry_points: List[SymbolEntry] = []
     call_chain: Optional[CallChain] = None
+    flow_summary: Optional[str] = None
     related_files: List[FileSummary] = []
     code_snippets: List[SearchResultItem] = []
     total_files: int = 0
     total_symbols: int = 0
-    search_latency_ms: int = 0
-    degraded: bool = False
-    degradation_reason: Optional[str] = None
-    unavailable_sources: List[str] = []
+
+
+class DebugPathOverrides(BaseModel):
+    enabled: Optional[List[str]] = Field(
+        default=None,
+        description="Paths to run; defaults to all five paths when omitted.",
+    )
+    top_k: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Per-path top_k overrides, e.g. {'vector': 30}.",
+    )
+
+
+class DebugSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    repo_id: UUID
+    limit: int = Field(default=20, ge=1, le=100)
+    path_overrides: Optional[DebugPathOverrides] = None
+    enable_llm_expand: bool = False
+
+
+class DebugPathSnapshot(BaseModel):
+    name: str
+    enabled: bool
+    top_k: int
+    latency_ms: int
+    hit_count: int
+    hits: List[Dict[str, Any]]
+
+
+class DebugFusionSnapshot(BaseModel):
+    rrf_k: int
+    hit_count: int
+    hits: List[Dict[str, Any]]
+
+
+class DebugRerankStage(BaseModel):
+    input_count: int
+    output_count: int
+    output: List[Dict[str, Any]]
+
+
+class DebugRerankSnapshot(BaseModel):
+    code_reranker: DebugRerankStage
+    m3_reranker: DebugRerankStage
+
+
+class DebugSearchResponse(BaseModel):
+    query_analysis: Dict[str, Any]
+    paths: List[DebugPathSnapshot]
+    fusion: DebugFusionSnapshot
+    rerank: DebugRerankSnapshot
+    final_context: CodeContext
+    total_latency_ms: int
 
 
 class CodeContextResponse(BaseModel):

@@ -144,12 +144,6 @@ docker run -d \
   ankane/pgvector:pg16
 ```
 
-### SQLite（开发/测试）
-```bash
-# 直接使用，无需安装数据库
-DATABASE_URL=sqlite:./codepop.db pnpm start
-```
-
 ### 连接现有数据库
 ```bash
 # 在 .env 中设置

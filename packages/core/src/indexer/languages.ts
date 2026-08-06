@@ -122,7 +122,6 @@ export const SKIP_BINARY_EXTENSIONS = new Set([
   '.mp3', '.mp4', '.wav', '.avi', '.mov', '.wmv',
   '.ttf', '.otf', '.woff', '.woff2', '.eot',
   '.exe', '.dll', '.so', '.dylib', '.o', '.obj',
-  '.db', '.sqlite', '.sqlite3',
   '.env', '.env.local', '.env.production',
 ]);
 

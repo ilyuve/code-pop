@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     api_version: str = "0.2.0"
 
     # Database
-    database_url: str = "sqlite:///./codepop.db"
+    database_url: str = "postgresql://postgres:codepop123@localhost:5432/codepop"
 
     # Repositories storage
     repos_dir: Path = Path("./repos").resolve()

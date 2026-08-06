@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import logging
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal
-from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, SparseEmbedding, Symbol
+from models import CallGraphEdge, CodeFile, Embedding, EmbeddingEnrichment, FrameworkRoute, IndexingLog, IndexingProgress, RepoStatus, Repository, SparseEmbedding, Symbol
 from services.embedder import Embedder
 from services.degradation_tracker import get_degradation_tracker
 from services.notifier import notifier
@@ -28,6 +29,16 @@ from services.parser import (
 )
 from services.router_parser import RouterParser
 from services.repo_sync import clone_or_pull
+from services.chinese_enricher import (
+    EnrichmentResult,
+    aggregate_domain_synonyms,
+    enrich_chunk,
+    enrich_symbol_flow,
+    save_embedding_enrichment,
+    save_symbol_flow_label,
+)
+from services.llm_router import LLMRouter
+from services.llm_settings_service import get_effective_settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +49,15 @@ _index_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indexer-
 _active_indexing_tasks: Dict[str, asyncio.Future] = {}
 _indexing_locks: Dict[str, asyncio.Lock] = {}
 
+# Cancellation signals for synchronous indexing threads.
+_indexing_cancel_events: Dict[str, threading.Event] = {}
+
 # Store indexing logs per repository.
 _indexing_logs: Dict[str, List[Dict[str, Any]]] = {}
+
+
+class IndexingCancelledError(Exception):
+    """Raised when the user cancels an indexing task."""
 
 
 def _get_indexing_lock(repo_id: str) -> asyncio.Lock:
@@ -49,19 +67,51 @@ def _get_indexing_lock(repo_id: str) -> asyncio.Lock:
     return _indexing_locks[repo_id]
 
 
+def _get_cancel_event(repo_id: str) -> threading.Event:
+    """Get or create a cancellation event for a repository."""
+    if repo_id not in _indexing_cancel_events:
+        _indexing_cancel_events[repo_id] = threading.Event()
+    return _indexing_cancel_events[repo_id]
+
+
+def _is_cancelled(repo_id: str) -> bool:
+    """Return True if the indexing task for repo_id has been cancelled."""
+    event = _indexing_cancel_events.get(repo_id)
+    return event.is_set() if event else False
+
+
+def _check_cancelled(repo_id: str) -> None:
+    """Raise IndexingCancelledError if the repo indexing was cancelled."""
+    if _is_cancelled(repo_id):
+        raise IndexingCancelledError(f"Indexing cancelled for repository {repo_id}")
+
+
 def _cancel_indexing(repo_id: str) -> bool:
-    """Cancel an ongoing indexing task for a repository."""
+    """Cancel an ongoing indexing task for a repository.
+
+    Sets a threading event that the synchronous indexing thread polls at stage
+    boundaries. Also cancels the asyncio Future for completeness.
+    """
+    cancelled = False
+    event = _get_cancel_event(repo_id)
+    if not event.is_set():
+        event.set()
+        cancelled = True
+
     task = _active_indexing_tasks.get(repo_id)
     if task and not task.done():
         task.cancel()
-        return True
-    return False
+        cancelled = True
+
+    return cancelled
 
 
 def _clear_indexing_state(repo_id: str) -> None:
     """Clean up indexing state for a repository."""
     if repo_id in _active_indexing_tasks:
         del _active_indexing_tasks[repo_id]
+    if repo_id in _indexing_cancel_events:
+        del _indexing_cancel_events[repo_id]
 
 
 def _get_indexing_logs(repo_id: str) -> List[Dict[str, Any]]:
@@ -80,7 +130,7 @@ def _add_log(db: Optional[Session], repo_id: str, level: str, message: str, stag
     if repo_id not in _indexing_logs:
         _indexing_logs[repo_id] = []
     log_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.utcnow(),
         "level": level,
         "message": message,
         "stage": stage,
@@ -203,8 +253,8 @@ def _index_file(
     repo_id: UUID,
     repo_path: Path,
     file_path: Path,
-) -> Optional[Tuple[CodeFile, ParseResult]]:
-    """Index a single source file with degradation fallback. Returns inserted CodeFile and parse result."""
+) -> Optional[Tuple[CodeFile, ParseResult, str]]:
+    """Index a single source file with degradation fallback. Returns inserted CodeFile, parse result and raw content."""
     rel_path = str(file_path.relative_to(repo_path))
 
     if should_skip_path(rel_path):
@@ -274,12 +324,28 @@ def _index_file(
             and db.query(Embedding.id).filter(Embedding.file_id == existing.id).first() is not None
         )
         if has_children:
-            print(f"[INDEXER] unchanged {rel_path}", flush=True)
-            return None
-        print(
-            f"[INDEXER] hash match but missing children for {rel_path}, re-indexing",
-            flush=True,
-        )
+            # Even with symbols/embeddings, a forced re-index may need to
+            # backfill Chinese semantic enrichment data if it was skipped
+            # previously (e.g. LLM provider not configured).
+            has_enrichment = (
+                db.query(EmbeddingEnrichment.id)
+                .join(Embedding, EmbeddingEnrichment.embedding_id == Embedding.id)
+                .filter(Embedding.file_id == existing.id)
+                .first()
+                is not None
+            )
+            if has_enrichment:
+                print(f"[INDEXER] unchanged {rel_path}", flush=True)
+                return None
+            print(
+                f"[INDEXER] hash match but missing enrichment for {rel_path}, re-indexing",
+                flush=True,
+            )
+        else:
+            print(
+                f"[INDEXER] hash match but missing children for {rel_path}, re-indexing",
+                flush=True,
+            )
         db.delete(existing)
         db.flush()
     elif existing:
@@ -299,7 +365,21 @@ def _index_file(
     db.flush()  # obtain code_file.id
     print(f"[INDEXER] inserted {rel_path} symbols={len(parsed.symbols)} chunks={len(parsed.chunks)}", flush=True)
 
-    return code_file, parsed
+    return code_file, parsed, content
+
+
+def _build_enriched_text(content: str, enrichment: Optional[EnrichmentResult]) -> str:
+    """Prepend Chinese summary and keywords to chunk content for embedding."""
+    if not enrichment:
+        return content
+    parts = []
+    if enrichment.chinese_summary:
+        parts.append(f"【中文摘要】{enrichment.chinese_summary}")
+    if enrichment.keywords:
+        parts.append(f"【关键词】{', '.join(enrichment.keywords)}")
+    if parts:
+        return "\n".join(parts) + "\n\n" + content
+    return content
 
 
 def _bulk_insert_symbols_and_embeddings(
@@ -308,6 +388,9 @@ def _bulk_insert_symbols_and_embeddings(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
+    enrichment_provider_id: Optional[UUID] = None,
+    enrichment_model_name: str = "unknown",
 ) -> None:
     """Embed chunks and bulk insert symbols + embeddings for parsed files."""
     logger.info(
@@ -358,6 +441,7 @@ def _bulk_insert_symbols_and_embeddings(
             )
     else:
         for i in range(0, total_symbols, batch_size):
+            _check_cancelled(repo_id_str)
             batch = symbol_mappings[i : i + batch_size]
             db.bulk_insert_mappings(Symbol, batch)
             db.flush()
@@ -380,14 +464,22 @@ def _bulk_insert_symbols_and_embeddings(
             )
 
     # ---- Stage 3: vector generation (55% -> 80%) ----
+    import hashlib
+
     embedding_mappings: List[Dict[str, Any]] = []
     texts_to_embed: List[str] = []
-    meta: List[Tuple[UUID, int, int, int, int]] = []  # (file_id, chunk_index, start_line, end_line, token_count)
+    original_contents: List[str] = []
+    meta: List[Tuple[UUID, int, int, int, int, str]] = []  # (file_id, chunk_index, start_line, end_line, token_count, chunk_hash)
+    chunk_hashes: List[str] = []
 
     for code_file, parsed in file_records:
         for idx, chunk in enumerate(parsed.chunks):
-            texts_to_embed.append(chunk.content)
-            meta.append((code_file.id, idx, chunk.start_line, chunk.end_line, len(chunk.content.split())))
+            chunk_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+            enrichment = chunk_enrichments.get(chunk_hash) if chunk_enrichments else None
+            texts_to_embed.append(_build_enriched_text(chunk.content, enrichment))
+            original_contents.append(chunk.content)
+            meta.append((code_file.id, idx, chunk.start_line, chunk.end_line, len(chunk.content.split()), chunk_hash))
+            chunk_hashes.append(chunk_hash)
 
     total_chunks = len(texts_to_embed)
     logger.info("Encoding %d chunks", total_chunks)
@@ -430,6 +522,7 @@ def _bulk_insert_symbols_and_embeddings(
     vectors: List[Any] = []
 
     for i in range(0, total_chunks, encode_batch_size):
+        _check_cancelled(repo_id_str)
         try:
             import psutil
             available_mb = psutil.virtual_memory().available / (1024 * 1024)
@@ -475,7 +568,7 @@ def _bulk_insert_symbols_and_embeddings(
     sparse_embeddings_data: List[Dict[str, Any]] = []
 
     for text_idx, (vector, mapping_meta) in enumerate(zip(vectors, meta)):
-        file_id, chunk_index, start_line, end_line, token_count = mapping_meta
+        file_id, chunk_index, start_line, end_line, token_count, chunk_hash = mapping_meta
         embedding_mappings.append(
             {
                 "file_id": file_id,
@@ -483,7 +576,7 @@ def _bulk_insert_symbols_and_embeddings(
                 "chunk_index": chunk_index,
                 "start_line": start_line,
                 "end_line": end_line,
-                "content": texts_to_embed[text_idx],
+                "content": original_contents[text_idx],
                 "embedding": vector,
                 "token_count": token_count,
             }
@@ -531,6 +624,23 @@ def _bulk_insert_symbols_and_embeddings(
             db=db,
         )
 
+    # Persist enrichments now that embeddings have IDs.
+    if chunk_enrichments:
+        embedding_meta = {
+            (emb.file_id, emb.chunk_index): emb.id
+            for emb in db.query(Embedding).filter(Embedding.repo_id == repo_id).all()
+        }
+        for text_idx, mapping_meta in enumerate(meta):
+            file_id, chunk_index, _, _, _, chunk_hash = mapping_meta
+            enrichment = chunk_enrichments.get(chunk_hash)
+            embedding_id = embedding_meta.get((file_id, chunk_index))
+            if enrichment and embedding_id:
+                save_embedding_enrichment(
+                    db, embedding_id, chunk_hash, enrichment,
+                    enrichment_model_name, provider_id=enrichment_provider_id,
+                )
+        db.commit()
+
     _notify(
         loop,
         repo_id_str,
@@ -556,7 +666,7 @@ def _bulk_insert_symbols_and_embeddings(
     
     for text_idx, sparse_vector in enumerate(sparse_vectors):
         if sparse_vector:
-            file_id, chunk_index, _, _, _ = meta[text_idx]
+            file_id, chunk_index = meta[text_idx][0], meta[text_idx][1]
             embedding_id = embedding_meta.get((file_id, chunk_index))
             if embedding_id:
                 for token_id, weight in sparse_vector.items():
@@ -609,6 +719,280 @@ def _bulk_insert_symbols_and_embeddings(
     )
 
 
+def _load_cached_enrichments(db: Session, chunk_hashes: List[str]) -> Dict[str, EnrichmentResult]:
+    """Load existing enrichment results by chunk content hash for deduplication."""
+    if not chunk_hashes:
+        return {}
+    unique_hashes = list(set(chunk_hashes))
+    rows = (
+        db.query(EmbeddingEnrichment)
+        .filter(EmbeddingEnrichment.content_hash.in_(unique_hashes))
+        .all()
+    )
+    cached: Dict[str, EnrichmentResult] = {}
+    for row in rows:
+        if not row.content_hash or row.content_hash in cached:
+            continue
+        cached[row.content_hash] = EnrichmentResult(
+            chinese_summary=row.chinese_summary,
+            keywords=json.loads(row.keywords) if row.keywords else [],
+            vertical_layer=row.vertical_layer,
+            horizontal_module=row.horizontal_module,
+            synonyms=json.loads(row.synonyms) if row.synonyms else {},
+        )
+    return cached
+
+
+async def _enrich_chunks_for_indexing_async(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+) -> Tuple[Optional[UUID], str, Dict[str, EnrichmentResult]]:
+    """Enrich chunks via LLM before embedding. Returns (provider_id, model_name, chunk_hash->result)."""
+    import hashlib
+
+    router = LLMRouter(db)
+    providers = router._get_enabled_providers("chat")
+    if not providers:
+        logger.info("No chat providers configured, skipping Chinese enrichment")
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            35.0,
+            stage="chinese_enrichment",
+            stage_progress={"stage": "chinese_enrichment", "current": 0, "total": 0, "percentage": 100.0},
+            log_message="未配置 LLM chat provider，跳过中文语义增强",
+            db=db,
+        )
+        return None, "unknown", {}
+
+    provider = providers[0]
+    provider_id = provider.id
+    model_name = provider.model
+
+    chunks_to_enrich: List[Tuple[str, str, str]] = []  # (chunk_hash, content, language)
+    for code_file, parsed in file_records:
+        for chunk in parsed.chunks:
+            chunk_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+            chunks_to_enrich.append((chunk_hash, chunk.content, code_file.language or parsed.language))
+
+    unique_chunks: Dict[str, Tuple[str, str]] = {}
+    for chunk_hash, content, language in chunks_to_enrich:
+        unique_chunks.setdefault(chunk_hash, (content, language))
+
+    chunk_hashes = list(unique_chunks.keys())
+    cached = _load_cached_enrichments(db, chunk_hashes)
+    missing_hashes = [h for h in chunk_hashes if h not in cached]
+
+    total = len(missing_hashes)
+    processed = 0
+    semaphore = asyncio.Semaphore(5)
+
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        35.0,
+        stage="chinese_enrichment",
+        stage_progress={"stage": "chinese_enrichment", "current": 0, "total": total, "percentage": 0.0},
+        log_message=f"开始中文语义增强，命中缓存 {len(cached)}，待生成 {total}",
+        db=db,
+    )
+
+    async def enrich_one(chunk_hash: str) -> None:
+        _check_cancelled(repo_id_str)
+        content, language = unique_chunks[chunk_hash]
+        async with semaphore:
+            _check_cancelled(repo_id_str)
+            result = await enrich_chunk(router, content, language, repo_id=repo_id_str)
+            if result:
+                cached[chunk_hash] = result
+
+    tasks = [asyncio.create_task(enrich_one(h)) for h in missing_hashes]
+    for task in asyncio.as_completed(tasks):
+        _check_cancelled(repo_id_str)
+        await task
+        processed += 1
+        if processed % 5 == 0 or processed == total:
+            pct = (processed / total * 100.0) if total else 100.0
+            _notify(
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                35.0 + (processed / total * 20.0) if total else 55.0,
+                stage="chinese_enrichment",
+                stage_progress={
+                    "stage": "chinese_enrichment",
+                    "current": processed,
+                    "total": total,
+                    "percentage": round(pct, 2),
+                },
+                log_message=f"中文语义增强进度: {processed}/{total}",
+                db=db,
+            )
+
+    return provider_id, model_name, cached
+
+
+async def _enrich_repository_async(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+    provider_id: Optional[UUID] = None,
+    chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
+    enable_flow_label: bool = True,
+    file_contents: Optional[Dict[UUID, str]] = None,
+) -> None:
+    """Aggregate domain synonyms and generate symbol flow labels via LLM."""
+    router = LLMRouter(db)
+    providers = router._get_enabled_providers("chat")
+    if not providers:
+        logger.info("No chat providers configured, skipping flow labels")
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            95.0,
+            stage="flow_labels",
+            stage_progress={"stage": "flow_labels", "current": 0, "total": 0, "percentage": 100.0},
+            log_message="未配置 LLM chat provider，跳过流程标签",
+            db=db,
+        )
+        return
+
+    active_provider_id = provider_id or providers[0].id
+
+    # 1. Aggregate domain synonyms from chunk enrichments
+    synonym_batches: List[Dict[str, List[str]]] = []
+    if chunk_enrichments:
+        for result in chunk_enrichments.values():
+            if result.synonyms:
+                synonym_batches.append(result.synonyms)
+    if synonym_batches:
+        _check_cancelled(repo_id_str)
+        aggregate_domain_synonyms(db, repo_id, synonym_batches)
+
+    _check_cancelled(repo_id_str)
+
+    if not enable_flow_label:
+        _notify(
+            loop,
+            repo_id_str,
+            RepoStatus.indexing.value,
+            95.0,
+            stage="flow_labels",
+            stage_progress={"stage": "flow_labels", "current": 0, "total": 0, "percentage": 100.0},
+            log_message="流程标签功能已关闭",
+            db=db,
+        )
+        return
+
+    # 2. Enrich symbol flow labels
+    symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
+    symbol_total = len(symbols)
+    symbol_processed = 0
+
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        90.0,
+        stage="flow_labels",
+        stage_progress={"stage": "flow_labels", "current": 0, "total": symbol_total, "percentage": 0.0},
+        log_message=f"开始生成流程标签，共 {symbol_total} 个 symbols",
+        db=db,
+    )
+
+    file_embeddings: Dict[UUID, str] = {}
+    if file_contents:
+        file_embeddings.update(file_contents)
+
+    semaphore = asyncio.Semaphore(5)
+
+    async def enrich_symbol_one(sym: Symbol) -> None:
+        _check_cancelled(repo_id_str)
+        async with semaphore:
+            _check_cancelled(repo_id_str)
+            content = file_embeddings.get(sym.file_id, sym.file.path)
+            result = await enrich_symbol_flow(
+                router,
+                sym.name,
+                sym.file.path,
+                sym.file.language,
+                content,
+                repo_id=repo_id_str,
+            )
+            if result:
+                save_symbol_flow_label(db, sym.id, result, provider_id=active_provider_id)
+
+    symbol_tasks = [asyncio.create_task(enrich_symbol_one(sym)) for sym in symbols]
+    for task in asyncio.as_completed(symbol_tasks):
+        _check_cancelled(repo_id_str)
+        await task
+        symbol_processed += 1
+        if symbol_processed % 10 == 0 or symbol_processed == symbol_total:
+            pct = (symbol_processed / symbol_total * 100.0) if symbol_total else 100.0
+            _notify(
+                loop,
+                repo_id_str,
+                RepoStatus.indexing.value,
+                90.0 + (symbol_processed / symbol_total * 5.0) if symbol_total else 92.5,
+                stage="flow_labels",
+                stage_progress={
+                    "stage": "flow_labels",
+                    "current": symbol_processed,
+                    "total": symbol_total,
+                    "percentage": round(pct, 2),
+                },
+                log_message=f"流程标签进度: {symbol_processed}/{symbol_total}",
+                db=db,
+            )
+
+    db.commit()
+    _notify(
+        loop,
+        repo_id_str,
+        RepoStatus.indexing.value,
+        95.0,
+        stage="flow_labels",
+        stage_progress={"stage": "flow_labels", "current": symbol_total, "total": symbol_total, "percentage": 100.0},
+        log_message="流程标签完成",
+        db=db,
+    )
+
+
+def _enrich_repository(
+    db: Session,
+    repo_id: UUID,
+    repo_id_str: str,
+    file_records: List[Tuple[CodeFile, ParseResult]],
+    loop: asyncio.AbstractEventLoop,
+    provider_id: Optional[UUID] = None,
+    chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
+    enable_flow_label: bool = True,
+    file_contents: Optional[Dict[UUID, str]] = None,
+) -> None:
+    """Synchronous wrapper to run async enrichment in a worker thread."""
+    asyncio.run(
+        _enrich_repository_async(
+            db,
+            repo_id,
+            repo_id_str,
+            file_records,
+            loop,
+            provider_id=provider_id,
+            chunk_enrichments=chunk_enrichments,
+            enable_flow_label=enable_flow_label,
+            file_contents=file_contents,
+        )
+    )
+
+
 def _rebuild_call_graph(
     db: Session,
     repo_id: UUID,
@@ -617,6 +1001,7 @@ def _rebuild_call_graph(
     loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Rebuild call graph edges ONLY for changed files."""
+    _check_cancelled(repo_id_str)
     if not file_records:
         return
 
@@ -697,6 +1082,7 @@ def _rebuild_call_graph(
         batch_size = settings.index_batch_size
         total_edges = len(edges)
         for i in range(0, total_edges, batch_size):
+            _check_cancelled(repo_id_str)
             db.bulk_insert_mappings(CallGraphEdge, edges[i : i + batch_size])
             db.flush()
             inserted = min(i + batch_size, total_edges)
@@ -739,7 +1125,29 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
     repo_id_str = str(repo_id)
     file_records: List[Tuple[CodeFile, ParseResult]] = []
     all_file_records: List[Tuple[CodeFile, ParseResult]] = []
+    file_contents: Dict[UUID, str] = {}
     total_inserted = 0
+
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat_worker() -> None:
+        """Periodically update the indexing heartbeat timestamp."""
+        while not heartbeat_stop.is_set():
+            try:
+                hb_db = SessionLocal()
+                try:
+                    repo = hb_db.query(Repository).filter(Repository.id == repo_id).first()
+                    if repo and repo.status == RepoStatus.indexing.value:
+                        repo.indexing_heartbeat_at = datetime.utcnow()
+                        hb_db.commit()
+                finally:
+                    hb_db.close()
+            except Exception as e:
+                logger.debug("Heartbeat update failed: %s", e)
+            heartbeat_stop.wait(timeout=30)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
+    heartbeat_thread.start()
 
     try:
         _clear_indexing_logs(repo_id_str)
@@ -754,8 +1162,10 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
 
         repo.status = RepoStatus.indexing.value
         repo.error_message = None
+        repo.indexing_started_at = datetime.utcnow()
         db.commit()
         _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0, log_message="初始化索引状态", db=db)
+        _check_cancelled(repo_id_str)
 
         _notify(
             loop,
@@ -792,6 +1202,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 log_message=f"代码同步完成，本地路径: {local_path}",
                 db=db,
             )
+            _check_cancelled(repo_id_str)
         except Exception as sync_exc:
             error_msg = f"代码同步失败: {str(sync_exc)}"
             _add_log(db, repo_id_str, "error", error_msg, "git_sync")
@@ -819,11 +1230,14 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         )
 
         for file_path in source_files:
+            _check_cancelled(repo_id_str)
             try:
                 result = _index_file(db, repo_id, local_path, file_path)
                 if result:
-                    file_records.append(result)
-                    all_file_records.append(result)
+                    code_file, parsed, content = result
+                    file_records.append((code_file, parsed))
+                    all_file_records.append((code_file, parsed))
+                    file_contents[code_file.id] = content
                 else:
                     skipped += 1
             except Exception as exc:
@@ -853,20 +1267,62 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 )
 
         _add_log(db, repo_id_str, "info", f"文件扫描完成，共处理 {processed} 个文件，跳过 {skipped} 个", "scan")
+        _check_cancelled(repo_id_str)
+
+        llm_settings = get_effective_settings(db, repo_id)
+        enable_index_enrich = llm_settings.get("enable_index_chinese_enrich", True)
+        enable_flow_label = llm_settings.get("enable_flow_label", True)
+
+        chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None
+        enrichment_provider_id: Optional[UUID] = None
+        enrichment_model_name = "unknown"
+
+        if enable_index_enrich and all_file_records:
+            enrichment_provider_id, enrichment_model_name, chunk_enrichments = asyncio.run(
+                _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop)
+            )
+            db.commit()
+
+        _check_cancelled(repo_id_str)
 
         if all_file_records:
             print(f"[INDEXER] flushing {len(all_file_records)} records for repo {repo_id}", flush=True)
-            _bulk_insert_symbols_and_embeddings(db, repo_id, repo_id_str, all_file_records, loop)
+            _bulk_insert_symbols_and_embeddings(
+                db,
+                repo_id,
+                repo_id_str,
+                all_file_records,
+                loop,
+                chunk_enrichments=chunk_enrichments,
+                enrichment_provider_id=enrichment_provider_id,
+                enrichment_model_name=enrichment_model_name,
+            )
             total_inserted += len(all_file_records)
             db.commit()
             db.expire_all()
             gc.collect()
 
+        _check_cancelled(repo_id_str)
+
+        _enrich_repository(
+            db,
+            repo_id,
+            repo_id_str,
+            all_file_records,
+            loop,
+            provider_id=enrichment_provider_id,
+            chunk_enrichments=chunk_enrichments,
+            enable_flow_label=enable_flow_label,
+            file_contents=file_contents,
+        )
+
+        _check_cancelled(repo_id_str)
+
         _notify(
             loop,
             repo_id_str,
             RepoStatus.indexing.value,
-            80.0,
+            95.0,
             stage="call_graph",
             stage_progress={
                 "stage": "call_graph",
@@ -878,15 +1334,18 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             db=db,
         )
 
+        _check_cancelled(repo_id_str)
         _rebuild_call_graph(db, repo_id, repo_id_str, all_file_records, loop)
         db.commit()
 
         _add_log(db, repo_id_str, "info", "调用图构建完成", "call_graph")
 
-        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop)
+        _check_cancelled(repo_id_str)
+        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop, file_contents=file_contents)
         db.commit()
 
         _add_log(db, repo_id_str, "info", "框架路由解析完成", "routes")
+        _check_cancelled(repo_id_str)
 
         # ---- 清理已删除的文件 ----
         # 扫描仓库当前所有文件路径，删除数据库中不存在于仓库的记录
@@ -917,13 +1376,25 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             skipped,
         )
 
+    except IndexingCancelledError as exc:
+        logger.info("Indexing cancelled for repository %s", repo_id)
+        try:
+            repo = db.query(Repository).filter(Repository.id == repo_id).first()
+            if repo:
+                repo.status = RepoStatus.pending.value
+                repo.error_message = "索引已取消"
+                db.commit()
+            _add_log(db, repo_id_str, "info", "索引已取消", "cancel")
+            _notify(loop, repo_id_str, RepoStatus.pending.value, 0.0, "索引已取消", db=db)
+        except Exception:
+            pass
     except Exception as exc:
         logger.exception("Failed to index repository %s: %s", repo_id, exc)
         full_traceback = traceback.format_exc()
         error_msg = str(exc)
         _add_log(db, repo_id_str, "error", f"索引失败: {error_msg}", "error")
         _add_log(db, repo_id_str, "error", f"详细堆栈:\n{full_traceback}", "error")
-        
+
         try:
             repo = db.query(Repository).filter(Repository.id == repo_id).first()
             if repo:
@@ -934,6 +1405,11 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         except Exception:
             pass
     finally:
+        heartbeat_stop.set()
+        try:
+            heartbeat_thread.join(timeout=2)
+        except Exception:
+            pass
         _clear_indexing_state(repo_id_str)
         db.close()
 
@@ -944,11 +1420,15 @@ async def index_repo(repo_id: UUID) -> None:
     loop = asyncio.get_running_loop()
     
     lock = _get_indexing_lock(repo_id_str)
-    
+
     async with lock:
         if _cancel_indexing(repo_id_str):
             logger.info("Cancelled existing indexing task for repo %s", repo_id_str)
-        
+
+        # Start fresh: clear any stale cancellation signal from a previous run.
+        event = _get_cancel_event(repo_id_str)
+        event.clear()
+
         def _run_index():
             _sync_index_repo(repo_id, loop)
         
@@ -982,6 +1462,7 @@ def _parse_framework_routes(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    file_contents: Optional[Dict[UUID, str]] = None,
 ) -> None:
     """解析框架路由并写入数据库。"""
     router_parser = RouterParser()
@@ -990,9 +1471,11 @@ def _parse_framework_routes(
     db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == repo_id).delete(synchronize_session=False)
 
     for code_file, parsed in file_records:
+        _check_cancelled(repo_id_str)
         if parsed.language in ("python", "javascript", "typescript", "java"):
             try:
-                routes = router_parser.parse(parsed.content, parsed.language)
+                content = file_contents.get(code_file.id, "") if file_contents else ""
+                routes = router_parser.parse(content, parsed.language)
                 for route in routes:
                     db_route = FrameworkRoute(
                         repo_id=repo_id,

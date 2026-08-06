@@ -11,6 +11,8 @@ logs/
 # 数据库数据
 pgdata/
 postgres/
+*.db
+backend/codepop.db
 
 # 配置文件
 .env
@@ -22,6 +24,7 @@ repos/
 
 # 模型缓存
 models/
+!backend/scripts/models/
 
 # 构建产物
 dist/
@@ -42,17 +45,17 @@ packages/macos/release/
 Thumbs.db
 
 # Docker
-docker-compose.override.yml
 *.dmg
-
-# SQLite 数据库
-backend/codepop.db
 
 # 本地测试脚本
 test_*.py
+!backend/tests/test_*.py
+!backend/scripts/test_*.py
+!backend/scripts/verify/test_*.py
 
 # Claude 配置
 .claude/
 
 # Trae 文档
 .trae/documents/
+.pnpm-store/

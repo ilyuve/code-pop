@@ -33,6 +33,10 @@ export const useRepos = () => {
       clearIndexingLogs(id);
       queryClient.invalidateQueries({ queryKey: ['repos'] });
     },
+    onError: (error) => {
+      const detail = (error as any)?.response?.data?.detail || error?.message || '删除仓库失败';
+      alert(`删除失败: ${detail}`);
+    },
   });
 
   const reindexMutation = useMutation({

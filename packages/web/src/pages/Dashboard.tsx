@@ -24,7 +24,8 @@ import { ServiceStatus } from '../components/ServiceStatus';
 export const Dashboard = () => {
   const { repos, isLoading: reposLoading } = useRepos();
   const { recentSearches } = useSearch();
-  const { wsUrl, setWsStatus, addRealTimeUpdate, updateRepo } = useStore();
+  const { setWsStatus, addRealTimeUpdate, updateRepo } = useStore();
+  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
   const [animated, setAnimated] = useState(false);
 
   const { data: searchStats } = useQuery({

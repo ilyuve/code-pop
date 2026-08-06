@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext } from '../types';
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext, LLMCostEstimate, DebugSearchResponse, DebugPathOverrides } from '../types';
 
 const apiClient = axios.create({
   baseURL: '/api',
@@ -133,6 +133,25 @@ export const searchContext = async (query: string, repoId?: string, limit: numbe
   return context;
 };
 
+export const debugSearch = async (
+  query: string,
+  repoId: string,
+  limit: number = 20,
+  pathOverrides?: DebugPathOverrides,
+): Promise<DebugSearchResponse> => {
+  const response = await apiClient.post('/search/debug', {
+    query,
+    repo_id: repoId,
+    limit,
+    path_overrides: pathOverrides,
+  });
+  const data = response.data;
+  data.final_context.code_snippets = (data.final_context.code_snippets || []).map(mapSearchResult);
+  data.rerank.code_reranker.output = (data.rerank.code_reranker.output || []).map(mapSearchResult);
+  data.rerank.m3_reranker.output = (data.rerank.m3_reranker.output || []).map(mapSearchResult);
+  return data;
+};
+
 export const fetchSearchHistory = async (limit: number = 10): Promise<any[]> => {
   const response = await apiClient.get(`/search/history?limit=${limit}`);
   return response.data;
@@ -248,6 +267,58 @@ export const fetchBenchmarkSummary = async (): Promise<BenchmarkSummary> => {
 // Health APIs
 export const fetchHealth = async (): Promise<any> => {
   const response = await apiClient.get('/health');
+  return response.data;
+};
+
+// LLM admin APIs
+export const fetchLLMProviders = async (): Promise<any[]> => {
+  const response = await apiClient.get('/admin/llm/providers');
+  return response.data.providers || [];
+};
+
+export const fetchLLMUsage = async (minutes: number = 60): Promise<any> => {
+  const response = await apiClient.get(`/admin/llm/usage?minutes=${minutes}`);
+  return response.data;
+};
+
+export const fetchLLMCost = async (
+  minutes: number = 60,
+  repoId?: string
+): Promise<LLMCostEstimate> => {
+  const params = new URLSearchParams();
+  params.append('minutes', String(minutes));
+  if (repoId) params.append('repo_id', repoId);
+  const response = await apiClient.get(`/admin/llm/cost?${params.toString()}`);
+  return response.data;
+};
+
+export const fetchLLMSettings = async (): Promise<any> => {
+  const response = await apiClient.get('/admin/llm/settings');
+  return response.data.settings;
+};
+
+export const saveLLMSettings = async (settings: any): Promise<any> => {
+  const response = await apiClient.put('/admin/llm/settings', settings);
+  return response.data.settings;
+};
+
+export const saveLLMProvider = async (provider: any): Promise<any> => {
+  const url = provider.id ? `/admin/llm/providers/${provider.id}` : '/admin/llm/providers';
+  const method = provider.id ? 'put' : 'post';
+  const response = await apiClient.request({
+    method,
+    url,
+    data: provider,
+  });
+  return response.data;
+};
+
+export const deleteLLMProvider = async (id: string): Promise<void> => {
+  await apiClient.delete(`/admin/llm/providers/${id}`);
+};
+
+export const testLLMProvider = async (id: string): Promise<any> => {
+  const response = await apiClient.post(`/admin/llm/providers/${id}/test`);
   return response.data;
 };
 

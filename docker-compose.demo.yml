@@ -1,0 +1,66 @@
+version: '3.8'
+
+# 评委演示专用：使用 GHCR 预构建镜像，无需本地构建，无需访问 Docker Hub。
+# 配套文档见 DEMO_DEPLOY.md
+
+services:
+  postgres:
+    image: ghcr.io/ilyuve/codepop-postgres:pg16
+    container_name: codepop-postgres
+    environment:
+      POSTGRES_DB: codepop
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: codepop123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - codepop-network
+
+  backend:
+    image: ghcr.io/ilyuve/codepop-backend:demo
+    container_name: codepop-backend
+    environment:
+      DATABASE_URL: postgresql://postgres:codepop123@postgres:5432/codepop
+      REPOS_DIR: /app/repos
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      LOG_LEVEL: INFO
+      EMBEDDING_MODEL: BAAI/bge-m3
+      EMBEDDING_DIM: 1024
+      EMBEDDING_BATCH_SIZE: 16
+      HF_ENDPOINT: https://hf-mirror.com
+    volumes:
+      - ./repos:/app/repos
+      - hf_cache:/root/.cache/huggingface
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - codepop-network
+
+  web:
+    image: ghcr.io/ilyuve/codepop-web:demo
+    container_name: codepop-web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - codepop-network
+
+volumes:
+  pgdata:
+  hf_cache:
+
+networks:
+  codepop-network:
+    driver: bridge
