@@ -242,6 +242,15 @@ class TestDeleteRepo:
         with pytest.raises(RepoNotFoundException):
             delete_repo(uuid4(), db=db)
 
+    def test_symbol_flow_label_has_cascade_delete(self):
+        """Symbol.flow_label must cascade delete so repo deletion does not fail
+        with a NOT NULL violation on symbol_flow_labels.symbol_id."""
+        from sqlalchemy import inspect
+        from models import Symbol
+
+        rel = inspect(Symbol).relationships["flow_label"]
+        assert "delete" in rel.cascade
+
 
 class TestForceReindexWhenEnrichmentMissing:
     def test_reindexes_when_hash_matches_but_enrichment_missing(self, tmp_path):
