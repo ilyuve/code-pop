@@ -60,6 +60,52 @@ class TestExpandQueryWithSynonyms:
     def test_no_synonyms_returns_original(self):
         assert expand_query_with_synonyms("test", {}) == ["test"]
 
+    def test_generates_pairwise_combinations(self):
+        """Two distinct terms with synonyms should produce combined variants."""
+        synonyms = {"骑士": ["骑手"], "配送": ["送货"]}
+        variants = expand_query_with_synonyms("骑士配送流程", synonyms)
+        assert "骑手配送流程" in variants
+        assert "骑士送货流程" in variants
+        assert "骑手送货流程" in variants
+
+    def test_skips_overlapping_terms(self):
+        """Avoid double-replacement when one term is a substring of another."""
+        synonyms = {"配送": ["送货"], "配送流程": ["派送流程"]}
+        variants = expand_query_with_synonyms("骑士配送流程", synonyms)
+        assert "骑士配送流程" in variants
+        assert "骑士送货流程" in variants
+        assert "骑士派送流程" in variants
+        # The overlapping pairwise combination should not appear.
+        assert "骑士送货派送流程" not in variants
+
+    def test_single_term_no_combinations(self):
+        """Only one matched term should not produce combination variants."""
+        synonyms = {"骑士": ["骑手", "rider"]}
+        variants = expand_query_with_synonyms("骑士配送流程", synonyms)
+        assert set(variants) == {"rider配送流程", "骑手配送流程", "骑士配送流程"}
+        assert len(variants) == 3
+
+    def test_ignores_synonym_same_as_term(self):
+        """Synonyms identical to the canonical term should be ignored."""
+        synonyms = {"骑士": ["骑士", "骑手"]}
+        variants = expand_query_with_synonyms("骑士配送流程", synonyms)
+        assert "骑手配送流程" in variants
+        assert "骑士配送流程" in variants
+        assert len(variants) == 2
+
+    def test_three_terms_only_pairwise(self):
+        """With three matched terms, only single and pairwise variants are generated."""
+        synonyms = {"一": ["壹"], "二": ["贰"], "三": ["叁"]}
+        variants = expand_query_with_synonyms("一二三", synonyms)
+        expected = {
+            "一二三",
+            "壹二三", "一贰三", "一二叁",
+            "壹二叁", "一贰叁", "壹贰三",
+        }
+        assert set(variants) == expected
+        # Triple combination should not be generated.
+        assert "壹贰叁" not in variants
+
 
 class TestDomainSynonymAggregation:
     def test_aggregate_inserts_new_term(self):
