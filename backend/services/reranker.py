@@ -49,7 +49,10 @@ class M3Reranker:
             return results[:top_k]
 
         pairs = [
-            [query, f"{r.file_path}: {r.content[:500]}"]
+            [
+                query,
+                f"[{r.file_role}] {r.file_path}: {r.content[:500]}"
+            ]
             for r in results
         ]
 
@@ -102,11 +105,29 @@ class CodeReranker:
 
     ROLE_WEIGHTS = ROLE_WEIGHTS
 
+    # Intent-aware multipliers for how_it_works / implementation queries.
+    _INTENT_ROLE_BOOST = {
+        "how_it_works": {
+            "service": 1.5,
+            "controller": 1.5,
+            "handler": 1.3,
+            "repository": 1.0,
+            "utility": 1.0,
+            "middleware": 1.0,
+            "analyzer": 0.8,
+            "model": 0.55,
+            "adapter": 0.55,
+            "config": 0.5,
+            "test": 0.3,
+        },
+    }
+
     def rerank(
         self,
         query: str,
         results: List[SearchResultItem],
         search_terms: Optional[List[str]] = None,
+        intent_type: Optional[str] = None,
     ) -> List[SearchResultItem]:
         file_counts = collections.Counter(r.file_path for r in results)
         # Strip short/noise terms; keep terms longer than 1 char.
@@ -117,11 +138,16 @@ class CodeReranker:
             role = getattr(r, "file_role", None) or "other"
 
             if self._is_definition(r.content, query):
-                multiplier *= 1.3
+                multiplier *= 1.15
 
             # Role-based weighting.
             if role in self.ROLE_WEIGHTS:
                 multiplier *= self.ROLE_WEIGHTS[role]
+
+            # Intent-aware role tuning for implementation queries.
+            intent_boost = self._INTENT_ROLE_BOOST.get(intent_type, {})
+            if role in intent_boost:
+                multiplier *= intent_boost[role]
 
             # Test/config penalties.
             if self._is_test_file(r.file_path):
@@ -146,6 +172,25 @@ class CodeReranker:
         results.sort(key=lambda x: -x.score)
         return results
 
+    # Shallow definitions that should not receive the full definition bonus.
+    _SHALLOW_DEF_NAMES = frozenset({"__init__", "__new__", "__repr__", "__str__"})
+
+    def _is_shallow_snippet(self, content: str) -> bool:
+        """True for snippets that are constructors, trivial getters, or very short."""
+        if not content:
+            return True
+        lines = content.splitlines()
+        if len(lines) <= 3:
+            return True
+        first_line = lines[0]
+        name_match = re.search(r"\b(def|function)\s+(\w+)", first_line)
+        if name_match and name_match.group(2) in self._SHALLOW_DEF_NAMES:
+            return True
+        # One-line getter/setter-like methods.
+        if len(lines) <= 4 and re.search(r"\breturn\s+self\.", content):
+            return True
+        return False
+
     def _is_definition(self, content: str, query: str) -> bool:
         escaped = re.escape(query)
         patterns = [
@@ -155,7 +200,20 @@ class CodeReranker:
             rf'\binterface\s+{escaped}\b',
             rf'\bstruct\s+{escaped}\b',
         ]
-        return any(re.search(p, content, re.IGNORECASE) for p in patterns)
+        if not any(re.search(p, content, re.IGNORECASE) for p in patterns):
+            return False
+
+        # Skip shallow constructors / magic methods.
+        first_line = content.splitlines()[0] if content else ""
+        name_match = re.search(r'\b(def|function)\s+(\w+)', first_line)
+        if name_match and name_match.group(2) in self._SHALLOW_DEF_NAMES:
+            return False
+
+        # Skip trivial one-line getters / setters.
+        if len(content.splitlines()) <= 3:
+            return False
+
+        return True
 
     def _is_test_file(self, path: str) -> bool:
         path_lower = path.lower()

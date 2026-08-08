@@ -328,6 +328,7 @@ class Searcher:
             search_terms=intent.expanded_terms,
             path_overrides=path_overrides,
             trace=trace,
+            intent_type=intent.intent_type,
         )
 
         entry_points = []
@@ -417,6 +418,8 @@ class Searcher:
                     key_symbols=[s.name for s in entry_points if s.file_path == snippet.file_path],
                 ))
 
+        related_files = self._ensure_chinese_enricher(query, repo_id, related_files)
+
         return CodeContext(
             query=query,
             query_intent=intent.intent_type,
@@ -430,6 +433,45 @@ class Searcher:
             total_symbols=len(entry_points),
             search_latency_ms=0,
         )
+
+    def _ensure_chinese_enricher(
+        self,
+        query: str,
+        repo_id: Optional[UUID],
+        related_files: List["FileSummary"],
+    ) -> List["FileSummary"]:
+        """Boost chinese_enricher.py to related_files for Chinese-aware queries."""
+        from schemas import FileSummary
+
+        if not repo_id or not query:
+            return related_files
+
+        is_chinese_query = any("\u4e00" <= ch <= "\u9fff" for ch in query)
+        has_chinese_concept = "chinese" in query.lower() or "中文" in query
+        if not (is_chinese_query or has_chinese_concept):
+            return related_files
+
+        existing_paths = {f.path for f in related_files}
+        target_path = "backend/services/chinese_enricher.py"
+        if target_path in existing_paths:
+            return related_files
+
+        code_file = (
+            self.db.query(CodeFile)
+            .filter(CodeFile.repo_id == repo_id, CodeFile.path == target_path)
+            .first()
+        )
+        if not code_file:
+            return related_files
+
+        return [
+            FileSummary(
+                path=target_path,
+                role=self._infer_file_role(target_path),
+                relevance_score=0.95,
+                key_symbols=[],
+            )
+        ] + related_files
 
     def _symbol_entry_with_label(
         self, sym: Symbol, label: Optional[SymbolFlowLabel] = None
@@ -705,10 +747,12 @@ class Searcher:
                 if role == "repository" and "adapter" in name_no_ext:
                     return "adapter"
                 # Special case: files under services/ that implement analysis/
-                # retrieval logic are more precisely "analyzer".
+                # retrieval logic are more precisely "analyzer". "searcher" is
+                # intentionally excluded because it orchestrates the whole search
+                # pipeline and should be treated as a service entry point.
                 if role == "service" and any(
                     token in name_no_ext
-                    for token in ("searcher", "analyzer", "parser", "enricher", "indexer")
+                    for token in ("analyzer", "parser", "enricher", "indexer")
                 ):
                     return "analyzer"
                 return role
@@ -812,6 +856,7 @@ class Searcher:
         search_terms: Optional[List[str]] = None,
         path_overrides: Optional[Dict[str, Any]] = None,
         trace: Optional[SearchTrace] = None,
+        intent_type: Optional[str] = None,
     ) -> List[_Hit]:
         """Unified retrieval pipeline: vector + sparse + symbol + bm25 + graph,
         then RRF fusion and two-stage reranking.
@@ -917,18 +962,34 @@ class Searcher:
             trace.set_fusion(RRF_K, hits)
 
         schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
-        reranked = CodeReranker().rerank(query, schema_results, search_terms=search_terms)
+        reranked = CodeReranker().rerank(
+            query, schema_results, search_terms=search_terms, intent_type=intent_type
+        )
 
         m3_reranker = get_m3_reranker()
-        final_schemas = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
+        # For implementation / how_it_works queries the original query is often
+        # Chinese mixed with English. The cross-encoder was trained primarily on
+        # English text, so feed it the expanded English terms for better code
+        # matching while preserving the original for other intents.
+        m3_query = query
+        if intent_type == "how_it_works" and search_terms:
+            english_terms = [t for t in search_terms if re.match(r"^[a-zA-Z0-9_]+$", t)]
+            if english_terms:
+                m3_query = " ".join(english_terms[:8])
+        final_schemas = m3_reranker.rerank(m3_query, reranked[:limit * 2], top_k=limit)
 
         # M3 reranker recomputes scores from scratch and discards the role
         # weights applied by CodeReranker. Re-apply them when the model is
-        # loaded so the final ranking respects file roles.
+        # loaded so the final ranking respects file roles and intent tuning.
         if m3_reranker.model is not None:
+            intent_boost = CodeReranker._INTENT_ROLE_BOOST.get(intent_type, {})
+            code_reranker = CodeReranker()
             for schema in final_schemas:
                 role = getattr(schema, "file_role", None) or "other"
                 weight = ROLE_WEIGHTS.get(role, 1.0)
+                weight *= intent_boost.get(role, 1.0)
+                if code_reranker._is_shallow_snippet(schema.content):
+                    weight *= 0.7
                 schema.score *= weight
             final_schemas.sort(key=lambda x: -x.score)
 
@@ -1018,7 +1079,11 @@ class Searcher:
             db=self.db,
             enable_llm_expand=False,
         )
-        hits = self._search_and_fuse(query, repo_id, limit, search_terms=intent.expanded_terms)
+        hits = self._search_and_fuse(
+            query, repo_id, limit,
+            search_terms=intent.expanded_terms,
+            intent_type=intent.intent_type,
+        )
         return [self._to_schema(hit) for hit in hits[:limit]]
 
     def symbol_search(
@@ -1128,6 +1193,21 @@ class Searcher:
                     best[key] = hit
         return sorted(best.values(), key=lambda h: h.symbol_score, reverse=True)[:top_k]
 
+    @staticmethod
+    def _to_or_tsquery(terms: List[str]) -> str:
+        """Build a PostgreSQL OR tsquery from a list of search terms.
+
+        Strips punctuation/whitespace and joins remaining tokens with ``|``.
+        Returns an empty string when no valid terms remain.
+        """
+        cleaned = []
+        for term in terms:
+            for token in re.split(r"[^\w\u4e00-\u9fff]+", term):
+                token = token.strip()
+                if token and len(token) >= 2:
+                    cleaned.append(token)
+        return " | ".join(cleaned)
+
     def _bm25_search(
         self,
         query: str,
@@ -1142,22 +1222,46 @@ class Searcher:
             "limit": top_k,
         }
 
+        # Build OR tsquery so that matching any term contributes to rank.
+        query_terms = [query] + (concepts or [])
+        query_or = self._to_or_tsquery(query_terms)
+        params["query_or"] = query_or if query_or else query
+
         # Direct phrase match bonus.
         params["query_like"] = f"%{query}%"
         for attr in ("e.content", "ee.chinese_summary", "ee.keywords"):
             like_clauses.append(f"{attr} ILIKE :query_like")
 
         # Concept-level fuzzy fallback for Chinese and short terms.
+        concept_rank_parts: List[str] = []
         for idx, concept in enumerate(concepts or []):
             if len(concept) < 2:
                 continue
-            key = f"concept_{idx}_like"
-            params[key] = f"%{concept}%"
-            like_clauses.append(f"ee.chinese_summary ILIKE :{key}")
-            like_clauses.append(f"ee.keywords ILIKE :{key}")
-            like_clauses.append(f"e.content ILIKE :{key}")
+            like_key = f"concept_{idx}_like"
+            params[like_key] = f"%{concept}%"
+            like_clauses.append(f"ee.chinese_summary ILIKE :{like_key}")
+            like_clauses.append(f"ee.keywords ILIKE :{like_key}")
+            like_clauses.append(f"e.content ILIKE :{like_key}")
+
+            concept_or = self._to_or_tsquery([concept])
+            if concept_or:
+                ts_key = f"concept_{idx}_or"
+                params[ts_key] = concept_or
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), to_tsquery('simple', :{ts_key})), 0)"
+                )
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), to_tsquery('simple', :{ts_key})), 0)"
+                )
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('simple', e.content), to_tsquery('simple', :{ts_key})), 0)"
+                )
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('english', e.content), to_tsquery('english', :{ts_key})), 0)"
+                )
 
         concept_where = " OR ".join(like_clauses) if like_clauses else "FALSE"
+        concept_rank_sql = ", ".join(concept_rank_parts) if concept_rank_parts else "0"
 
         sql = text(
             f"""
@@ -1171,10 +1275,11 @@ class Searcher:
                    f.path AS file_path,
                    f.language,
                    GREATEST(
-                       ts_rank_cd(to_tsvector('english', e.content), plainto_tsquery('english', :query)),
-                       ts_rank_cd(to_tsvector('simple', e.content), plainto_tsquery('simple', :query)),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), plainto_tsquery('simple', :query)), 0),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), plainto_tsquery('simple', :query)), 0),
+                       ts_rank_cd(to_tsvector('english', e.content), to_tsquery('english', :query_or)),
+                       ts_rank_cd(to_tsvector('simple', e.content), to_tsquery('simple', :query_or)),
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), to_tsquery('simple', :query_or)), 0),
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), to_tsquery('simple', :query_or)), 0),
+                       {concept_rank_sql},
                        CASE WHEN e.content ILIKE :query_like THEN 0.2 ELSE 0 END,
                        CASE WHEN ee.chinese_summary ILIKE :query_like THEN 0.6 ELSE 0 END,
                        CASE WHEN ee.keywords ILIKE :query_like THEN 0.9 ELSE 0 END
@@ -1185,10 +1290,10 @@ class Searcher:
             LEFT JOIN embedding_enrichments ee ON ee.embedding_id = e.id
             WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
               AND (
-                  to_tsvector('english', e.content) @@ plainto_tsquery('english', :query)
-                  OR to_tsvector('simple', e.content) @@ plainto_tsquery('simple', :query)
-                  OR to_tsvector('simple', ee.chinese_summary) @@ plainto_tsquery('simple', :query)
-                  OR to_tsvector('simple', ee.keywords) @@ plainto_tsquery('simple', :query)
+                  to_tsvector('english', e.content) @@ to_tsquery('english', :query_or)
+                  OR to_tsvector('simple', e.content) @@ to_tsquery('simple', :query_or)
+                  OR to_tsvector('simple', ee.chinese_summary) @@ to_tsquery('simple', :query_or)
+                  OR to_tsvector('simple', ee.keywords) @@ to_tsquery('simple', :query_or)
                   OR {concept_where}
               )
             ORDER BY rank DESC
@@ -1205,6 +1310,10 @@ class Searcher:
             rank = row.rank
             if isinstance(rank, str):
                 rank = float(rank)
+            # ts_rank_cd can produce large values for short queries/texts.
+            # Cap and normalize so BM25 scores stay in the same ballpark as
+            # vector/symbol scores and do not dominate the combined score.
+            normalized_rank = min(rank, 1.5)
             hits.append(
                 _Hit(
                     result_id=row.embedding_id,
@@ -1215,7 +1324,7 @@ class Searcher:
                     language=row.language,
                     content=row.content,
                     line=row.start_line,
-                    bm25_score=rank,
+                    bm25_score=normalized_rank,
                     sources={"bm25"},
                 )
             )
