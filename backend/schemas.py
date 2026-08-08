@@ -56,6 +56,7 @@ class SearchResultItem(BaseModel):
     line: int
     score: float
     score_breakdown: dict
+    file_role: str = "other"
 
 
 class SymbolSearchQuery(BaseModel):

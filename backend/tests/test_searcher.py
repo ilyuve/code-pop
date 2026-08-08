@@ -390,3 +390,87 @@ class TestSparseSearch:
         assert len(results) == 1
         assert results[0].file_path == "src/order.py"
         assert results[0].language == "python"
+
+
+class TestInferFileRole:
+    """Directory + file name + extension based role inference."""
+
+    def test_services_searcher_is_analyzer(self, searcher):
+        assert searcher._infer_file_role("backend/services/searcher.py") == "analyzer"
+
+    def test_data_adapter_is_adapter(self, searcher):
+        assert searcher._infer_file_role("packages/core/src/data/adapter.ts") == "adapter"
+
+    def test_web_page_is_web(self, searcher):
+        assert searcher._infer_file_role("packages/web/src/pages/Benchmark.tsx") == "web"
+
+    def test_api_route_is_controller(self, searcher):
+        assert searcher._infer_file_role("backend/api/search.py") == "controller"
+
+    def test_repository_is_repository(self, searcher):
+        assert searcher._infer_file_role("backend/repositories/order_repository.py") == "repository"
+
+    def test_model_is_model(self, searcher):
+        assert searcher._infer_file_role("backend/models.py") == "model"
+
+    def test_test_file_is_test(self, searcher):
+        assert searcher._infer_file_role("backend/tests/test_searcher.py") == "test"
+
+
+class TestCodeRerankerRoleWeights:
+    def test_analyzer_ranks_above_adapter(self):
+        from services.reranker import CodeReranker
+
+        analyzer = SearchResultItem(
+            id=uuid4(),
+            file_id=uuid4(),
+            repo_id=uuid4(),
+            repo_name="test",
+            file_path="backend/services/searcher.py",
+            language="python",
+            content="def search(): pass",
+            line=1,
+            score=0.5,
+            score_breakdown={},
+            file_role="analyzer",
+        )
+        adapter = SearchResultItem(
+            id=uuid4(),
+            file_id=uuid4(),
+            repo_id=uuid4(),
+            repo_name="test",
+            file_path="packages/core/src/data/adapter.ts",
+            language="typescript",
+            content="export class Adapter {}",
+            line=1,
+            score=0.5,
+            score_breakdown={},
+            file_role="adapter",
+        )
+
+        reranked = CodeReranker().rerank("search", [adapter, analyzer])
+
+        assert reranked[0].file_role == "analyzer"
+        assert reranked[1].file_role == "adapter"
+        assert reranked[0].score > reranked[1].score
+
+    def test_domain_relevance_boosts_matching_paths(self):
+        from services.reranker import CodeReranker
+
+        item = SearchResultItem(
+            id=uuid4(),
+            file_id=uuid4(),
+            repo_id=uuid4(),
+            repo_name="test",
+            file_path="backend/services/query_intent.py",
+            language="python",
+            content="def analyze(): pass",
+            line=1,
+            score=0.5,
+            score_breakdown={},
+            file_role="analyzer",
+        )
+
+        reranked = CodeReranker().rerank("query", [item], search_terms=["query", "intent"])
+
+        assert reranked[0].score > 0.5

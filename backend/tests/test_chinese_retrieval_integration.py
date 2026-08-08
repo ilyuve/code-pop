@@ -391,6 +391,7 @@ class TestDebugSearchConsistency:
             line=1,
             score=0.95,
             score_breakdown={"vector": 0.9, "final": 0.95},
+            file_role="service",
         )
 
         fake_code_context = CodeContext(

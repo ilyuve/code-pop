@@ -1,7 +1,7 @@
 import logging
 import re
 import collections
-from typing import List
+from typing import List, Optional
 
 from sentence_transformers import CrossEncoder
 from schemas import SearchResultItem
@@ -18,10 +18,11 @@ RERANKER_MODEL = "BAAI/bge-reranker-base"
 class M3Reranker:
     """用 bge-reranker-base 做交叉编码重排序。"""
 
-    def __init__(self):
+    def __init__(self, temperature: float = 0.8):
         if not hasattr(self, '_model'):
             self._model = None
 
+        self.temperature = temperature
         if self._model is None:
             try:
                 self._model = CrossEncoder(
@@ -56,7 +57,9 @@ class M3Reranker:
             scores = self.model.predict(pairs, batch_size=8)
 
             for r, score in zip(results, scores):
-                r.score = float(score)
+                # Temperature scaling makes small M3 score differences more visible.
+                # It does not change the relative ordering produced by M3.
+                r.score = float(score) / self.temperature
 
             results.sort(key=lambda x: -x.score)
             return results[:top_k]
@@ -76,26 +79,64 @@ def get_m3_reranker() -> M3Reranker:
 class CodeReranker:
     """基于代码特征的轻量 reranker，纯规则，不依赖 LLM。"""
 
-    def rerank(self, query: str, results: List[SearchResultItem]) -> List[SearchResultItem]:
+    ROLE_WEIGHTS = {
+        "analyzer": 1.25,
+        "searcher": 1.25,
+        "service": 1.2,
+        "controller": 1.15,
+        "handler": 1.15,
+        "repository": 1.05,
+        "dao": 1.05,
+        "model": 0.8,
+        "entity": 0.8,
+        "dto": 0.75,
+        "adapter": 0.75,
+        "web": 0.8,
+        "config": 0.7,
+        "test": 0.5,
+        "utility": 1.0,
+        "middleware": 1.0,
+        "other": 1.0,
+    }
+
+    def rerank(
+        self,
+        query: str,
+        results: List[SearchResultItem],
+        search_terms: Optional[List[str]] = None,
+    ) -> List[SearchResultItem]:
         file_counts = collections.Counter(r.file_path for r in results)
+        # Strip short/noise terms; keep terms longer than 1 char.
+        term_patterns = [t.lower() for t in (search_terms or []) if len(t) > 1]
 
         for r in results:
             multiplier = 1.0
+            role = getattr(r, "file_role", None) or "other"
 
             if self._is_definition(r.content, query):
                 multiplier *= 1.3
 
-            if getattr(r, 'file_role', None) == "controller":
-                multiplier *= 1.2
+            # Role-based weighting.
+            if role in self.ROLE_WEIGHTS:
+                multiplier *= self.ROLE_WEIGHTS[role]
 
+            # Test/config penalties.
             if self._is_test_file(r.file_path):
                 multiplier *= 0.5
             elif self._is_config_file(r.file_path):
                 multiplier *= 0.7
 
+            # Same-file coherence boost.
             if file_counts[r.file_path] > 1:
                 coherence = 1.0 + 0.1 * (file_counts[r.file_path] - 1)
                 multiplier *= min(coherence, 1.3)
+
+            # Domain relevance: path or content matches expanded query terms.
+            if term_patterns:
+                haystack = f"{r.file_path} {r.content[:300]}".lower()
+                matches = sum(1 for t in term_patterns if t in haystack)
+                if matches:
+                    multiplier *= 1.0 + 0.05 * min(matches, 3)
 
             r.score *= multiplier
 

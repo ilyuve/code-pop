@@ -174,6 +174,7 @@ class SearchTrace:
             "line": item.line,
             "score": round(float(item.score), 4),
             "score_breakdown": item.score_breakdown,
+            "file_role": getattr(item, "file_role", "other"),
         }
 
 
@@ -386,6 +387,7 @@ class Searcher:
                     "rrf": round(hit.rrf_score, 4),
                     "final": round(self._final_score(hit), 4),
                 },
+                file_role=self._infer_file_role(hit.file_path),
             ))
 
         if not related_files:
@@ -598,25 +600,117 @@ class Searcher:
         return results
 
     def _infer_file_role(self, file_path: str) -> str:
-        path_lower = file_path.lower()
-        name = file_path.split("/")[-1].lower()
+        """Infer the architectural role of a file from its path and name.
 
-        if "test" in path_lower or "spec" in name:
+        The heuristic uses three signals, in order of reliability:
+        1. Directory structure (e.g. services/, controllers/, data/)
+        2. File name tokens (e.g. *adapter*, *service*)
+        3. Language / framework conventions (e.g. .tsx in packages/web/)
+        """
+        path_lower = file_path.lower()
+        parts = file_path.lower().split("/")
+        name = parts[-1]
+        name_no_ext = name.split(".")[0]
+
+        # 1. Test files (strongest signal).
+        if "test" in path_lower or "spec" in name or "__tests__" in path_lower:
             return "test"
-        if "controller" in name or "handler" in name or "route" in name:
-            return "controller"
-        if "service" in name or "biz" in name or "business" in name:
-            return "service"
-        if "repository" in name or "dao" in name or "mapper" in name or "data" in name:
-            return "repository"
-        if "config" in name or "settings" in name or "properties" in name:
-            return "config"
-        if "model" in name or "entity" in name or "domain" in name or "po" in name:
-            return "model"
-        if "util" in name or "helper" in name or "common" in name:
-            return "utility"
-        if "middleware" in name or "interceptor" in name or "filter" in name:
-            return "middleware"
+
+        # 2. Web frontend files.
+        if path_lower.startswith("packages/web/") or "/src/pages/" in path_lower or "/components/" in path_lower:
+            if name.endswith((".tsx", ".jsx", ".vue", ".ts", ".js")):
+                return "web"
+
+        # 3. Directory-based role inference.
+        dir_roles = {
+            "api": "controller",
+            "apis": "controller",
+            "controllers": "controller",
+            "routes": "controller",
+            "handlers": "controller",
+            "services": "service",
+            "service": "service",
+            "biz": "service",
+            "business": "service",
+            "indexer": "analyzer",
+            "parser": "analyzer",
+            "analyzer": "analyzer",
+            "enricher": "analyzer",
+            "repositories": "repository",
+            "repository": "repository",
+            "dao": "repository",
+            "mapper": "repository",
+            "data": "repository",
+            "adapters": "adapter",
+            "adapter": "adapter",
+            "models": "model",
+            "entities": "model",
+            "entity": "model",
+            "domain": "model",
+            "dto": "model",
+            "config": "config",
+            "configs": "config",
+            "settings": "config",
+            "utils": "utility",
+            "helpers": "utility",
+            "common": "utility",
+            "middleware": "middleware",
+            "middlewares": "middleware",
+            "interceptors": "middleware",
+            "filters": "middleware",
+        }
+        for part in parts:
+            if part in dir_roles:
+                role = dir_roles[part]
+                # Special case: files under data/ whose name contains adapter
+                # are more precisely "adapter" than generic "repository".
+                if role == "repository" and "adapter" in name_no_ext:
+                    return "adapter"
+                # Special case: files under services/ that implement analysis/
+                # retrieval logic are more precisely "analyzer".
+                if role == "service" and any(
+                    token in name_no_ext
+                    for token in ("searcher", "analyzer", "parser", "enricher", "indexer")
+                ):
+                    return "analyzer"
+                return role
+
+        # 4. Name-based role inference (fallback).
+        name_tokens = {
+            "controller": "controller",
+            "handler": "controller",
+            "route": "controller",
+            "router": "controller",
+            "service": "service",
+            "biz": "service",
+            "business": "service",
+            "searcher": "analyzer",
+            "analyzer": "analyzer",
+            "parser": "analyzer",
+            "enricher": "analyzer",
+            "indexer": "analyzer",
+            "repository": "repository",
+            "dao": "repository",
+            "mapper": "repository",
+            "adapter": "adapter",
+            "model": "model",
+            "entity": "model",
+            "domain": "model",
+            "dto": "model",
+            "config": "config",
+            "settings": "config",
+            "properties": "config",
+            "util": "utility",
+            "helper": "utility",
+            "common": "utility",
+            "middleware": "middleware",
+            "interceptor": "middleware",
+            "filter": "middleware",
+        }
+        for token, role in name_tokens.items():
+            if token in name_no_ext:
+                return role
+
         return "other"
 
     def _search_and_fuse(
@@ -732,7 +826,7 @@ class Searcher:
             trace.set_fusion(RRF_K, hits)
 
         schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
-        reranked = CodeReranker().rerank(query, schema_results)
+        reranked = CodeReranker().rerank(query, schema_results, search_terms=search_terms)
 
         m3_reranker = get_m3_reranker()
         final_schemas = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
@@ -1137,6 +1231,7 @@ class Searcher:
                 "rrf": round(getattr(hit, 'rrf_score', 0), 4),
                 "final": round(final_score, 4),
             },
+            file_role=self._infer_file_role(hit.file_path),
         )
 
 
