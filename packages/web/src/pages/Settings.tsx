@@ -35,7 +35,8 @@ interface LLMProvider {
 }
 
 interface UsageSummary {
-  period_minutes: number;
+  period_minutes?: number;
+  period_days?: number;
   total_calls: number;
   success_calls: number;
   error_calls: number;
@@ -59,7 +60,8 @@ interface LLMCostBreakdown {
 }
 
 interface LLMCostEstimate {
-  period_minutes: number;
+  period_minutes?: number;
+  period_days?: number;
   repo_id: string | null;
   total_cost: number;
   total_input_tokens: number;

@@ -114,13 +114,34 @@ export interface LLMCostBreakdown {
 }
 
 export interface LLMCostEstimate {
-  period_minutes: number;
+  period_minutes?: number;
+  period_days?: number;
   repo_id: string | null;
   total_cost: number;
   total_input_tokens: number;
   total_output_tokens: number;
   provider_breakdown: Record<string, LLMCostBreakdown>;
   operation_breakdown: Record<string, LLMCostBreakdown>;
+}
+
+export interface LLMUsageSummary {
+  period_minutes?: number;
+  period_days?: number;
+  total_calls: number;
+  success_calls: number;
+  error_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+}
+
+export interface LLMDailyUsage {
+  date: string;
+  call_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+  cost: number;
 }
 
 // Form types

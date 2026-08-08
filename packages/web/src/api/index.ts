@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext, LLMCostEstimate, DebugSearchResponse, DebugPathOverrides } from '../types';
+import type { Repo, SearchResult, Stats, AddRepoForm, BenchmarkRun, BenchmarkSummary, SearchHistoryStats, SearchHistoryDailyStats, SearchHistoryRecentItem, CodeContext, LLMCostEstimate, LLMUsageSummary, LLMDailyUsage, DebugSearchResponse, DebugPathOverrides } from '../types';
 
 const apiClient = axios.create({
   baseURL: '/api',
@@ -276,20 +276,45 @@ export const fetchLLMProviders = async (): Promise<any[]> => {
   return response.data.providers || [];
 };
 
-export const fetchLLMUsage = async (minutes: number = 60): Promise<any> => {
-  const response = await apiClient.get(`/admin/llm/usage?minutes=${minutes}`);
+export const fetchLLMUsage = async (
+  minutes: number = 60,
+  days?: number,
+): Promise<LLMUsageSummary> => {
+  const params = new URLSearchParams();
+  if (days !== undefined) {
+    params.append('days', String(days));
+  } else {
+    params.append('minutes', String(minutes));
+  }
+  const response = await apiClient.get(`/admin/llm/usage?${params.toString()}`);
   return response.data;
 };
 
 export const fetchLLMCost = async (
   minutes: number = 60,
-  repoId?: string
+  repoId?: string,
+  days?: number,
 ): Promise<LLMCostEstimate> => {
   const params = new URLSearchParams();
-  params.append('minutes', String(minutes));
+  if (days !== undefined) {
+    params.append('days', String(days));
+  } else {
+    params.append('minutes', String(minutes));
+  }
   if (repoId) params.append('repo_id', repoId);
   const response = await apiClient.get(`/admin/llm/cost?${params.toString()}`);
   return response.data;
+};
+
+export const fetchLLMDailyUsage = async (
+  days: number = 7,
+  repoId?: string,
+): Promise<LLMDailyUsage[]> => {
+  const params = new URLSearchParams();
+  params.append('days', String(days));
+  if (repoId) params.append('repo_id', repoId);
+  const response = await apiClient.get(`/admin/llm/daily?${params.toString()}`);
+  return response.data.daily || [];
 };
 
 export const fetchLLMSettings = async (): Promise<any> => {

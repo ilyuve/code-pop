@@ -12,6 +12,7 @@ from services.llm_settings_service import (
     create_provider,
     delete_provider,
     get_cost_estimate,
+    get_daily_usage,
     get_global_settings,
     get_provider,
     get_repo_settings,
@@ -112,17 +113,31 @@ async def provider_test(provider_id: UUID, db: Session = Depends(get_db)) -> Dic
 
 
 @router.get("/usage")
-def usage_summary(minutes: int = 60, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    return get_usage_summary(db, minutes=minutes)
+def usage_summary(
+    minutes: int = 60,
+    days: Optional[int] = None,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return get_usage_summary(db, minutes=minutes, days=days)
 
 
 @router.get("/cost")
 def cost_estimate(
     minutes: int = 60,
+    days: Optional[int] = None,
     repo_id: Optional[UUID] = None,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    return get_cost_estimate(db, minutes=minutes, repo_id=repo_id)
+    return get_cost_estimate(db, minutes=minutes, days=days, repo_id=repo_id)
+
+
+@router.get("/daily")
+def daily_usage(
+    days: int = 7,
+    repo_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return {"daily": get_daily_usage(db, days=days, repo_id=repo_id)}
 
 
 class SettingsUpdate(BaseModel):

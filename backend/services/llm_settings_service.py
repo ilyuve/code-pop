@@ -149,13 +149,24 @@ async def test_provider(db: Session, provider_id: UUID) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-def get_usage_summary(db: Session, minutes: int = 60) -> Dict[str, Any]:
-    """Return aggregated LLM usage statistics."""
+def get_usage_summary(
+    db: Session, minutes: int = 60, days: Optional[int] = None
+) -> Dict[str, Any]:
+    """Return aggregated LLM usage statistics.
+
+    When ``days`` is provided it takes precedence over ``minutes``.
+    """
     from datetime import datetime, timedelta
     from sqlalchemy import func
     from models import LlmUsageLog
 
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    if days is not None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        period_label = {"period_days": days}
+    else:
+        cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+        period_label = {"period_minutes": minutes}
+
     rows = (
         db.query(
             LlmUsageLog.status,
@@ -169,7 +180,7 @@ def get_usage_summary(db: Session, minutes: int = 60) -> Dict[str, Any]:
         .all()
     )
     summary = {
-        "period_minutes": minutes,
+        **period_label,
         "total_calls": 0,
         "success_calls": 0,
         "error_calls": 0,
@@ -212,18 +223,25 @@ def _calculate_token_cost(
 
 
 def get_cost_estimate(
-    db: Session, minutes: int = 60, repo_id: Optional[UUID] = None
+    db: Session, minutes: int = 60, days: Optional[int] = None, repo_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
     """Return estimated LLM cost based on usage logs and provider rates.
 
     Aggregates successful usage logs within the period, joins provider rates,
     and returns total cost plus per-provider and per-operation breakdowns.
+    When ``days`` is provided it takes precedence over ``minutes``.
     """
     from datetime import datetime, timedelta
     from sqlalchemy import func
     from models import LlmProvider, LlmUsageLog
 
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    if days is not None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        period_label = {"period_days": days}
+    else:
+        cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+        period_label = {"period_minutes": minutes}
+
     query = (
         db.query(
             LlmUsageLog.provider_id,
@@ -299,7 +317,7 @@ def get_cost_estimate(
         )
 
     return {
-        "period_minutes": minutes,
+        **period_label,
         "repo_id": str(repo_id) if repo_id else None,
         "total_cost": round(total_cost, 6),
         "total_input_tokens": total_input_tokens,
@@ -307,6 +325,74 @@ def get_cost_estimate(
         "provider_breakdown": provider_breakdown,
         "operation_breakdown": operation_breakdown,
     }
+
+
+def get_daily_usage(
+    db: Session, days: int = 7, repo_id: Optional[UUID] = None
+) -> List[Dict[str, Any]]:
+    """Return daily LLM usage aggregates for charting.
+
+    Returns one row per day with total calls, input/output tokens and
+    estimated cost. Days with no usage are not included.
+    """
+    from datetime import datetime, timedelta
+    from sqlalchemy import func, cast, Date
+    from models import LlmProvider, LlmUsageLog
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    query = (
+        db.query(
+            cast(LlmUsageLog.created_at, Date).label("date"),
+            func.count().label("call_count"),
+            func.coalesce(func.sum(LlmUsageLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(LlmUsageLog.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(LlmUsageLog.latency_ms), 0).label("latency_ms"),
+            LlmProvider.cost_per_1k_input,
+            LlmProvider.cost_per_1k_output,
+        )
+        .outerjoin(LlmProvider, LlmUsageLog.provider_id == LlmProvider.id)
+        .filter(LlmUsageLog.created_at >= cutoff)
+        .filter(LlmUsageLog.status == "success")
+    )
+    if repo_id:
+        query = query.filter(LlmUsageLog.repo_id == repo_id)
+    rows = (
+        query.group_by(
+            cast(LlmUsageLog.created_at, Date),
+            LlmProvider.cost_per_1k_input,
+            LlmProvider.cost_per_1k_output,
+        )
+        .order_by("date")
+        .all()
+    )
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        date_str = str(row.date)
+        entry = result.setdefault(
+            date_str,
+            {
+                "date": date_str,
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "latency_ms": 0,
+                "cost": 0.0,
+            },
+        )
+        input_tokens = int(row.input_tokens)
+        output_tokens = int(row.output_tokens)
+        cost_per_1k_input = _safe_decimal(row.cost_per_1k_input)
+        cost_per_1k_output = _safe_decimal(row.cost_per_1k_output)
+        cost = _calculate_token_cost(
+            input_tokens, output_tokens, cost_per_1k_input, cost_per_1k_output
+        )
+        entry["call_count"] += int(row.call_count)
+        entry["input_tokens"] += input_tokens
+        entry["output_tokens"] += output_tokens
+        entry["latency_ms"] += int(row.latency_ms)
+        entry["cost"] = round(entry["cost"] + cost, 6)
+    return list(result.values())
 
 
 # ---------------------------------------------------------------------------
