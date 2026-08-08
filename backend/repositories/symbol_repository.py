@@ -77,14 +77,11 @@ class SymbolRepository(BaseRepository):
             if sym.id not in best_score or score > best_score[sym.id]:
                 best_score[sym.id] = score
 
-        sorted_ids = sorted(best_score.keys(), key=lambda sid: -best_score[sid])
-        results: List[Symbol] = []
-        for sid in sorted_ids[:limit]:
-            sym = self.db.query(Symbol).filter(Symbol.id == sid).first()
-            if sym:
-                sym._search_score = best_score[sid]
-                results.append(sym)
-        return results
+        sorted_ids = sorted(best_score.keys(), key=lambda sid: -best_score[sid])[:limit]
+        symbols = self.get_by_ids(sorted_ids)
+        for sym in symbols:
+            sym._search_score = best_score[sym.id]
+        return symbols
 
     def get_by_ids(self, symbol_ids: List[UUID]) -> List[Symbol]:
         if not symbol_ids:
