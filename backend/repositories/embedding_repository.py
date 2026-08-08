@@ -1,6 +1,6 @@
 """Repository for Embedding model."""
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from sqlalchemy import text
@@ -20,6 +20,21 @@ class EmbeddingRepository(BaseRepository):
             .order_by(Embedding.start_line)
             .all()
         )
+
+    def get_by_file_ids(self, file_ids: List[UUID]) -> Dict[UUID, List[Embedding]]:
+        """Return embeddings grouped by file_id in a single query."""
+        if not file_ids:
+            return {}
+        rows = (
+            self.db.query(Embedding)
+            .filter(Embedding.file_id.in_(file_ids))
+            .order_by(Embedding.start_line)
+            .all()
+        )
+        result: Dict[UUID, List[Embedding]] = {}
+        for row in rows:
+            result.setdefault(row.file_id, []).append(row)
+        return result
 
     def vector_search(
         self,

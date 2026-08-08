@@ -324,7 +324,7 @@ class TestForceReindexWhenEnrichmentMissing:
             result = _index_file(db, repo_id, repo_path, file_path)
 
         assert result is not None
-        code_file, parse_result = result
+        code_file, parse_result, _ = result
         assert code_file.path == "src/order.py"
         assert parse_result.content_hash == content_hash
         db.delete.assert_called_once_with(existing)

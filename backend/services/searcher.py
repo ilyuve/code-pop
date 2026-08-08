@@ -431,14 +431,17 @@ class Searcher:
             search_latency_ms=0,
         )
 
-    def _symbol_entry_with_label(self, sym: Symbol) -> "SymbolEntry":
+    def _symbol_entry_with_label(
+        self, sym: Symbol, label: Optional[SymbolFlowLabel] = None
+    ) -> "SymbolEntry":
         from schemas import SymbolEntry
 
-        label = (
-            self.db.query(SymbolFlowLabel)
-            .filter(SymbolFlowLabel.symbol_id == sym.id)
-            .first()
-        )
+        if label is None:
+            label = (
+                self.db.query(SymbolFlowLabel)
+                .filter(SymbolFlowLabel.symbol_id == sym.id)
+                .first()
+            )
         return SymbolEntry(
             id=str(sym.id),
             name=sym.name,
@@ -494,22 +497,18 @@ class Searcher:
 
         root_entry = self._symbol_entry_with_label(root)
 
-        upstream = []
-        downstream = []
-
+        caller_ids: List[UUID] = []
+        callee_ids: List[UUID] = []
         if include_callers:
             caller_ids = self._query_callers(root_symbol_id, depth)
-            for cid in caller_ids:
-                sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
-                if sym:
-                    upstream.append(self._symbol_entry_with_label(sym))
-
         if include_callees:
             callee_ids = self._query_callees(root_symbol_id, depth)
-            for cid in callee_ids:
-                sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
-                if sym:
-                    downstream.append(self._symbol_entry_with_label(sym))
+
+        related_ids = set(caller_ids) | set(callee_ids)
+        entries = self._symbol_entries_by_ids(related_ids)
+
+        upstream = [entries[cid] for cid in caller_ids if cid in entries]
+        downstream = [entries[cid] for cid in callee_ids if cid in entries]
 
         return CallChain(
             root=root_entry,
@@ -517,6 +516,31 @@ class Searcher:
             downstream=downstream,
             depth=depth,
         )
+
+    def _symbol_entries_by_ids(
+        self, symbol_ids: Set[UUID]
+    ) -> Dict[UUID, "SymbolEntry"]:
+        """Batch load symbols and their flow labels in two queries.
+
+        Avoids the N+1 pattern when building call chains.
+        """
+        from schemas import SymbolEntry
+
+        if not symbol_ids:
+            return {}
+
+        symbols = self.db.query(Symbol).filter(Symbol.id.in_(list(symbol_ids))).all()
+        labels = {
+            label.symbol_id: label
+            for label in self.db.query(SymbolFlowLabel)
+            .filter(SymbolFlowLabel.symbol_id.in_(list(symbol_ids)))
+            .all()
+        }
+
+        result: Dict[UUID, SymbolEntry] = {}
+        for sym in symbols:
+            result[sym.id] = self._symbol_entry_with_label(sym, labels.get(sym.id))
+        return result
 
     def _query_callers(self, symbol_id: UUID, depth: int) -> List[UUID]:
         results = []
@@ -580,13 +604,10 @@ class Searcher:
             symbols = symbols.filter(Symbol.repo_id == repo_id)
         symbols = symbols.all()
 
-        hits = []
-        for sym in symbols:
-            embeddings = self._file_embeddings(sym.file_id)
-            hit = _symbol_to_hit(sym, embeddings)
+        hits = self._symbols_to_hits(symbols)
+        for hit in hits:
             hit.graph_score = 0.7
             hit.sources.add("graph")
-            hits.append(hit)
 
         return hits
 
@@ -1007,7 +1028,7 @@ class Searcher:
         limit: int = 20,
     ) -> List[SearchResultItem]:
         symbols = self._symbol_search_raw(query, repo_id, limit * 3)
-        hits = [_symbol_to_hit(s, self._file_embeddings(s.file_id)) for s in symbols]
+        hits = self._symbols_to_hits(symbols)
         hits.sort(key=lambda h: h.symbol_score, reverse=True)
         return [self._to_schema(hit) for hit in hits[:limit]]
 
@@ -1057,10 +1078,10 @@ class Searcher:
         top_k: int = 50,
     ) -> List[_Hit]:
         symbols = self._symbol_search_raw(query, repo_id, top_k)
-        hits: List[_Hit] = []
-        for sym in symbols:
-            embeddings = self._file_embeddings(sym.file_id)
-            hit = _symbol_to_hit(sym, embeddings)
+        symbol_by_id = {sym.id: sym for sym in symbols}
+        hits = self._symbols_to_hits(symbols)
+        for hit in hits:
+            sym = symbol_by_id[hit.symbol_id]
             preset_score = getattr(sym, "_search_score", None)
             if preset_score is not None:
                 # Score comes from SymbolRepository (e.g. Chinese flow-label match).
@@ -1074,7 +1095,6 @@ class Searcher:
                     hit.symbol_score = 0.7
             else:
                 hit.symbol_score = 0.5
-            hits.append(hit)
         return hits
 
     def _symbol_search_multi(
@@ -1217,17 +1237,29 @@ class Searcher:
             file_ids = list({h.file_id for h in symbol_hits})
             related_symbols = self.symbol_repo.get_by_file_ids(file_ids, top_k)
 
-        hits: List[_Hit] = []
-        for sym in related_symbols:
-            embeddings = self._file_embeddings(sym.file_id)
-            hit = _symbol_to_hit(sym, embeddings)
+        hits = self._symbols_to_hits(related_symbols)
+        for hit in hits:
             hit.graph_score = 0.7
             hit.sources.add("graph")
-            hits.append(hit)
         return hits
 
     def _file_embeddings(self, file_id: UUID) -> List[Embedding]:
         return self.embedding_repo.get_by_file_id(file_id)
+
+    def _symbols_to_hits(self, symbols: List[Symbol]) -> List[_Hit]:
+        """Convert multiple symbols to hits with a single batched embeddings query.
+
+        Avoids the N+1 pattern caused by calling ``_file_embeddings`` per symbol.
+        """
+        if not symbols:
+            return []
+        file_ids = list({s.file_id for s in symbols})
+        embeddings_by_file = self.embedding_repo.get_by_file_ids(file_ids)
+        hits = []
+        for sym in symbols:
+            hit = _symbol_to_hit(sym, embeddings_by_file.get(sym.file_id, []))
+            hits.append(hit)
+        return hits
 
     def _sparse_search(
         self,

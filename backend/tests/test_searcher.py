@@ -89,15 +89,17 @@ class TestBuildCallChain:
         caller = _make_symbol(symbol_id=caller_id, name="caller")
         callee = _make_symbol(symbol_id=callee_id, name="callee")
 
-        searcher.db.query.return_value.filter.return_value.first.side_effect = [
-            root,
-            caller,
-            callee,
-        ]
+        searcher.db.query.return_value.filter.return_value.first.return_value = root
         searcher._query_callers = MagicMock(return_value=[caller_id])
         searcher._query_callees = MagicMock(return_value=[callee_id])
+
+        # _symbol_entries_by_ids first queries Symbol, then SymbolFlowLabel.
+        searcher.db.query.return_value.filter.return_value.all.side_effect = [
+            [caller, callee],
+            [],
+        ]
         searcher._symbol_entry_with_label = MagicMock(
-            side_effect=lambda sym: SymbolEntry(
+            side_effect=lambda sym, label=None: SymbolEntry(
                 id=str(sym.id),
                 name=sym.name,
                 type=sym.type,
@@ -700,3 +702,77 @@ class TestRouteEntryPoints:
         assert len(context.entry_points) == 2
         assert context.entry_points[0].name == "debug_search"
         assert context.entry_points[0].file_path == "backend/api/search.py"
+
+
+class TestNPlusOneFixes:
+    """Verify the N+1 query optimizations in call-chain and symbol search."""
+
+    def test_build_call_chain_batches_symbol_and_label_queries(self, searcher):
+        """With N callers/callees, only 2 DB bulk queries should run."""
+        from schemas import SymbolEntry
+
+        root_id = uuid4()
+        caller_ids = [uuid4() for _ in range(5)]
+        callee_ids = [uuid4() for _ in range(5)]
+
+        root = _make_symbol(symbol_id=root_id, name="root")
+        callers = [_make_symbol(symbol_id=i, name=f"caller_{n}") for n, i in enumerate(caller_ids)]
+        callees = [_make_symbol(symbol_id=i, name=f"callee_{n}") for n, i in enumerate(callee_ids)]
+
+        searcher.db.query.return_value.filter.return_value.first.return_value = root
+        searcher._query_callers = MagicMock(return_value=caller_ids)
+        searcher._query_callees = MagicMock(return_value=callee_ids)
+
+        # First .all() loads symbols; second .all() loads flow labels.
+        searcher.db.query.return_value.filter.return_value.all.side_effect = [
+            callers + callees,
+            [],
+        ]
+
+        # Mock entry building so we don't depend on real SymbolFlowLabel rows.
+        searcher._symbol_entry_with_label = MagicMock(
+            side_effect=lambda sym, label=None: SymbolEntry(
+                id=str(sym.id),
+                name=sym.name,
+                type=sym.type,
+                file_path=sym.file.path,
+                line=sym.line,
+            )
+        )
+
+        chain = searcher._build_call_chain(
+            root_id, depth=1, include_callers=True, include_callees=True
+        )
+
+        # Upstream + downstream = 10 related symbols loaded in bulk.
+        assert len(chain.upstream) == 5
+        assert len(chain.downstream) == 5
+
+        all_calls = searcher.db.query.return_value.filter.return_value.all.call_args_list
+        assert len(all_calls) == 2, "Expected one bulk Symbol query and one bulk SymbolFlowLabel query"
+
+    def test_symbols_to_hits_batches_embedding_queries(self, searcher):
+        """With N symbols, embeddings should be loaded in a single batch query."""
+        from unittest.mock import patch
+        from models import Embedding
+
+        file_id = uuid4()
+        symbols = [_make_symbol(symbol_id=uuid4(), name=f"sym_{i}") for i in range(5)]
+        for sym in symbols:
+            sym.file_id = file_id
+
+        emb = MagicMock(spec=Embedding)
+        emb.id = uuid4()
+        emb.file_id = file_id
+        emb.start_line = 1
+        emb.end_line = 100
+        emb.content = "def batch(): pass"
+
+        with patch.object(searcher.embedding_repo, "get_by_file_ids", return_value={file_id: [emb]}) as mock_get:
+            hits = searcher._symbols_to_hits(symbols)
+
+        assert len(hits) == 5
+        mock_get.assert_called_once()
+        call_file_ids = mock_get.call_args[0][0]
+        assert file_id in call_file_ids
+        assert len(call_file_ids) == 1
