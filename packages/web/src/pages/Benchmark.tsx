@@ -33,7 +33,8 @@ const PATH_CONFIG: { key: string; label: string; icon: React.ElementType; color:
 ];
 
 const DEFAULT_LIMIT = 20;
-const DEFAULT_TOP_K = 50;
+const DEFAULT_TOP_K = 20;
+const MAX_TOP_K = 20;
 
 export const Benchmark = () => {
   const { repos, isLoading: reposLoading } = useRepos();
@@ -81,7 +82,7 @@ export const Benchmark = () => {
     setTopK((prev) => {
       const next = { ...prev };
       if (Number.isNaN(num) || num <= 0) delete next[key];
-      else next[key] = num;
+      else next[key] = Math.min(num, MAX_TOP_K);
       return next;
     });
   };
@@ -195,6 +196,10 @@ export const Benchmark = () => {
                 ))}
               </div>
 
+              <p className="text-xs text-[#666]">
+                每路召回最多返回 {MAX_TOP_K} 条结果，超过会被截断，便于聚焦高质量候选。
+              </p>
+
               <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
                 {PATH_CONFIG.map((p) => (
                   <div key={`topk-${p.key}`}>
@@ -202,6 +207,7 @@ export const Benchmark = () => {
                     <input
                       type="number"
                       min={1}
+                      max={MAX_TOP_K}
                       value={topK[p.key] ?? DEFAULT_TOP_K}
                       onChange={(e) => updateTopK(p.key, e.target.value)}
                       className="w-full px-2 py-1 rounded-lg border-2 border-[#2D2D2D] bg-white text-sm"
