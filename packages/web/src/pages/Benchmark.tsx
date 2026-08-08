@@ -87,14 +87,20 @@ export const Benchmark = () => {
   };
 
   const updateTopK = (key: string, value: string) => {
-    setTopKInput((prev) => ({ ...prev, [key]: value }));
     const num = parseInt(value, 10);
-    setTopK((prev) => {
-      const next = { ...prev };
-      if (Number.isNaN(num) || num <= 0) delete next[key];
-      else next[key] = Math.min(num, MAX_TOP_K);
-      return next;
-    });
+    if (Number.isNaN(num) || num <= 0) {
+      // Allow empty/transitional input; query will fall back to DEFAULT_TOP_K.
+      setTopKInput((prev) => ({ ...prev, [key]: value }));
+      setTopK((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    } else {
+      const clamped = Math.min(num, MAX_TOP_K);
+      setTopKInput((prev) => ({ ...prev, [key]: String(clamped) }));
+      setTopK((prev) => ({ ...prev, [key]: clamped }));
+    }
   };
 
   const copyJson = () => {
