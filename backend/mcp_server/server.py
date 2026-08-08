@@ -293,13 +293,22 @@ def codepop_impact(
         return json.dumps({"error": "服务暂时不可用", "degraded": True}, ensure_ascii=False)
 
 
+_mcp_streamable_app = None
+_mcp_session_manager = None
+
+
 def get_mcp_app():
     """Get the streamable HTTP ASGI app for mounting in FastAPI."""
-    return mcp.streamable_http_app()
+    global _mcp_streamable_app
+    if _mcp_streamable_app is None:
+        _mcp_streamable_app = mcp.streamable_http_app()
+    return _mcp_streamable_app
 
 
 def get_mcp_session_manager():
     """Get the MCP session manager for lifespan management."""
-    # 触发 session manager 的创建
-    _ = mcp.streamable_http_app()
-    return mcp._session_manager
+    global _mcp_session_manager
+    if _mcp_session_manager is None:
+        _ = get_mcp_app()
+        _mcp_session_manager = mcp._session_manager
+    return _mcp_session_manager
