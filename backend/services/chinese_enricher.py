@@ -233,60 +233,16 @@ def expand_query_with_synonyms(
     query: str,
     domain_synonyms: Dict[str, List[str]],
 ) -> List[str]:
-    """Generate query variants by replacing canonical terms with their synonyms.
-
-    Generates single-term replacements and a conservative set of pairwise
-    combinations. Combinations are restricted to short, pure-Chinese synonyms
-    to avoid the noise and explosion that comes from combining English
-    identifiers or long compound synonyms (e.g. ``AdapterFactory搜索模式``).
-    """
+    """Generate query variants by replacing canonical terms with their synonyms."""
     variants = {query}
-
-    # Collect terms that actually appear in the query and have usable synonyms.
-    matched_terms: List[Tuple[str, List[str]]] = []
     for term, synonyms in domain_synonyms.items():
         if term in query:
-            cleaned = [s for s in synonyms if s and s != term]
-            if cleaned:
-                matched_terms.append((term, cleaned))
-
-    # Single-term replacements.
-    for term, synonyms in matched_terms:
-        for synonym in synonyms:
-            variants.add(query.replace(term, synonym))
-
-    # Pairwise combinations: replace two distinct terms at the same time.
-    # Restrict to short pure-Chinese synonyms and cap per term to keep the
-    # variant set small and high-quality.
-    for i, (term1, syns1) in enumerate(matched_terms):
-        for term2, syns2 in matched_terms[i + 1 :]:
-            if term1 in term2 or term2 in term1:
-                continue
-            combo1 = _chinese_synonyms_for_combo(syns1)
-            combo2 = _chinese_synonyms_for_combo(syns2)
-            for synonym1 in combo1:
-                for synonym2 in combo2:
-                    variant = query.replace(term1, synonym1).replace(term2, synonym2)
-                    variants.add(variant)
-
+            for synonym in synonyms:
+                if synonym == term:
+                    continue
+                variant = query.replace(term, synonym)
+                variants.add(variant)
     return sorted(variants)
-
-
-def _chinese_synonyms_for_combo(synonyms: List[str], max_count: int = 3) -> List[str]:
-    """Filter synonyms suitable for pairwise combination.
-
-    Only keeps short pure-Chinese synonyms to avoid generating noisy mixed
-    English/Chinese variants or over-expanding on long compound synonyms.
-    """
-    import re
-
-    result: List[str] = []
-    for s in synonyms:
-        if re.fullmatch(r"[\u4e00-\u9fff]{1,4}", s) and s not in result:
-            result.append(s)
-            if len(result) >= max_count:
-                break
-    return result
 
 
 def save_embedding_enrichment(
