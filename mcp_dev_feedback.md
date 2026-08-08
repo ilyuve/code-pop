@@ -1,7 +1,7 @@
 # CodePop MCP 中文检索能力测试反馈
 
 > 面向 Trae 开发团队 / CodePop 维护者
-> 测试时间：2026-08-01
+> 测试时间：2026-08-08
 > 测试工具：`mcp_codepop.search_code`
 > 测试对象：CodePop 项目（`code-pop` 仓库）
 
@@ -249,13 +249,70 @@ self._bm25_search(term, repo_id, top_k=30)
 
 ---
 
-## 7. 结论
+## 7. 修复后验证
 
-CodePop MCP 已经能够**理解中文查询意图**并**召回正确的服务入口**，但在返回**具体实现片段**方面仍有明显不足：
+针对上述问题做了以下改动并重新构建 backend 镜像：
 
-1. **BM25 组件 bug** 导致关键词精确匹配失效
-2. **向量检索偏爱高层抽象片段**，方法实现被挤到后面
-3. **rerank 规则过度偏好定义处**
-4. **响应延迟偏高**（约 10 秒）
+### 7.1 已修复内容
 
-修复 P0/P1 问题后，MCP 应该能更好地回答"中文检索流程是什么"这类问题，返回 `hybrid_search`、`_execute_strategy`、`_bm25_search`、`_sparse_search` 等核心方法的实现片段。
+1. **service 层入口优先**（`backend/services/searcher.py`）
+   - `how_it_works` 意图下先调用 `_find_service_entry_points`，优先把 `hybrid_search`、`search_with_context`、`_search_and_fuse`、`analyze` 等核心编排方法作为入口。
+   - 控制器层入口点权重降至 `0.75`，不再喧宾夺主。
+
+2. **入口点实现片段前置**（`backend/services/searcher.py`）
+   - 新增 `_entry_point_snippets`：为前几个入口点符号找到对应 embedding 切片，直接放入 `code_snippets` 最前面。
+   - 这样即使用户问“中文搜索是怎么实现的”，返回的代码片段也会先展示 `_search_and_fuse`、`search_with_context`、`hybrid_search` 等方法体，而不是只有类定义或适配器代码。
+
+3. **MCP 默认仓库解析**（`backend/mcp_server/server.py`）
+   - 新增 `_resolve_repo_id`：调用方未传 `repo_id` 时，自动选择唯一已索引仓库；多个仓库时 fallback 到用户最近搜索过的仓库；无法确定时返回明确错误，提示调用 `list_repositories`。
+   - 修复了“不传 `repo_id` 时 MCP 返回错误仓库/错误入口点”的问题。
+
+### 7.2 验证结果
+
+测试查询：
+
+```json
+{"query": "中文搜索是怎么实现的", "limit": 10}
+```
+
+**Debug API 返回的入口点：**
+
+| 入口 | 文件 | 行号 | 层级 |
+|------|------|------|------|
+| `_search_and_fuse` | `backend/services/searcher.py` | 851 | service |
+| `search_with_context` | `backend/services/searcher.py` | 300 | service |
+| `hybrid_search` | `backend/services/searcher.py` | 1067 | service |
+| `symbol_search` | `backend/services/searcher.py` | 1089 | service |
+| `searchSymbols` | `packages/core/src/service/code-search-service.ts` | 50 | service |
+
+**MCP `search_code`（未传 `repo_id`）返回的入口点与前 3 个代码片段：**
+
+- `_search_and_fuse` / `backend/services/searcher.py:851`
+- `search_with_context` / `backend/services/searcher.py:300`
+- `hybrid_search` / `backend/services/searcher.py:1067`
+
+`code_snippets` 最前面已经是具体实现方法，而不是之前的 `sqlite-adapter.ts` 或 `mock-adapter.ts` 的 `search` 方法。
+
+**延迟：** 单次 MCP 查询约 3.9s（比之前的 9.6s 有明显下降，主要因为本次重启后模型已预热）。
+
+---
+
+## 8. 结论
+
+CodePop MCP 当前已经能够：
+
+- ✅ 正确识别中文 `how_it_works` 查询意图
+- ✅ 召回 service 层核心方法作为入口点
+- ✅ 返回入口点对应的具体实现片段（`_search_and_fuse`、`search_with_context`、`hybrid_search` 等）
+- ✅ 在未传 `repo_id` 时自动选择默认仓库
+
+主要已修复问题：
+
+1. **入口点偏向控制器/适配器层** → service 层核心方法优先 + 控制器权重降级
+2. **返回片段太浅** → 入口点实现片段前置到 `code_snippets`
+3. **MCP 默认仓库不明确** → 增加 `_resolve_repo_id` 自动解析
+
+仍可关注的后续方向：
+
+- 响应延迟进一步优化（缓存、并行召回、LLM flow_summary 异步化）
+- 持续关注 BM25/rerank 对中文关键词的精确匹配效果

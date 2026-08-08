@@ -115,12 +115,20 @@ def search_code(
     Args:
         query: Natural language query in Chinese or English.
             Examples: '登录流程在哪', 'how does authentication work', '改了 UserService 会影响哪里'
-        repo_id: Optional repository UUID to restrict search. 不传则全局搜索所有仓库。
+        repo_id: Optional repository UUID to restrict search. 不传时自动选择唯一已索引仓库或最近搜索过的仓库。
         limit: Maximum number of code snippets (default: 10)
     """
     try:
         with _db_session() as db:
-            repo_uuid = UUID(repo_id) if repo_id else None
+            repo_uuid = _resolve_repo_id(db, repo_id)
+            if repo_uuid is None:
+                return json.dumps(
+                    {
+                        "error": "未找到默认仓库，请先调用 list_repositories 选择仓库并提供 repo_id",
+                        "degraded": True,
+                    },
+                    ensure_ascii=False,
+                )
             searcher = Searcher(db)
 
             start = time.time()

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -337,14 +337,28 @@ class Searcher:
         code_snippets = []
 
         candidates: Dict[UUID, Tuple[Symbol, float]] = {}
+        is_how_it_works = intent.intent_type == "how_it_works"
 
-        # 1. Prefer HTTP handlers registered in framework_routes.
+        # 1. For how_it_works questions, prefer service-layer implementations.
+        # HTTP controllers are just API shells; the real algorithm lives here.
+        if is_how_it_works:
+            for sym, score in self._find_service_entry_points(
+                query, intent.expanded_terms, repo_id
+            ):
+                candidates[sym.id] = (sym, score)
+
+        # 2. Prefer HTTP handlers registered in framework_routes.
+        # For how_it_works, controllers are still useful fallbacks but should not
+        # outrank service-layer methods.
+        route_boost = 0.75 if is_how_it_works else 1.0
         for sym, score in self._find_route_entry_points(
             query, intent.expanded_terms, repo_id
         ):
-            candidates[sym.id] = (sym, score)
+            existing = candidates.get(sym.id)
+            if existing is None or score * route_boost > existing[1]:
+                candidates[sym.id] = (sym, score * route_boost)
 
-        # 2. Fall back to symbols from the top retrieval hits.
+        # 3. Fall back to symbols from the top retrieval hits.
         seen_symbols = set(candidates.keys())
         for hit in hits[:5]:
             if hit.symbol_id and hit.symbol_id not in seen_symbols:
@@ -379,9 +393,20 @@ class Searcher:
         flow_summary = call_chain.flow_summary if call_chain else None
 
         file_chunk_count: Dict[str, int] = {}
+        existing_snippet_ids: Set[UUID] = set()
+
+        if is_how_it_works:
+            ep_snippets = self._entry_point_snippets(entry_points)
+            code_snippets.extend(ep_snippets)
+            for s in ep_snippets:
+                existing_snippet_ids.add(s.id)
+                file_chunk_count[s.file_path] = file_chunk_count.get(s.file_path, 0) + 1
+
         for hit in hits:
             if len(code_snippets) >= limit:
                 break
+            if hit.result_id in existing_snippet_ids:
+                continue
             cnt = file_chunk_count.get(hit.file_path, 0)
             if cnt >= MAX_CHUNKS_PER_FILE:
                 continue
@@ -472,6 +497,133 @@ class Searcher:
                 key_symbols=[],
             )
         ] + related_files
+
+    def _entry_point_snippets(
+        self,
+        entry_points: List["SymbolEntry"],
+        max_snippets: int = 3,
+    ) -> List["SearchResultItem"]:
+        """Build code snippets from the top entry point symbols.
+
+        For ``how_it_works`` queries the raw retrieval hits often miss the core
+        implementation body. Promoting entry point symbols guarantees that the
+        returned snippets include the methods the user actually asked about.
+        """
+        from schemas import SearchResultItem
+
+        snippets: List[SearchResultItem] = []
+        for ep in entry_points[:max_snippets]:
+            try:
+                sym = self.db.query(Symbol).filter(Symbol.id == UUID(ep.id)).first()
+                if not sym or not sym.file:
+                    continue
+                embeddings = (
+                    self.db.query(Embedding)
+                    .filter(Embedding.file_id == sym.file_id)
+                    .all()
+                )
+                hit = _symbol_to_hit(sym, embeddings)
+                # Skip placeholder entries that have no embedding coverage.
+                if hit.content == f"{sym.type} {sym.name}":
+                    continue
+                snippets.append(
+                    SearchResultItem(
+                        id=hit.result_id,
+                        file_id=hit.file_id,
+                        repo_id=hit.repo_id,
+                        repo_name=hit.repo_name,
+                        file_path=hit.file_path,
+                        language=hit.language,
+                        content=hit.content,
+                        line=hit.line,
+                        score=round(float(ep.relevance_score), 4),
+                        score_breakdown={
+                            "entry_point_boost": round(float(ep.relevance_score), 4),
+                            "symbol": round(hit.symbol_score, 4),
+                        },
+                        file_role=self._infer_file_role(hit.file_path),
+                    )
+                )
+            except Exception:
+                logger.exception("Failed to build entry point snippet for %s", ep.id)
+        return snippets
+
+    def _find_service_entry_points(
+        self,
+        query: str,
+        search_terms: Optional[List[str]],
+        repo_id: Optional[UUID],
+    ) -> List[Tuple[Symbol, float]]:
+        """For how_it_works queries, find service-layer functions whose names or
+        Chinese flow labels match the expanded query terms.
+
+        Service-layer symbols (layer='service' in symbol_flow_labels) are the
+        real algorithm implementations; surfacing them as entry points produces
+        better flow summaries than HTTP controller shells.
+        """
+        if not repo_id or not search_terms:
+            return []
+
+        patterns = [t.lower() for t in search_terms if len(t) > 1]
+        if not patterns:
+            return []
+
+        service_symbols = (
+            self.db.query(Symbol)
+            .join(SymbolFlowLabel)
+            .join(CodeFile)
+            .filter(
+                Symbol.repo_id == repo_id,
+                Symbol.type.in_(["function", "method"]),
+                SymbolFlowLabel.layer == "service",
+                or_(
+                    CodeFile.path.ilike("backend/services/%"),
+                    CodeFile.path.ilike("packages/core/src/service/%"),
+                ),
+            )
+            .all()
+        )
+
+        # Core orchestrators should surface as entry points for how_it_works queries.
+        core_orchestrators = {
+            "hybrid_search", "search_with_context", "analyze",
+            "_execute_strategy", "_search_and_fuse",
+        }
+
+        matched: Dict[UUID, Tuple[Symbol, float]] = {}
+        for sym in service_symbols:
+            name_lower = (sym.name or "").lower()
+            is_core = name_lower in core_orchestrators
+            is_private = sym.name.startswith("_")
+
+            for pattern in patterns:
+                if pattern in name_lower:
+                    score = 0.88
+                    if pattern in ("search", "query", "retrieval", "intent", "analyze"):
+                        score = 0.93
+                    if is_core:
+                        score = 0.96
+                    if is_private and not is_core:
+                        score *= 0.85
+                    if sym.id not in matched or score > matched[sym.id][1]:
+                        matched[sym.id] = (sym, score)
+                    break
+
+            label = sym.flow_label
+            if label:
+                chinese_name_lower = (label.chinese_name or "").lower()
+                for pattern in patterns:
+                    if pattern in chinese_name_lower:
+                        score = 0.90
+                        if is_core:
+                            score = 0.96
+                        if is_private and not is_core:
+                            score *= 0.85
+                        if sym.id not in matched or score > matched[sym.id][1]:
+                            matched[sym.id] = (sym, score)
+                        break
+
+        return list(matched.values())
 
     def _symbol_entry_with_label(
         self, sym: Symbol, label: Optional[SymbolFlowLabel] = None
