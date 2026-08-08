@@ -10,6 +10,8 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 
+from sqlalchemy import desc
+
 from database import get_db_with_retry
 from models import CodeFile, Repository, SearchHistory, Symbol
 from schemas import SearchResultItem
@@ -52,6 +54,38 @@ def _record_mcp_search(db, query: str, repo_id: Optional[UUID], mode: str, resul
     db.commit()
 
 
+def _resolve_repo_id(db, repo_id: Optional[str]) -> Optional[UUID]:
+    """Resolve the target repository when the caller does not provide one.
+
+    Prefer a single indexed repo; otherwise fall back to the user's most
+    recent search repo. Return None when no safe default exists so the
+    caller can ask the user to call list_repositories.
+    """
+    if repo_id:
+        return UUID(repo_id)
+
+    indexed_repos = (
+        db.query(Repository)
+        .filter(Repository.status == "indexed")
+        .order_by(desc(Repository.last_indexed_at))
+        .all()
+    )
+    if len(indexed_repos) == 1:
+        return indexed_repos[0].id
+
+    if len(indexed_repos) > 1:
+        latest_search = (
+            db.query(SearchHistory)
+            .filter(SearchHistory.repo_id.isnot(None))
+            .order_by(desc(SearchHistory.created_at))
+            .first()
+        )
+        if latest_search and latest_search.repo_id:
+            return latest_search.repo_id
+
+    return None
+
+
 @mcp.tool()
 def search_code(
     query: str,
@@ -73,10 +107,15 @@ def search_code(
     支持中文和英文自然语言查询。直接传入用户的原话，不需要翻译。
     返回结构化结果：入口点、调用链上下游、涉及文件、代码片段。
 
+    【重要】仓库默认全局搜索：
+    如果用户没有明确指定是哪个项目/仓库，直接调用本工具即可，无需先获取 repo_id。
+    系统会跨所有已索引仓库搜索，每个结果都带有 repo_name 字段，可根据 repo_name 区分来源仓库。
+    仅当用户明确提到某个具体项目时，才需要先调用 list_repositories 获取其 repo_id 再传入。
+
     Args:
         query: Natural language query in Chinese or English.
             Examples: '登录流程在哪', 'how does authentication work', '改了 UserService 会影响哪里'
-        repo_id: Optional repository UUID to restrict search
+        repo_id: Optional repository UUID to restrict search. 不传则全局搜索所有仓库。
         limit: Maximum number of code snippets (default: 10)
     """
     try:
@@ -119,10 +158,15 @@ def analyze_impact(
     Use this when the user asks about changing, refactoring, or deleting a function/class.
     当用户说"改了 xxx"、"删掉 xxx 会怎样"、"重构 xxx"时调用。
 
+    【重要】默认全局分析：
+    如果用户没有明确指定是哪个项目/仓库，直接调用即可，无需先获取 repo_id。
+    结果会跨所有已索引仓库分析，并带有 repo_name 区分来源仓库。
+    仅当用户明确提到某个具体项目时，才需要先调用 list_repositories 获取其 repo_id 再传入。
+
     Args:
         query: Symbol name or description.
             Examples: 'UserService.findById', '如果改了登录接口'
-        repo_id: Optional repository UUID
+        repo_id: Optional repository UUID. 不传则全局分析所有仓库。
         depth: Call chain depth for impact analysis (default: 3)
     """
     try:
@@ -244,9 +288,14 @@ def codepop_impact(
     """
     分析修改某个函数的影响面。
 
+    【重要】默认全局分析：
+    如果用户没有明确指定是哪个项目/仓库，直接调用即可，无需先获取 repo_id。
+    结果会跨所有已索引仓库分析。仅当用户明确提到某个具体项目时，
+    才需要先调用 list_repositories 获取其 repo_id 再传入。
+
     Args:
         symbol_name: 要分析的函数/方法名
-        repo_id: 仓库 ID，默认使用配置中的默认仓库
+        repo_id: 仓库 ID，不传则全局分析所有仓库
 
     Returns:
         影响面分析报告，包括受影响的路由和调用链
