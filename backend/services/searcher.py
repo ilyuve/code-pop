@@ -12,14 +12,14 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol, SymbolFlowLabel
+from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, SparseEmbedding, Symbol, SymbolFlowLabel
 from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.llm_router import LLMRouter
 from services.llm_settings_service import get_effective_settings
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
 from services.query_normalizer import SymbolNormalizer
-from services.reranker import CodeReranker, M3Reranker, get_m3_reranker
+from services.reranker import ROLE_WEIGHTS, CodeReranker, M3Reranker, get_m3_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class _Hit:
     symbol_id: Optional[UUID] = None
     symbol_name: Optional[str] = None
     rrf_score: float = 0.0
+    score: float = 0.0
 
 
 @dataclass
@@ -334,15 +335,31 @@ class Searcher:
         related_files = []
         code_snippets = []
 
-        seen_symbols = set()
+        candidates: Dict[UUID, Tuple[Symbol, float]] = {}
+
+        # 1. Prefer HTTP handlers registered in framework_routes.
+        for sym, score in self._find_route_entry_points(
+            query, intent.expanded_terms, repo_id
+        ):
+            candidates[sym.id] = (sym, score)
+
+        # 2. Fall back to symbols from the top retrieval hits.
+        seen_symbols = set(candidates.keys())
         for hit in hits[:5]:
             if hit.symbol_id and hit.symbol_id not in seen_symbols:
                 seen_symbols.add(hit.symbol_id)
                 sym = self.db.query(Symbol).filter(Symbol.id == hit.symbol_id).first()
                 if sym:
-                    entry_point = self._symbol_entry_with_label(sym)
-                    entry_point.relevance_score = _combined_score(hit)
-                    entry_points.append(entry_point)
+                    candidates[sym.id] = (sym, self._final_score(hit))
+
+        # Keep the top 5 most relevant entry points.
+        sorted_candidates = sorted(
+            candidates.values(), key=lambda item: -item[1]
+        )
+        for sym, score in sorted_candidates[:5]:
+            entry_point = self._symbol_entry_with_label(sym)
+            entry_point.relevance_score = score
+            entry_points.append(entry_point)
 
         if strategy.include_callers or strategy.include_callees:
             if entry_points:
@@ -713,6 +730,59 @@ class Searcher:
 
         return "other"
 
+    def _find_route_entry_points(
+        self,
+        query: str,
+        search_terms: Optional[List[str]],
+        repo_id: Optional[UUID],
+    ) -> List[Tuple[Symbol, float]]:
+        """Prioritize HTTP handler symbols that match the query in framework_routes.
+
+        When a user asks about a feature, the real entry point is usually the
+        HTTP handler (controller / API endpoint) rather than an internal helper
+        or core adapter. Route matches are scored slightly below a perfect M3
+        hit but above most generic symbols so they surface as entry points.
+        """
+        if not repo_id or not search_terms:
+            return []
+
+        patterns = [t.lower() for t in search_terms if len(t) > 1]
+        if not patterns:
+            return []
+
+        routes = (
+            self.db.query(FrameworkRoute)
+            .filter(FrameworkRoute.repo_id == repo_id)
+            .all()
+        )
+
+        matched: Dict[UUID, Tuple[Symbol, float]] = {}
+        for route in routes:
+            path_lower = (route.path or "").lower()
+            handler_lower = (route.handler_symbol or "").lower()
+            for pattern in patterns:
+                if pattern in path_lower or pattern in handler_lower:
+                    sym = (
+                        self.db.query(Symbol)
+                        .filter(
+                            Symbol.repo_id == repo_id,
+                            Symbol.name == route.handler_symbol,
+                            Symbol.file_id == route.file_id,
+                        )
+                        .first()
+                    )
+                    if sym is None:
+                        break
+                    # Boost controllers/handlers so they outrank internal helpers.
+                    score = 0.92
+                    if pattern in handler_lower:
+                        score = 0.96
+                    if sym.id not in matched or score > matched[sym.id][1]:
+                        matched[sym.id] = (sym, score)
+                    break
+
+        return list(matched.values())
+
     def _search_and_fuse(
         self,
         query: str,
@@ -749,7 +819,7 @@ class Searcher:
         }))
         top_k_overrides: Dict[str, int] = overrides.get("top_k", {})
 
-        def _top_k(name: str, default: int = 50) -> int:
+        def _top_k(name: str, default: int = 20) -> int:
             return top_k_overrides.get(name, default)
 
         def _run_path(name: str, runner) -> List[_Hit]:
@@ -831,6 +901,16 @@ class Searcher:
         m3_reranker = get_m3_reranker()
         final_schemas = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
 
+        # M3 reranker recomputes scores from scratch and discards the role
+        # weights applied by CodeReranker. Re-apply them when the model is
+        # loaded so the final ranking respects file roles.
+        if m3_reranker.model is not None:
+            for schema in final_schemas:
+                role = getattr(schema, "file_role", None) or "other"
+                weight = ROLE_WEIGHTS.get(role, 1.0)
+                schema.score *= weight
+            final_schemas.sort(key=lambda x: -x.score)
+
         if trace is not None:
             trace.set_rerank(
                 code_reranker_input_count=len(schema_results),
@@ -840,12 +920,15 @@ class Searcher:
             )
 
         # Map reranked schemas back to _Hit objects so callers can still
-        # access hit.symbol_id and other internal metadata.
+        # access hit.symbol_id and other internal metadata. Preserve the RRF
+        # score for debugging and overwrite hit.score with the M3 reranked
+        # score so that downstream callers see the final ranking score.
         hit_by_id = {hit.result_id: hit for hit in hits}
         final_hits: List[_Hit] = []
         for schema in final_schemas:
             hit = hit_by_id.get(schema.id)
             if hit:
+                hit.score = schema.score
                 final_hits.append(hit)
         return final_hits
 
@@ -1208,10 +1291,17 @@ class Searcher:
         return hits
 
     def _final_score(self, hit: _Hit) -> float:
+        # If the M3 reranker has overwritten hit.score, use it as the final
+        # score. Otherwise fall back to the RRF combined score.
+        if hit.score:
+            return hit.score
         return _combined_score(hit)
 
     def _to_schema(self, hit: _Hit) -> SearchResultItem:
-        final_score = getattr(hit, 'rrf_score', self._final_score(hit))
+        # ``hit.score`` may have been overwritten by the M3 reranker; if so we
+        # use it as the final score. Otherwise fall back to the RRF score.
+        final_score = self._final_score(hit)
+        rrf_score = getattr(hit, 'rrf_score', _combined_score(hit))
         return SearchResultItem(
             id=hit.result_id,
             file_id=hit.file_id,
@@ -1228,7 +1318,7 @@ class Searcher:
                 "bm25": round(hit.bm25_score, 4),
                 "graph": round(hit.graph_score, 4),
                 "sparse": round(hit.sparse_score, 4),
-                "rrf": round(getattr(hit, 'rrf_score', 0), 4),
+                "rrf": round(rrf_score, 4),
                 "final": round(final_score, 4),
             },
             file_role=self._infer_file_role(hit.file_path),

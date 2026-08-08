@@ -76,28 +76,31 @@ def get_m3_reranker() -> M3Reranker:
     return _m3_reranker_instance
 
 
+ROLE_WEIGHTS = {
+    "analyzer": 1.25,
+    "searcher": 1.25,
+    "service": 1.2,
+    "controller": 1.15,
+    "handler": 1.15,
+    "repository": 1.05,
+    "dao": 1.05,
+    "model": 0.8,
+    "entity": 0.8,
+    "dto": 0.75,
+    "adapter": 0.75,
+    "web": 0.8,
+    "config": 0.7,
+    "test": 0.5,
+    "utility": 1.0,
+    "middleware": 1.0,
+    "other": 1.0,
+}
+
+
 class CodeReranker:
     """基于代码特征的轻量 reranker，纯规则，不依赖 LLM。"""
 
-    ROLE_WEIGHTS = {
-        "analyzer": 1.25,
-        "searcher": 1.25,
-        "service": 1.2,
-        "controller": 1.15,
-        "handler": 1.15,
-        "repository": 1.05,
-        "dao": 1.05,
-        "model": 0.8,
-        "entity": 0.8,
-        "dto": 0.75,
-        "adapter": 0.75,
-        "web": 0.8,
-        "config": 0.7,
-        "test": 0.5,
-        "utility": 1.0,
-        "middleware": 1.0,
-        "other": 1.0,
-    }
+    ROLE_WEIGHTS = ROLE_WEIGHTS
 
     def rerank(
         self,
