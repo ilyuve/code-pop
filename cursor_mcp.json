@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "codepop": {
-      "url": "http://localhost:8080/mcp/sse"
+      "url": "http://localhost:18080/mcp/sse"
     }
   }
 }

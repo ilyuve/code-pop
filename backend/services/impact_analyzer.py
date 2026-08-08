@@ -76,10 +76,16 @@ class ImpactAnalyzer:
 
         risk = self._calculate_risk(affected_routes, upstream_chain)
 
+        file_path = ""
+        line = 0
+        if symbol_info and symbol_info.file:
+            file_path = symbol_info.file.path
+            line = symbol_info.line
+
         return ImpactResult(
             symbol=symbol_name,
-            file_path=symbol_info.file_path if symbol_info else "",
-            line=symbol_info.line if symbol_info else 0,
+            file_path=file_path,
+            line=line,
             affected_routes=affected_routes,
             upstream_chain=upstream_chain,
             depth=len(upstream_chain) - 1,

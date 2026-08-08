@@ -230,6 +230,7 @@ class CodeContext(BaseModel):
     code_snippets: List[SearchResultItem] = []
     total_files: int = 0
     total_symbols: int = 0
+    search_latency_ms: int = 0
 
 
 class DebugPathOverrides(BaseModel):

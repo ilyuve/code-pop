@@ -19,7 +19,7 @@ from services.searcher import Searcher
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("codepop", streamable_http_path="/sse")
+mcp = FastMCP("codepop", streamable_http_path="/sse", stateless_http=True)
 embedder = Embedder()
 
 
