@@ -44,9 +44,18 @@ export const Benchmark = () => {
   const [paramsOpen, setParamsOpen] = useState(false);
   const [enabledPaths, setEnabledPaths] = useState<Set<string>>(() => new Set(PATH_CONFIG.map((p) => p.key)));
   const [topK, setTopK] = useState<Record<string, number>>({});
+  const [topKInput, setTopKInput] = useState<Record<string, string>>({});
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [expandedFusion, setExpandedFusion] = useState(false);
   const [activeTab, setActiveTab] = useState<'context' | 'json'>('context');
+
+  const effectiveTopK = useMemo(() => {
+    const result: Record<string, number> = {};
+    PATH_CONFIG.forEach((p) => {
+      result[p.key] = topK[p.key] ?? DEFAULT_TOP_K;
+    });
+    return result;
+  }, [topK]);
 
   const debugMutation = useMutation({
     mutationFn: () =>
@@ -56,7 +65,7 @@ export const Benchmark = () => {
         limit,
         {
           enabled: Array.from(enabledPaths),
-          top_k: Object.fromEntries(Object.entries(topK).filter(([, v]) => v > 0)),
+          top_k: Object.fromEntries(Object.entries(effectiveTopK).filter(([, v]) => v > 0)),
         }
       ),
   });
@@ -78,6 +87,7 @@ export const Benchmark = () => {
   };
 
   const updateTopK = (key: string, value: string) => {
+    setTopKInput((prev) => ({ ...prev, [key]: value }));
     const num = parseInt(value, 10);
     setTopK((prev) => {
       const next = { ...prev };
@@ -197,7 +207,7 @@ export const Benchmark = () => {
               </div>
 
               <p className="text-xs text-[#666]">
-                每路召回最多返回 {MAX_TOP_K} 条结果，超过会被截断，便于聚焦高质量候选。
+                每路召回 top_k 范围 1~{MAX_TOP_K}，留空则默认使用 {DEFAULT_TOP_K}。
               </p>
 
               <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
@@ -208,7 +218,8 @@ export const Benchmark = () => {
                       type="number"
                       min={1}
                       max={MAX_TOP_K}
-                      value={topK[p.key] ?? DEFAULT_TOP_K}
+                      value={topKInput[p.key] ?? ''}
+                      placeholder={String(DEFAULT_TOP_K)}
                       onChange={(e) => updateTopK(p.key, e.target.value)}
                       className="w-full px-2 py-1 rounded-lg border-2 border-[#2D2D2D] bg-white text-sm"
                     />
