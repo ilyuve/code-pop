@@ -362,14 +362,11 @@ class QueryIntentAnalyzer:
             f"Concepts: {', '.join(concepts)}\n\n"
             "Return JSON only, no markdown."
         )
-        import asyncio
         import json as _json
 
-        response, _provider_id = asyncio.run(
-            llm_router.chat(
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
+        response, _provider_id = llm_router.chat_sync(
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
         )
         data = _json.loads(response.content)
         terms: Set[str] = set()

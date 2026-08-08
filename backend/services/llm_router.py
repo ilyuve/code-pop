@@ -1,6 +1,7 @@
 """Multi-provider LLM router with automatic fallback and degradation tracking."""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 from datetime import datetime, timedelta
@@ -177,6 +178,32 @@ class LLMRouter:
                 continue
 
         raise LLMUnavailableError(f"All LLM providers failed. Last error: {last_error}")
+
+    def chat_sync(
+        self,
+        messages: List[Dict[str, str]],
+        operation: str = "chat",
+        repo_id: Optional[str] = None,
+        response_format: Optional[Dict[str, str]] = None,
+    ) -> Tuple[LLMChatResponse, str]:
+        """Synchronous wrapper around :meth:`chat`.
+
+        Safe to call from contexts that already have a running event loop
+        (e.g. MCP tools executed inside an async transport).
+        """
+        coro = self.chat(
+            messages,
+            operation=operation,
+            repo_id=repo_id,
+            response_format=response_format,
+        )
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            # Already inside a running event loop. Run the coroutine in a
+            # dedicated thread that owns its own event loop.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(asyncio.run, coro).result()
 
     async def embed(
         self,
