@@ -185,6 +185,7 @@ class BenchmarkRun(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     query = Column(Text, nullable=False)
     repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True)
+    branch = Column(String(128), default="main", nullable=False)
     mode = Column(String(32), default=BenchmarkMode.with_codepop.value, nullable=False)
     latency_ms = Column(Integer, default=0, nullable=False)
     results_count = Column(Integer, default=0, nullable=False)
