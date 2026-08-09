@@ -27,6 +27,17 @@ from services.repo_sync import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_git_url(url: str) -> str:
+    """归一化 git 地址用于重复检测：去首尾空白/尾斜杠、转小写、去掉 .git 后缀。
+
+    例如 https://gitee.com/lynnono/demo.git 与 https://Gitee.com/lynnono/demo 视为同一仓库。
+    """
+    u = (url or "").strip().rstrip("/").lower()
+    if u.endswith(".git"):
+        u = u[: -len(".git")]
+    return u
+
+
 def _fetch_repo_description(git_url: str) -> str:
     """从 GitHub/Gitee API 拉取仓库简介，失败或非公开仓库时降级为空串。"""
     import urllib.parse
@@ -109,7 +120,15 @@ async def create_repo(
 
     default_branch = "main"
     if payload.git_url:
-        existing = db.query(Repository).filter(Repository.git_url == payload.git_url).first()
+        normalized = _normalize_git_url(payload.git_url)
+        existing = next(
+            (
+                r
+                for r in db.query(Repository).all()
+                if r.git_url and _normalize_git_url(r.git_url) == normalized
+            ),
+            None,
+        )
         if existing:
             raise RepoAlreadyExistsException(payload.git_url)
         try:

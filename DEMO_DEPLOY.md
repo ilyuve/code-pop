@@ -90,14 +90,14 @@ docker compose -f docker-compose.demo.yml pull
 docker compose -f docker-compose.demo.yml up -d
 
 # 3. 等待后端就绪（约 30-60 秒，首次会下载 embedding 模型）
-curl http://localhost:8080/health
+curl http://localhost:18080/health
 ```
 
 ### 访问
 
-- Web UI: http://localhost:3000
-- API 文档: http://localhost:8080/docs
-- 后端健康检查: http://localhost:8080/health
+- Web UI: http://localhost:13000
+- API 文档: http://localhost:18080/docs
+- 后端健康检查: http://localhost:18080/health
 
 ### 停止
 
@@ -129,7 +129,7 @@ docker compose -f docker-compose.demo.yml up -d
 
 本功能依赖 LLM 进行中文语义增强、查询扩展和 Flow Label 生成。评委启动后，需要：
 
-1. 打开 http://localhost:3000/settings
+1. 打开 http://localhost:13000/settings
 2. 在 LLM Provider 中添加 DeepSeek / GLM / OpenAI 兼容的 provider
 3. 配置 API Key、Base URL、Model
 4. 打开全局开关（索引增强、查询扩展、Flow Label）

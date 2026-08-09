@@ -1,13 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, X, FolderGit2, GitBranch, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Plus, X, FolderGit2, GitBranch, Loader2, CheckCircle2, AlertTriangle, Github, Code2 } from 'lucide-react';
 import { useRepos } from '../hooks/useRepos';
 import { RepoCard } from '../components/RepoCard';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
 import { useStore } from '../store';
 import { previewRepoBranches } from '../api';
 import type { BranchPreview } from '../api';
-
-type AddType = 'path' | 'git';
 
 interface IndexingProgress {
   progress: number;
@@ -37,8 +35,7 @@ export const Repos = () => {
   const indexingProgress = useStore((state) => state.indexingProgress);
 
   const [showAddModal, setShowAddModal] = useState(false);
-  const [addType, setAddType] = useState<AddType>('path');
-  const [pathInput, setPathInput] = useState('');
+  const [platform, setPlatform] = useState<'github' | 'gitee'>('github');
   const [gitUrlInput, setGitUrlInput] = useState('');
   const [activeBranchesInput, setActiveBranchesInput] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
@@ -95,25 +92,52 @@ export const Repos = () => {
     });
   };
 
+  // 按托管平台校验仓库地址格式
+  const validateGitUrl = (url: string, p: typeof platform): string | null => {
+    if (!url) return '请输入仓库地址';
+    const host = p === 'github' ? 'github.com' : 'gitee.com';
+    if (!url.includes(host)) {
+      return p === 'github'
+        ? '请输入 GitHub 仓库地址（应包含 github.com）'
+        : '请输入 Gitee 仓库地址（应包含 gitee.com）';
+    }
+    if (!/^https?:\/\/|^git@|^ssh:\/\//.test(url)) {
+      return '仓库地址需以 http(s)://、git@ 或 ssh:// 开头';
+    }
+    return null;
+  };
+
+  // 归一化 git 地址用于重复检测（与后端 _normalize_git_url 保持一致）
+  const normalizeGitUrl = (url: string) => {
+    const u = url.trim().toLowerCase().replace(/\/+$/, '');
+    return u.endsWith('.git') ? u.slice(0, -4) : u;
+  };
+
   const handleAdd = () => {
-    const payload: Parameters<typeof addRepo>[0] =
-      addType === 'path' ? { path: pathInput.trim() } : { gitUrl: gitUrlInput.trim() };
+    const url = gitUrlInput.trim();
+    const error = validateGitUrl(url, platform);
+    if (error) {
+      alert(error);
+      return;
+    }
+    // 提前拦截已添加过的地址，避免重复索引
+    const duplicated = repos.some(
+      (r) => r.gitUrl && normalizeGitUrl(r.gitUrl) === normalizeGitUrl(url),
+    );
+    if (duplicated) {
+      alert('该仓库地址已添加过，请勿重复索引');
+      return;
+    }
+    const payload: Parameters<typeof addRepo>[0] = { gitUrl: url };
     const activeBranches =
-      addType === 'git' && selectedActiveBranches.length > 0
-        ? selectedActiveBranches
-        : parseActiveBranches();
+      selectedActiveBranches.length > 0 ? selectedActiveBranches : parseActiveBranches();
     if (activeBranches.length > 0) {
       payload.activeBranches = activeBranches;
     }
-    if (addType === 'path' && pathInput.trim()) {
-      addRepo(payload, { onSuccess: handleAddSuccess, onError: handleAddError });
-    } else if (addType === 'git' && gitUrlInput.trim()) {
-      addRepo(payload, { onSuccess: handleAddSuccess, onError: handleAddError });
-    }
+    addRepo(payload, { onSuccess: handleAddSuccess, onError: handleAddError });
   };
 
   const handleAddSuccess = () => {
-    setPathInput('');
     setGitUrlInput('');
     setActiveBranchesInput('');
     setSelectedActiveBranches([]);
@@ -223,55 +247,61 @@ export const Repos = () => {
               </button>
             </div>
 
-            {/* Add Type Tabs */}
+            {/* 先选择托管平台 */}
             <div className="flex gap-2 mb-6">
               <button
-                onClick={() => setAddType('path')}
+                onClick={() => {
+                  setPlatform('github');
+                  setGitUrlInput('');
+                  setPreview(null);
+                  setPreviewError('');
+                  setSelectedActiveBranches([]);
+                }}
                 className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold border-2 border-[#2D2D2D] transition-all ${
-                  addType === 'path'
-                    ? 'bg-[#ff3d8a] text-white shadow-[3px_3px_0_#2D2D2D]'
-                    : 'bg-[#F5F5F0] text-[#2D2D2D] hover:bg-[#fff34d]'
-                }`}
-              >
-                <FolderGit2 className="w-5 h-5" />
-                本地路径
-              </button>
-              <button
-                onClick={() => setAddType('git')}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold border-2 border-[#2D2D2D] transition-all ${
-                  addType === 'git'
+                  platform === 'github'
                     ? 'bg-[#2ad4ff] text-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D]'
                     : 'bg-[#F5F5F0] text-[#2D2D2D] hover:bg-[#fff34d]'
                 }`}
               >
-                <GitBranch className="w-5 h-5" />
-                Git URL
+                <Github className="w-5 h-5" />
+                GitHub
+              </button>
+              <button
+                onClick={() => {
+                  setPlatform('gitee');
+                  setGitUrlInput('');
+                  setPreview(null);
+                  setPreviewError('');
+                  setSelectedActiveBranches([]);
+                }}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold border-2 border-[#2D2D2D] transition-all ${
+                  platform === 'gitee'
+                    ? 'bg-[#ff3d8a] text-white shadow-[3px_3px_0_#2D2D2D]'
+                    : 'bg-[#F5F5F0] text-[#2D2D2D] hover:bg-[#fff34d]'
+                }`}
+              >
+                <Code2 className="w-5 h-5" />
+                Gitee
               </button>
             </div>
 
             {/* Input */}
             <div className="mb-4">
-              {addType === 'path' ? (
-                <input
-                  type="text"
-                  value={pathInput}
-                  onChange={(e) => setPathInput(e.target.value)}
-                  placeholder="/path/to/your/repository"
-                  className="w-full px-4 py-3 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] placeholder-[#999] focus:outline-none focus:border-[#2ad4ff] focus:shadow-[3px_3px_0_#2ad4ff] transition-all font-mono"
-                />
-              ) : (
-                <input
-                  type="text"
-                  value={gitUrlInput}
-                  onChange={(e) => handleGitUrlChange(e.target.value)}
-                  placeholder="https://github.com/user/repo.git"
-                  className="w-full px-4 py-3 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] placeholder-[#999] focus:outline-none focus:border-[#2ad4ff] focus:shadow-[3px_3px_0_#2ad4ff] transition-all font-mono"
-                />
-              )}
+              <input
+                type="text"
+                value={gitUrlInput}
+                onChange={(e) => handleGitUrlChange(e.target.value)}
+                placeholder={
+                  platform === 'github'
+                    ? 'https://github.com/user/repo.git'
+                    : 'https://gitee.com/user/repo.git'
+                }
+                className="w-full px-4 py-3 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] placeholder-[#999] focus:outline-none focus:border-[#2ad4ff] focus:shadow-[3px_3px_0_#2ad4ff] transition-all font-mono"
+              />
             </div>
 
             {/* Git branch preview (only for git URL, manually triggered) */}
-            {addType === 'git' && gitUrlInput.trim() && (
+            {gitUrlInput.trim() && (
               <div className="mb-6 space-y-4">
                 {!preview && !previewLoading && !previewError && (
                   <button
@@ -346,25 +376,6 @@ export const Repos = () => {
               </div>
             )}
 
-            {/* Active Branches (legacy path mode) */}
-            {addType === 'path' && (
-              <div className="mb-6">
-                <label className="block text-sm font-bold text-[#2D2D2D] mb-1.5">
-                  业务分支（可选，最多 2 个，用逗号或空格分隔）
-                </label>
-                <input
-                  type="text"
-                  value={activeBranchesInput}
-                  onChange={(e) => setActiveBranchesInput(e.target.value)}
-                  placeholder="feature/payment, feature/order"
-                  className="w-full px-4 py-3 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] placeholder-[#999] focus:outline-none focus:border-[#2ad4ff] focus:shadow-[3px_3px_0_#2ad4ff] transition-all font-mono"
-                />
-                <p className="mt-1 text-xs text-[#999]">
-                  默认只索引主分支；配置业务分支后会额外构建 diff 索引。
-                </p>
-              </div>
-            )}
-
             {/* Actions */}
             <div className="flex gap-3">
               <button
@@ -375,10 +386,7 @@ export const Repos = () => {
               </button>
               <button
                 onClick={handleAdd}
-                disabled={
-                  isAdding ||
-                  (addType === 'path' ? !pathInput.trim() : !gitUrlInput.trim())
-                }
+                disabled={isAdding || !gitUrlInput.trim()}
                 className="flex-1 px-4 py-3 bg-[#6effb0] hover:bg-[#8dffc5] disabled:bg-slate-200 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D] flex items-center justify-center gap-2"
               >
                 {isAdding ? <LoadingSpinner size="sm" /> : '添加'}

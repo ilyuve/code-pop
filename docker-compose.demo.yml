@@ -12,7 +12,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "15432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -26,7 +26,7 @@ services:
     container_name: codepop-redis
     command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb"]
     ports:
-      - "6379:6379"
+      - "16379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -53,7 +53,7 @@ services:
       - ./repos:/app/repos
       - hf_cache:/root/.cache/huggingface
     ports:
-      - "8080:8080"
+      - "18080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,7 +64,7 @@ services:
     image: ghcr.io/ilyuve/codepop-web:latest
     container_name: codepop-web
     ports:
-      - "3000:3000"
+      - "13000:3000"
     depends_on:
       - backend
     networks:
