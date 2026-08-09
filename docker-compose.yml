@@ -67,12 +67,11 @@ services:
       - codepop-network
 
   web:
-    # Pre-built image for "docker compose up" without local build.
+    # 本地构建镜像（如需改用预构建镜像，注释掉 build 块即可）
     image: ghcr.io/ilyuve/codepop-web:latest
-    # Uncomment to build locally instead of pulling the pre-built image.
-    # build:
-    #   context: ./packages/web
-    #   dockerfile: Dockerfile
+    build:
+      context: ./packages/web
+      dockerfile: Dockerfile
     container_name: codepop-web
     ports:
       - "13000:3000"
