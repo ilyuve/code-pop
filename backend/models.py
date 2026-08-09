@@ -6,6 +6,7 @@ from enum import Enum as PyEnum
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -57,6 +58,10 @@ class Repository(Base):
     sync_mode = Column(String(32), default="auto", nullable=False)  # auto / manual
     # 仓库级 webhook 密钥（每仓库独立，优先于全局 GITHUB_WEBHOOK_SECRET / GITEE_WEBHOOK_TOKEN）
     webhook_token = Column(String(128), nullable=True)
+    # 定时轮询开关：开启后后台定期 fetch 配置分支并增量同步（无需 webhook 回调）
+    auto_sync = Column(Boolean, default=False, nullable=False)
+    # 定时轮询间隔（分钟）：固定枚举 5 / 15 / 30 / 60
+    auto_sync_interval = Column(Integer, default=5, nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

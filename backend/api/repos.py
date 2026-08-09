@@ -190,6 +190,8 @@ async def create_repo(
         default_branch=default_branch,
         active_branches=json.dumps(active_branches) if active_branches else None,
         sync_mode=payload.sync_mode or "auto",
+        auto_sync=payload.auto_sync,
+        auto_sync_interval=payload.auto_sync_interval or 5,
     )
     db.add(repo)
     db.commit()
@@ -269,6 +271,14 @@ async def update_repo(
 
     if payload.sync_mode is not None:
         repo.sync_mode = payload.sync_mode
+
+    if payload.auto_sync is not None:
+        repo.auto_sync = payload.auto_sync
+
+    if payload.auto_sync_interval is not None:
+        if payload.auto_sync_interval not in (5, 15, 30, 60):
+            raise ValidationException("auto_sync_interval 仅支持 5 / 15 / 30 / 60 分钟")
+        repo.auto_sync_interval = payload.auto_sync_interval
 
     db.commit()
     db.refresh(repo)

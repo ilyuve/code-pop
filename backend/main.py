@@ -93,36 +93,6 @@ async def _recover_indexing_repos() -> None:
         db.close()
 
 
-async def _recover_and_resync_pending_repos() -> None:
-    """Re-trigger incremental sync at startup for git repositories.
-
-    After a restart, push events sent while the backend was down were never
-    processed by the webhook.  ``_sync_repo_branches`` only re-indexes
-    branches whose HEAD actually changed (compared with ``branch_commits``),
-    and is deduplicated by the repo-level sync lock, so scheduling it for all
-    git repos is cheap and safe.  The task runs in the background without
-    blocking startup.
-    """
-    from services.repo_sync import _sync_repo_branches
-
-    db = SessionLocal()
-    try:
-        repos = (
-            db.query(Repository)
-            .filter(Repository.git_url.isnot(None), Repository.git_url != "")
-            .all()
-        )
-    finally:
-        db.close()
-
-    for repo in repos:
-        try:
-            asyncio.create_task(_sync_repo_branches(repo.id))
-            logger.info("Scheduled startup recovery sync for repo %s", repo.id)
-        except Exception as exc:
-            logger.warning("Failed to schedule recovery sync for repo %s: %s", repo.id, exc)
-
-
 async def _migrate_repo_paths() -> None:
     """Migrate legacy repo paths to branch-aware layout at startup."""
     from services.repo_sync import get_repo_local_path, migrate_legacy_repo_path
@@ -170,14 +140,26 @@ async def lifespan(app: FastAPI):
     await _recover_indexing_repos()
     await _migrate_repo_paths()
     await _warmup_models()
-    # 启动后自动补齐停机期间遗漏的增量同步（后台执行，不阻塞启动）。
-    await _recover_and_resync_pending_repos()
+
+    # 仓库级定时轮询：开启 auto_sync 的仓库定期检查配置分支增量（无需 webhook 回调）
+    poll_task = None
+    if not _is_test:
+        from services.auto_sync import poll_sync_loop
+
+        poll_task = asyncio.create_task(poll_sync_loop())
 
     mcp_session_manager = get_mcp_session_manager()
     async with mcp_session_manager.run():
         logger.info("MCP session manager started")
         yield
         logger.info("MCP session manager shutting down")
+
+    if poll_task is not None:
+        poll_task.cancel()
+        try:
+            await poll_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
