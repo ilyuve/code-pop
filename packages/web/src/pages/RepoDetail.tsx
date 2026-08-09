@@ -19,6 +19,7 @@ import {
   Terminal,
   ChevronUp,
   Settings,
+  GitBranch,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
@@ -127,17 +128,22 @@ export const RepoDetail = () => {
     setSelectedBranches(branches);
     setPreview(null);
     setPreviewError('');
-    // 先立即打开弹窗，再异步获取远程分支列表，避免网络慢导致弹窗延迟
+    // 先立即打开弹窗，远程分支列表由用户点击「拉取远程分支」手动触发，
+    // 避免网络慢/失败时弹窗卡住，也便于失败后原地重试。
     setShowBranchModal(true);
-    if (repo?.gitUrl) {
-      setPreviewLoading(true);
-      previewRepoBranches(repo.gitUrl)
-        .then((data) => setPreview(data))
-        .catch((err: any) =>
-          setPreviewError(err?.response?.data?.detail || err?.message || '无法获取远程分支列表')
-        )
-        .finally(() => setPreviewLoading(false));
-    }
+  };
+
+  const handleFetchBranches = () => {
+    if (!repo?.gitUrl) return;
+    setPreviewLoading(true);
+    setPreviewError('');
+    setPreview(null);
+    previewRepoBranches(repo.gitUrl)
+      .then((data) => setPreview(data))
+      .catch((err: any) =>
+        setPreviewError(err?.response?.data?.detail || err?.message || '无法获取远程分支列表')
+      )
+      .finally(() => setPreviewLoading(false));
   };
 
   const toggleBranch = (branch: string) => {
@@ -591,16 +597,30 @@ export const RepoDetail = () => {
       <div className="flex flex-wrap gap-3">
         <button
           onClick={handleReindex}
-          disabled={isReindexing}
+          disabled={isReindexing || repo.status === 'indexing'}
           className={clsx(
             'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors',
-            isReindexing
+            isReindexing || repo.status === 'indexing'
               ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
               : 'bg-indigo-500 hover:bg-indigo-600 text-white'
           )}
         >
           <RefreshCw className={clsx('w-5 h-5', isReindexing && 'animate-spin')} />
           {repo.status === 'indexing' ? '强制重新索引' : '重新索引'}
+        </button>
+        <button
+          onClick={handleReindex}
+          disabled={isReindexing || repo.status === 'indexing'}
+          title="仅同步有变更的分支增量数据，服务停机后点击此按钮可补齐遗漏的增量更新"
+          className={clsx(
+            'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors border border-indigo-200 dark:border-indigo-700',
+            isReindexing || repo.status === 'indexing'
+              ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
+              : 'bg-white dark:bg-slate-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400'
+          )}
+        >
+          <GitBranch className="w-5 h-5" />
+          增量同步
         </button>
         <button
           onClick={handleOpenBranchModal}
@@ -631,6 +651,15 @@ export const RepoDetail = () => {
               默认分支始终为 <span className="font-medium text-slate-700 dark:text-slate-300">{repo.defaultBranch}</span>。
               下方可配置额外索引的最多 2 个业务分支，修改后会自动触发增量同步。
             </p>
+            {repo.gitUrl && !previewLoading && !preview && !previewError && (
+              <button
+                onClick={handleFetchBranches}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 mb-4 border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg text-sm font-medium transition-colors"
+              >
+                <GitBranch className="w-4 h-4" />
+                拉取远程分支
+              </button>
+            )}
             {previewLoading && (
               <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 mb-4">
                 <LoadingSpinner size="sm" />
@@ -640,7 +669,13 @@ export const RepoDetail = () => {
             {previewError && !previewLoading && (
               <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg mb-4">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                <span>无法获取远程分支：{previewError}</span>
+                <span className="flex-1">无法获取远程分支：{previewError}</span>
+                <button
+                  onClick={handleFetchBranches}
+                  className="shrink-0 text-indigo-600 dark:text-indigo-400 font-medium hover:underline"
+                >
+                  重试
+                </button>
               </div>
             )}
             {preview && !previewLoading && preview.branches.filter((b) => b !== repo.defaultBranch).length > 0 ? (

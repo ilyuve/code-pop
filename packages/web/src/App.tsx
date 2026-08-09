@@ -11,13 +11,95 @@ import { Settings } from './pages/Settings';
 import { Monitor } from './pages/Monitor';
 import { Stats } from './pages/Stats';
 import { useStore } from './store';
+import { useWebSocket } from './hooks/useWebSocket';
+import { useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
+
+/**
+ * Global WebSocket bridge mounted at the app root.
+ *
+ * Keeps a single /ws connection alive across all pages so the header
+ * connection indicator, the repository card progress bars and the detail
+ * page progress all share the same real-time source of truth. REST polling
+ * in useIndexing stays as a fallback / detail source.
+ */
+function GlobalSocketBridge() {
+  const queryClient = useQueryClient();
+  const { setWsStatus, addRealTimeUpdate, updateRepo, setIndexingProgress } = useStore();
+  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+
+  useWebSocket(wsUrl, {
+    onConnect: () => setWsStatus('connected'),
+    onDisconnect: () => setWsStatus('disconnected'),
+    onMessage: (data: unknown) => {
+      const msg = data as {
+        type?: string;
+        repoId?: string;
+        status?: string;
+        progress?: number;
+        stage?: string;
+        stage_progress?: unknown;
+        error?: unknown;
+        log?: unknown;
+      };
+      if (msg?.type !== 'repo_update' || !msg?.repoId) return;
+
+      addRealTimeUpdate(`repo_${msg.repoId}`, msg);
+      setIndexingProgress(msg.repoId, {
+        progress: msg.progress ?? 0,
+        stage: msg.stage ?? '',
+        stageProgress: (msg.stage_progress as {
+          stage: string;
+          current: number;
+          total: number;
+          percentage: number;
+        } | null) ?? null,
+      });
+
+      // Backend pushes status 'synced' after a successful branch sync; the
+      // frontend Repo model only knows indexed/completed, so normalize it.
+      let nextStatus = msg.status;
+      if (nextStatus === 'synced') {
+        nextStatus = 'indexed';
+      }
+      if (nextStatus) {
+        updateRepo(msg.repoId, { status: nextStatus } as never);
+        queryClient.setQueryData(['repos'], (old: unknown) => {
+          if (!Array.isArray(old)) return old;
+          return old.map((r) =>
+            (r as { id: string }).id === msg.repoId
+              ? { ...(r as object), status: nextStatus }
+              : r
+          );
+        });
+      }
+
+      if (msg.progress !== undefined) {
+        // Keep the detail-page progress query in sync with the push so both
+        // the card and the detail view show identical numbers.
+        queryClient.setQueryData(['indexingProgress', msg.repoId], (old: unknown) => {
+          const base = old && typeof old === 'object' ? (old as Record<string, unknown>) : {};
+          return {
+            ...base,
+            overall_progress: msg.progress,
+            current_stage: msg.stage ?? base.current_stage ?? null,
+            stage_progress: msg.stage_progress ?? base.stage_progress ?? {},
+          };
+        });
+      }
+    },
+    reconnectOnMount: true,
+  });
+
+  return null;
+}
 
 function App() {
   const { sidebarOpen, settings } = useStore();
 
   return (
     <Router>
+      <GlobalSocketBridge />
       <div className={clsx('min-h-screen bg-slate-50 dark:bg-slate-900 transition-colors')}>
         <Sidebar />
         <div

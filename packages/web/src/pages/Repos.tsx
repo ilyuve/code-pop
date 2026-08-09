@@ -32,7 +32,9 @@ export const Repos = () => {
     isReindexing,
   } = useRepos();
 
-  const addRealTimeUpdate = useStore((state) => state.addRealTimeUpdate);
+  // Live indexing progress is maintained by the global WebSocket bridge
+  // (mounted in App.tsx), so the card progress matches the detail page.
+  const indexingProgress = useStore((state) => state.indexingProgress);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [addType, setAddType] = useState<AddType>('path');
@@ -40,78 +42,12 @@ export const Repos = () => {
   const [gitUrlInput, setGitUrlInput] = useState('');
   const [activeBranchesInput, setActiveBranchesInput] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [indexingProgress, setIndexingProgress] = useState<Record<string, IndexingProgress>>({});
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectDelayRef = useRef(1000);
 
-  // Remote branch preview for the create-repo form
+  // Remote branch preview for the create-repo form (manually triggered).
   const [preview, setPreview] = useState<BranchPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [selectedActiveBranches, setSelectedActiveBranches] = useState<string[]>([]);
-  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const connectWebSocket = () => {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
-    
-    wsRef.current = new WebSocket(wsUrl);
-
-    wsRef.current.onopen = () => {
-      console.log('WebSocket connected');
-      reconnectDelayRef.current = 1000;
-    };
-
-    wsRef.current.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'repo_update') {
-          const { repoId, progress, stage, stage_progress, error, log } = data;
-          setIndexingProgress(prev => ({
-            ...prev,
-            [repoId]: {
-              progress: progress || 0,
-              stage: stage || '',
-              stageProgress: stage_progress || null,
-            },
-          }));
-          addRealTimeUpdate(`repo_${repoId}`, {
-            progress,
-            stage,
-            stage_progress,
-            error,
-            log,
-          });
-        }
-      } catch (e) {
-        console.error('Failed to parse WebSocket message:', e);
-      }
-    };
-
-    wsRef.current.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-
-    wsRef.current.onclose = (event) => {
-      console.log('WebSocket disconnected, reconnecting in', reconnectDelayRef.current, 'ms');
-      setTimeout(() => {
-        if (wsRef.current?.readyState !== WebSocket.OPEN) {
-          connectWebSocket();
-        }
-      }, reconnectDelayRef.current);
-      reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, 30000);
-    };
-  };
-
-  useEffect(() => {
-    connectWebSocket();
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmount');
-      }
-    };
-  }, [addRealTimeUpdate]);
 
   const parseActiveBranches = (): string[] => {
     return activeBranchesInput
@@ -138,29 +74,13 @@ export const Repos = () => {
 
   const handleGitUrlChange = (value: string) => {
     setGitUrlInput(value);
-    if (previewTimerRef.current) {
-      clearTimeout(previewTimerRef.current);
-    }
     const trimmed = value.trim();
     if (!trimmed) {
       setPreview(null);
       setPreviewError('');
       setSelectedActiveBranches([]);
-      return;
     }
-    // Debounce remote branch preview
-    previewTimerRef.current = setTimeout(() => {
-      fetchPreview(trimmed);
-    }, 600);
   };
-
-  useEffect(() => {
-    return () => {
-      if (previewTimerRef.current) {
-        clearTimeout(previewTimerRef.current);
-      }
-    };
-  }, []);
 
   const toggleActiveBranch = (branch: string) => {
     setSelectedActiveBranches((prev) => {
@@ -350,9 +270,18 @@ export const Repos = () => {
               )}
             </div>
 
-            {/* Git branch preview (only for git URL) */}
+            {/* Git branch preview (only for git URL, manually triggered) */}
             {addType === 'git' && gitUrlInput.trim() && (
               <div className="mb-6 space-y-4">
+                {!preview && !previewLoading && !previewError && (
+                  <button
+                    onClick={() => fetchPreview(gitUrlInput.trim())}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    <GitBranch className="w-4 h-4" />
+                    拉取远程分支
+                  </button>
+                )}
                 {previewLoading && (
                   <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -362,7 +291,13 @@ export const Repos = () => {
                 {previewError && !previewLoading && (
                   <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg">
                     <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-                    <span>无法获取远程分支：{previewError}</span>
+                    <span className="flex-1">无法获取远程分支：{previewError}</span>
+                    <button
+                      onClick={() => fetchPreview(gitUrlInput.trim())}
+                      className="shrink-0 text-indigo-600 dark:text-indigo-400 font-medium hover:underline"
+                    >
+                      重试
+                    </button>
                   </div>
                 )}
                 {preview && !previewLoading && (

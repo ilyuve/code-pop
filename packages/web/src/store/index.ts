@@ -53,6 +53,23 @@ interface AppStore {
   addIndexingLog: (repoId: string, log: LogEntry) => void;
   setIndexingLogs: (repoId: string, logs: LogEntry[]) => void;
   clearIndexingLogs: (repoId: string) => void;
+
+  // Live indexing progress (driven by global WebSocket / REST polling)
+  indexingProgress: Record<string, LiveIndexingProgress>;
+  setIndexingProgress: (repoId: string, data: LiveIndexingProgress) => void;
+}
+
+export interface LiveStageProgress {
+  stage: string;
+  current: number;
+  total: number;
+  percentage: number;
+}
+
+export interface LiveIndexingProgress {
+  progress: number;
+  stage: string;
+  stageProgress: LiveStageProgress | null;
 }
 
 export const useStore = create<AppStore>()(
@@ -130,6 +147,13 @@ export const useStore = create<AppStore>()(
           delete newLogs[repoId];
           return { indexingLogs: newLogs };
         }),
+
+      // Live indexing progress
+      indexingProgress: {},
+      setIndexingProgress: (repoId, data) =>
+        set((state) => ({
+          indexingProgress: { ...state.indexingProgress, [repoId]: data },
+        })),
     }),
     {
       name: 'codepop-storage',

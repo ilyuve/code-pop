@@ -1231,6 +1231,18 @@ def _sync_index_repo(repo_id: UUID, branch: str, loop: asyncio.AbstractEventLoop
 
     try:
         _clear_indexing_logs(repo_id_str)
+        # 清理上一次运行的进度记录。indexing_progress 按 (repo_id, stage) 唯一、
+        # 不含 branch，若不清理会残留上一次/上一分支（如 main 已完成的
+        # call_graph=100）的记录，导致 /progress 把 current_stage 错判为旧阶段、
+        # overall_progress 错报为 100%。
+        try:
+            db.query(IndexingProgress).filter(
+                IndexingProgress.repo_id == repo_id
+            ).delete(synchronize_session=False)
+            db.commit()
+        except Exception as exc:
+            logger.warning("Failed to clear indexing progress for %s: %s", repo_id, exc)
+            db.rollback()
         _add_log(db, repo_id_str, "info", "开始索引流程", "init")
 
         repo = db.query(Repository).filter(Repository.id == repo_id).first()

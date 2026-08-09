@@ -26,7 +26,9 @@ export const ServiceStatus = () => {
       if (service.url === '/ws') {
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
         return new Promise<void>((resolve) => {
+          let opened = false;
           ws.onopen = () => {
+            opened = true;
             ws.close();
             setServices(prev => prev.map(s => 
               s.name === service.name 
@@ -44,7 +46,9 @@ export const ServiceStatus = () => {
             resolve();
           };
           ws.onclose = () => {
-            if (ws.readyState === WebSocket.CLOSED && ws.url) {
+            // onopen 探测成功后主动 close 会再触发 onclose，不要覆盖已置为
+            // online 的状态，只有从未 open 过（连接失败）才标记 offline。
+            if (!opened) {
               setServices(prev => prev.map(s => 
                 s.name === service.name 
                   ? { ...s, status: 'offline' as const, lastCheck: new Date() }

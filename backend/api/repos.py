@@ -17,6 +17,7 @@ from schemas import RepoCreate, RepoResponse, RepoUpdate
 from services.indexer import index_repo, _get_indexing_logs, _cancel_indexing, _clear_indexing_logs, _clear_indexing_state
 from models import DomainSynonym, FrameworkRoute, IndexingLog, IndexingProgress, LlmSetting
 from services.repo_sync import (
+    _cleanup_branch_index,
     get_repo_local_path,
     is_valid_git_url,
     preview_remote_branches,
@@ -157,10 +158,17 @@ async def update_repo(
     """
     repo = _get_repo(db, repo_id)
 
+    branches_changed = False
+    removed_branches: set = set()
+
     if payload.active_branches is not None:
         active_branches = payload.active_branches
         if len(active_branches) > 2:
             raise ValidationException("active_branches 最多 2 个")
+        old_branches = set(json.loads(repo.active_branches or "[]")) - {repo.default_branch}
+        new_branches = set(active_branches) - {repo.default_branch}
+        branches_changed = old_branches != new_branches
+        removed_branches = old_branches - new_branches
         repo.active_branches = json.dumps(active_branches) if active_branches else None
 
     if payload.sync_mode is not None:
@@ -170,8 +178,15 @@ async def update_repo(
     db.refresh(repo)
 
     if payload.active_branches is not None:
-        _fire_and_forget(_sync_repo_branches(repo.id))
-        logger.info("Active branches changed for repo %s, scheduled sync", repo.id)
+        # 取消勾选的分支：删除其索引数据与本地 clone，避免旧分支索引残留。
+        for branch in sorted(removed_branches):
+            logger.info("Removing index data for deactivated branch %s of repo %s", branch, repo.id)
+            _cleanup_branch_index(db, repo, branch)
+        if branches_changed:
+            _fire_and_forget(_sync_repo_branches(repo.id))
+            logger.info("Active branches changed for repo %s, scheduled sync", repo.id)
+        else:
+            logger.info("Active branches unchanged for repo %s, skip sync", repo.id)
 
     return _attach_counts(db, repo)
 

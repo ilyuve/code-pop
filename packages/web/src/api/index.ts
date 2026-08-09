@@ -109,7 +109,15 @@ export const addRepo = async (data: AddRepoForm): Promise<Repo> => {
 };
 
 export const updateRepo = async (id: string, data: Partial<AddRepoForm>): Promise<Repo> => {
-  const response = await apiClient.patch(`/repos/${id}`, data);
+  // Backend schema expects snake_case field names (active_branches / sync_mode).
+  const payload: Record<string, unknown> = {};
+  if (data.activeBranches !== undefined) {
+    payload.active_branches = data.activeBranches;
+  }
+  if (data.syncMode !== undefined) {
+    payload.sync_mode = data.syncMode;
+  }
+  const response = await apiClient.patch(`/repos/${id}`, payload);
   return mapRepo(response.data);
 };
 

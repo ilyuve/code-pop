@@ -36,6 +36,9 @@ const DEFAULT_LIMIT = 20;
 const DEFAULT_TOP_K = 20;
 const MAX_TOP_K = 20;
 
+// Virtual branch used to render a merged main + compare branch view.
+const ALL_BRANCH = '__all__';
+
 export const Benchmark = () => {
   const { repos, isLoading: reposLoading } = useRepos();
   const [selectedRepo, setSelectedRepo] = useState('');
@@ -84,8 +87,42 @@ export const Benchmark = () => {
     setRunError(null);
   };
 
-  const result: DebugSearchResponse | null =
-    (activeResultBranch && branchResults[activeResultBranch]) || null;
+  // Merged "全部" view: main branch snippets first, then compare branch
+  // snippets override by (filePath, lineNumber) — matching the backend's
+  // main ∪ diff merge semantics (compare branch wins on conflicts).
+  const mergedResult: DebugSearchResponse | null = useMemo(() => {
+    const branches = Object.keys(branchResults);
+    if (branches.length < 2) return null;
+    const compareKey = branches.find((b) => b !== mainBranch);
+    const mainRes = branchResults[mainBranch];
+    const compareRes = compareKey ? branchResults[compareKey] : null;
+    if (!mainRes || !compareRes) return null;
+
+    const byKey = new Map<string, SearchResult>();
+    for (const s of mainRes.final_context.code_snippets || []) {
+      byKey.set(`${s.filePath}:${s.lineNumber}`, s);
+    }
+    for (const s of compareRes.final_context.code_snippets || []) {
+      byKey.set(`${s.filePath}:${s.lineNumber}`, s);
+    }
+    const mergedSnippets = Array.from(byKey.values()).sort((a, b) => b.score - a.score);
+
+    const ctx = compareRes.final_context;
+    return {
+      ...compareRes,
+      final_context: {
+        ...ctx,
+        code_snippets: mergedSnippets,
+        total_files: mergedSnippets.length,
+      },
+    };
+  }, [branchResults, mainBranch]);
+
+  const result: DebugSearchResponse | null = useMemo(() => {
+    if (!activeResultBranch) return null;
+    if (activeResultBranch === ALL_BRANCH) return mergedResult;
+    return branchResults[activeResultBranch] || null;
+  }, [activeResultBranch, branchResults, mergedResult]);
 
   const handleRun = async () => {
     if (!selectedRepo || !query.trim() || isRunning) return;
@@ -351,6 +388,21 @@ export const Benchmark = () => {
               {b !== mainBranch && <span className="ml-1 text-xs opacity-70">副</span>}
             </button>
           ))}
+          {Object.keys(branchResults).length > 1 && (
+            <button
+              onClick={() => setActiveResultBranch(ALL_BRANCH)}
+              className={clsx(
+                'px-3 py-1.5 rounded-lg text-sm font-bold border-2 transition-colors',
+                activeResultBranch === ALL_BRANCH
+                  ? 'bg-[#ff3d8a] text-white border-[#ff3d8a]'
+                  : 'bg-white text-[#2D2D2D] border-[#2D2D2D] hover:bg-[#F5F5F0]'
+              )}
+              title="主分支 + 副分支合并结果（副分支优先覆盖）"
+            >
+              全部
+              <span className="ml-1 text-xs opacity-70">主+副</span>
+            </button>
+          )}
         </div>
       )}
 

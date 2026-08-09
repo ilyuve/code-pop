@@ -349,6 +349,85 @@ def _get_sync_lock(repo_id: str) -> asyncio.Lock:
     return _sync_locks[repo_id]
 
 
+def _cleanup_branch_index(db, repo, branch: str) -> None:
+    """Delete all indexed data and the local clone for a business branch.
+
+    Called when a business branch is removed from ``active_branches`` so its
+    diff index does not linger in the database and its checkout no longer
+    occupies disk space. Each table is deleted explicitly (by the branch
+    column where available) because cascade relationships may not cover every
+    child table.
+    """
+    from models import (
+        CallGraphEdge,
+        CodeFile,
+        Embedding,
+        EmbeddingEnrichment,
+        FrameworkRoute,
+        SparseEmbedding,
+        Symbol,
+        SymbolFlowLabel,
+    )
+
+    emb_ids = (
+        db.query(Embedding.id)
+        .filter(Embedding.repo_id == repo.id, Embedding.branch == branch)
+        .subquery()
+    )
+    sym_ids = (
+        db.query(Symbol.id)
+        .filter(Symbol.repo_id == repo.id, Symbol.branch == branch)
+        .subquery()
+    )
+
+    db.query(SparseEmbedding).filter(SparseEmbedding.embedding_id.in_(emb_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(EmbeddingEnrichment).filter(
+        EmbeddingEnrichment.embedding_id.in_(emb_ids)
+    ).delete(synchronize_session=False)
+    db.query(SymbolFlowLabel).filter(SymbolFlowLabel.symbol_id.in_(sym_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(CallGraphEdge).filter(
+        CallGraphEdge.repo_id == repo.id, CallGraphEdge.branch == branch
+    ).delete(synchronize_session=False)
+    db.query(FrameworkRoute).filter(
+        FrameworkRoute.repo_id == repo.id, FrameworkRoute.branch == branch
+    ).delete(synchronize_session=False)
+    db.query(Embedding).filter(
+        Embedding.repo_id == repo.id, Embedding.branch == branch
+    ).delete(synchronize_session=False)
+    db.query(Symbol).filter(
+        Symbol.repo_id == repo.id, Symbol.branch == branch
+    ).delete(synchronize_session=False)
+    db.query(CodeFile).filter(
+        CodeFile.repo_id == repo.id, CodeFile.branch == branch
+    ).delete(synchronize_session=False)
+
+    # Drop the branch from per-branch bookkeeping fields.
+    for field, default in (("branch_deleted_files", "{}"), ("branch_commits", "{}")):
+        value = json.loads(getattr(repo, field) or default)
+        if branch in value:
+            del value[branch]
+        setattr(repo, field, json.dumps(value))
+
+    db.commit()
+    logger.info("Cleaned up index data for deactivated branch %s of repo %s", branch, repo.id)
+
+    # Remove the local shallow clone for the branch (guarded against path
+    # traversal: only paths strictly inside REPOS_DIR are ever removed).
+    local_path = Path(get_repo_local_path(repo, branch))
+    repos_root = Path(settings.repos_dir).resolve()
+    try:
+        resolved = local_path.resolve()
+        if resolved != repos_root and repos_root in resolved.parents:
+            shutil.rmtree(resolved, ignore_errors=True)
+            logger.info("Removed local clone %s for deactivated branch %s", resolved, branch)
+    except Exception as exc:
+        logger.warning("Failed to remove local clone for branch %s: %s", branch, exc)
+
+
 async def _sync_repo_branches(repo_id: UUID) -> dict:
     """Orchestrate syncing default branch and active business branches.
 
@@ -392,8 +471,10 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             # 1. Sync default branch (main/master)
             main_path = get_repo_local_path(repo, default_branch)
             logger.info("[SYNC TRACE] fetching default branch %s", default_branch)
-            fetch_branch(repo.git_url, main_path, default_branch, default_branch)
-            main_commit = _get_current_commit(main_path)
+            # fetch_branch 是同步 subprocess 调用，在线程中执行避免阻塞事件循环
+            #（启动自动恢复同步时尤为重要，否则 uvicorn 无法响应请求）。
+            await asyncio.to_thread(fetch_branch, repo.git_url, main_path, default_branch, default_branch)
+            main_commit = await asyncio.to_thread(_get_current_commit, main_path)
             logger.info("[SYNC TRACE] default branch commit %s changed=%s", main_commit, branch_commits.get(default_branch) != main_commit)
             main_changed = branch_commits.get(default_branch) != main_commit
 
@@ -415,8 +496,8 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
                 if branch == default_branch:
                     continue
                 local_path = get_repo_local_path(repo, branch)
-                fetch_branch(repo.git_url, local_path, branch, default_branch)
-                current_commit = _get_current_commit(local_path)
+                await asyncio.to_thread(fetch_branch, repo.git_url, local_path, branch, default_branch)
+                current_commit = await asyncio.to_thread(_get_current_commit, local_path)
                 if branch_commits.get(branch) != current_commit or main_changed:
                     from_commit = branch_commits.get(branch)
                     await index_repo(repo_id, branch=branch)
@@ -441,7 +522,7 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             }
             logger.info("[SYNC TRACE] sending synced notification for %s", repo_id)
             await notifier.send_repo_update(
-                repo_id,
+                str(repo_id),
                 status="synced",
                 progress=100.0,
                 sync_result=result,
@@ -451,7 +532,7 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
         except Exception as exc:
             logger.exception("Failed to sync repo %s: %s", repo_id, exc)
             await notifier.send_repo_update(
-                repo_id,
+                str(repo_id),
                 status="error",
                 progress=0.0,
                 error=str(exc),

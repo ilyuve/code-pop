@@ -70,6 +70,15 @@ interface LLMCostEstimate {
   operation_breakdown: Record<string, LLMCostBreakdown>;
 }
 
+// 已知厂商的 USD/1K tokens 参考单价（供新增 Provider 时预填，用户可按实际套餐修改）。
+const PRESET_COSTS: Record<string, { input: number; output: number }> = {
+  deepseek: { input: 0.00027, output: 0.0011 },
+  glm: { input: 0.0001, output: 0.0001 },
+  openai_compatible: { input: 0, output: 0 },
+  azure: { input: 0, output: 0 },
+  custom: { input: 0, output: 0 },
+};
+
 export const Settings = () => {
   const { settings, updateSettings } = useStore();
   const [embeddingProvider, setEmbeddingProvider] = useState(settings.embeddingProvider);
@@ -197,6 +206,20 @@ export const Settings = () => {
     setTestResult(null);
   };
 
+  // 切换协议类型时预填已知厂商的 USD/1K tokens 参考单价。
+  const handleProviderTypeChange = (providerType: string) => {
+    setEditingProvider((prev) => {
+      if (!prev) return prev;
+      const preset = PRESET_COSTS[providerType];
+      return {
+        ...prev,
+        provider_type: providerType,
+        cost_per_1k_input: preset ? preset.input : prev.cost_per_1k_input,
+        cost_per_1k_output: preset ? preset.output : prev.cost_per_1k_output,
+      };
+    });
+  };
+
   const handleEditProvider = (provider: LLMProvider) => {
     setEditingProvider({ ...provider, api_key: '' });
     setTestResult(null);
@@ -270,6 +293,13 @@ export const Settings = () => {
           </button>
         </div>
 
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-5 leading-relaxed">
+          该配置用于 CodePop 的<strong className="text-slate-600 dark:text-slate-300">中文增强能力</strong>：
+          索引时为代码块生成中文摘要、关键词、同义词（中文语义增强），为符号生成流程标签（Flow Label），
+          查询时用 LLM 生成扩展词（查询 LLM 扩展）。未配置或未启用时，这些中文能力会被跳过、按本地词库降级运行。
+          「输入/输出成本」以 USD/1K tokens 为单位填写，用于下方「LLM 成本估算」面板（如 DeepSeek 约输入 0.00027、输出 0.0011，可参考厂商官网按实际套餐调整）。
+        </p>
+
         {editingProvider && (
           <div className="mb-6 p-4 bg-slate-50 dark:bg-slate-700/50 rounded-xl border border-slate-200 dark:border-slate-600 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -286,7 +316,7 @@ export const Settings = () => {
                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">协议类型</label>
                 <select
                   value={editingProvider.provider_type}
-                  onChange={(e) => setEditingProvider({ ...editingProvider, provider_type: e.target.value })}
+                  onChange={(e) => handleProviderTypeChange(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
                 >
                   <option value="openai_compatible">OpenAI Compatible</option>
@@ -374,7 +404,7 @@ export const Settings = () => {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">输入成本 / 1K tokens（USD）</label>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">输入成本（USD/1K tokens）</label>
                 <input
                   type="number"
                   step="0.000001"
@@ -384,7 +414,7 @@ export const Settings = () => {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">输出成本 / 1K tokens（USD）</label>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">输出成本（USD/1K tokens）</label>
                 <input
                   type="number"
                   step="0.000001"
@@ -625,6 +655,10 @@ export const Settings = () => {
             <option value={10080}>最近 7 天</option>
           </select>
         </div>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+          金额按上方 Provider 配置的 USD/1K tokens 单价 × 实际调用 token 数估算；
+          单价留空（0）时该项计为 $0。如需按人民币估算，可按汇率自行换算。
+        </p>
         {cost ? (
           <div className="space-y-6">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
