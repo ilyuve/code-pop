@@ -11,12 +11,29 @@ import {
   ArrowRight,
   BarChart3,
   TrendingDown,
+  PiggyBank,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useRepos } from '../hooks/useRepos';
 import { useSearch } from '../hooks/useSearch';
 import { fetchSearchHistoryStats } from '../api';
 import { ServiceStatus } from '../components/ServiceStatus';
+
+// 今日节省金额估算口径（与统计页保持一致）：Claude Opus 5 输入单价 + 固定汇率
+const COST_PER_1M_TOKENS_USD = 5;
+const USD_TO_CNY = 7.2;
+
+const formatCNY = (v: number) => `¥${v >= 100 ? v.toFixed(0) : v.toFixed(2)}`;
+
+interface DashboardStat {
+  label: string;
+  value: number | string;
+  icon: LucideIcon;
+  color: string;
+  bgColor: string;
+  money?: boolean;
+}
 
 export const Dashboard = () => {
   const { repos, isLoading: reposLoading } = useRepos();
@@ -32,7 +49,18 @@ export const Dashboard = () => {
   const totalSymbols = repos.reduce((acc, r) => acc + (r.symbolCount || 0), 0);
   const indexedRepos = repos.filter(r => r.status === 'completed').length;
 
-  const stats = [
+  const todaySavedTokens = searchStats?.estimatedTokensSaved ?? 0;
+  const todaySavedCNY = (todaySavedTokens / 1_000_000) * COST_PER_1M_TOKENS_USD * USD_TO_CNY;
+
+  const stats: DashboardStat[] = [
+    {
+      label: '今日节省（估算）',
+      value: todaySavedCNY,
+      icon: PiggyBank,
+      color: '#0a8f5c',
+      bgColor: '#0a8f5c20',
+      money: true,
+    },
     {
       label: '代码仓库',
       value: repos.length,
@@ -187,6 +215,10 @@ export const Dashboard = () => {
                 <p className="text-4xl font-black text-[#2D2D2D]">
                   {reposLoading ? (
                     <span className="skeleton h-12 w-24 inline-block" />
+                  ) : stat.money ? (
+                    formatCNY(stat.value as number)
+                  ) : typeof stat.value === 'string' ? (
+                    stat.value
                   ) : (
                     stat.value.toLocaleString()
                   )}

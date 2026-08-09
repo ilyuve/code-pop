@@ -84,11 +84,12 @@ async def github_webhook(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
-    # 只处理 main 和 master 分支的 push
+    # 只处理 main / master 或该仓库已配置业务分支（active_branches）的 push
     ref = data.get("ref", "")
-    if ref not in ("refs/heads/main", "refs/heads/master"):
-        logger.info("Ignoring push to branch %s", ref)
-        return {"status": "ignored", "reason": f"branch {ref} not main/master"}
+    branch = ref.removeprefix("refs/heads/")
+    if not branch:
+        logger.info("Ignoring non-branch ref %s", ref)
+        return {"status": "ignored", "reason": f"ref {ref} is not a branch push"}
 
     repo_info = data.get("repository") or {}
     clone_url = repo_info.get("clone_url")
@@ -100,8 +101,15 @@ async def github_webhook(
         logger.warning("Webhook received for unknown repository: %s", clone_url)
         return {"status": "ignored", "reason": "repository not registered"}
 
+    active_branches = json.loads(repo.active_branches or "[]") or []
+    is_main_branch = branch in ("main", "master")
+    is_active_branch = branch in active_branches
+    if not is_main_branch and not is_active_branch:
+        logger.info("Ignoring push to branch %s (not main/master, not configured active branch)", branch)
+        return {"status": "ignored", "reason": f"branch {branch} not main/master or active"}
+
     background_tasks.add_task(_sync_repo_branches, repo.id)
-    logger.info("Webhook triggered branch sync for repo %s", repo.id)
+    logger.info("Webhook triggered branch sync for repo %s (branch %s)", repo.id, branch)
     return {"status": "accepted", "repo_id": str(repo.id)}
 
 
