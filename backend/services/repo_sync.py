@@ -1,14 +1,27 @@
-"""Git clone / pull operations for repositories."""
+"""Git clone / pull / sync operations for repositories with branch support."""
 
+import asyncio
+import json
 import logging
+import shutil
 import subprocess
+import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
-from urllib.parse import urlparse
+from typing import Dict, List, Optional
+from uuid import UUID
+
+import redis
 
 from config import settings
+from models import RepoStatus
 
 logger = logging.getLogger(__name__)
+
+# In-process locks to dedupe concurrent syncs of the same repository within
+# this backend instance. PostgreSQL advisory locks below provide cross-process
+# protection; this asyncio lock avoids connection-bouncing issues across awaits.
+_sync_locks: Dict[str, asyncio.Lock] = {}
 
 
 class GitSyncError(Exception):
@@ -25,81 +38,426 @@ def _safe_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name).lower()
 
 
+def is_valid_git_url(url: str) -> bool:
+    """Return True if the URL looks like a git remote."""
+    if not url:
+        return False
+    return (
+        url.startswith(("http://", "https://", "git@", "git://", "ssh://"))
+        or url.endswith(".git")
+    )
+
+
 def _repo_local_path(name: str) -> Path:
+    """Legacy root path for a repo (before branch-aware layout).
+
+    Kept for backward compatibility. New code should use ``get_repo_local_path``.
+    """
     return settings.repos_dir / _safe_name(name)
 
 
-def clone_or_pull(name: str, git_url: str, local_path: Optional[str] = None) -> Path:
-    """Clone a new repository or pull an existing one. If local_path is provided and git_url is empty, use local path directly."""
-    if local_path and not git_url:
-        local_path_obj = Path(local_path)
-        if not local_path_obj.exists():
-            raise GitSyncError(f"本地路径不存在: {local_path}", "local_path_check")
-        if not local_path_obj.is_dir():
-            raise GitSyncError(f"本地路径不是目录: {local_path}", "local_path_check")
-        logger.info("Using local path: %s", local_path)
-        return local_path_obj
+def get_repo_local_path(repo, branch: Optional[str] = None) -> str:
+    """Return the local storage path for a given repo and branch.
 
-    target_path = _repo_local_path(name)
-    target_path.mkdir(parents=True, exist_ok=True)
+    Layout: ``repos/{safe_name}/{branch}/``.
+    If ``branch`` is omitted, ``repo.default_branch`` is used.
+    """
+    branch = branch or getattr(repo, "default_branch", "main")
+    return str(settings.repos_dir / _safe_name(repo.name) / branch)
 
-    if (target_path / ".git").exists():
-        logger.info("Pulling existing repo at %s", target_path)
+
+def migrate_legacy_repo_path(repo) -> str:
+    """Migrate old ``repos/{safe_name}/`` layout to ``repos/{safe_name}/{default_branch}/``.
+
+    Called at startup for each repository. The move is atomic (via a temp dir)
+    and only runs when the new path does not yet exist.
+    """
+    safe_name = _safe_name(repo.name)
+    legacy_path = settings.repos_dir / safe_name
+    new_path = legacy_path / repo.default_branch
+
+    if not legacy_path.exists() or new_path.exists():
+        return str(new_path)
+
+    # If legacy_path is already a git repo, move it into {default_branch}/
+    if (legacy_path / ".git").is_dir():
+        temp_path = settings.repos_dir / f"{safe_name}.migrate.tmp"
+        logger.info("Migrating legacy repo path %s -> %s", legacy_path, new_path)
+        shutil.move(str(legacy_path), str(temp_path))
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(temp_path), str(new_path))
+        logger.info("Migration complete: %s", new_path)
+    else:
+        # Ensure the new branch directory exists for fresh clones
+        new_path.mkdir(parents=True, exist_ok=True)
+
+    return str(new_path)
+
+
+def fetch_branch(
+    remote_url: str,
+    local_path: str,
+    branch: str,
+    default_branch: Optional[str] = None,
+) -> None:
+    """Ensure ``local_path`` contains a shallow clone of ``branch``.
+
+    For business branches, also fetch the ``default_branch`` ref so that
+    ``index_repo`` can compute the diff against the baseline.
+    """
+    path = Path(local_path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    def _set_http_version() -> None:
+        # Force HTTP/1.1 to avoid HTTP2 framing layer errors in restricted networks.
         try:
-            result = subprocess.run(
-                ["git", "pull", "--ff-only"],
-                cwd=str(target_path),
-                check=True,
-                capture_output=True,
-                text=True,
+            _run_git(
+                ["git", "-C", str(path), "config", "http.version", "HTTP/1.1"],
+                command_desc="git config http.version",
                 timeout=30,
             )
-            logger.info("Git pull succeeded: %s", result.stdout.strip())
-        except subprocess.CalledProcessError as exc:
-            if "Couldn't connect to server" in exc.stderr or "Connection refused" in exc.stderr or "Failed to connect" in exc.stderr:
-                logger.warning("Git pull failed due to network issue, using local files: %s", exc.stderr.strip())
-            else:
-                error_msg = f"Git pull 失败: {exc.stderr.strip()}"
-                logger.error(error_msg)
-                if "Authentication failed" in exc.stderr:
-                    error_msg = f"GitHub 认证失败，请检查 Git 凭证配置。错误: {exc.stderr.strip()}"
-                elif "not something we can merge" in exc.stderr:
-                    error_msg = f"本地分支与远程分支冲突，请先手动处理。错误: {exc.stderr.strip()}"
-                raise GitSyncError(error_msg, "git pull --ff-only", exc.stderr)
-        except subprocess.TimeoutExpired:
-            logger.warning("Git pull timed out, using local files")
+        except GitSyncError:
+            logger.warning("Failed to set http.version for %s", local_path)
+
+    if not (path / ".git").exists():
+        logger.info("Cloning branch %s into %s", branch, local_path)
+        _run_git(
+            ["git", "clone", "--depth", "1", "--branch", branch, remote_url, str(path)],
+            command_desc=f"git clone --branch {branch}",
+            timeout=300,
+        )
+        _set_http_version()
     else:
-        logger.info("Cloning %s into %s", git_url, target_path)
+        logger.info("Fetching branch %s at %s", branch, local_path)
+        _set_http_version()
+        # Ensure a clean working tree before fetch/checkout to avoid
+        # "local changes would be overwritten" errors on subsequent syncs.
         try:
-            result = subprocess.run(
-                ["git", "clone", "--depth", "1", git_url, str(target_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
+            _run_git(
+                ["git", "-C", str(path), "reset", "--hard"],
+                command_desc="git reset --hard",
+                timeout=60,
             )
-            logger.info("Git clone succeeded")
-        except subprocess.CalledProcessError as exc:
-            if "Couldn't connect to server" in exc.stderr or "Connection refused" in exc.stderr or "Failed to connect" in exc.stderr:
-                raise GitSyncError(f"无法连接到 GitHub，请检查网络连接后重试。错误: {exc.stderr.strip()}", f"git clone {git_url}", exc.stderr)
-            error_msg = f"Git clone 失败: {exc.stderr.strip()}"
-            logger.error(error_msg)
-            if "Authentication failed" in exc.stderr:
-                error_msg = f"GitHub 认证失败，请检查 Git 凭证配置。错误: {exc.stderr.strip()}"
-            elif "not found" in exc.stderr:
-                error_msg = f"仓库地址不存在或无权访问: {git_url}。错误: {exc.stderr.strip()}"
-            raise GitSyncError(error_msg, f"git clone {git_url}", exc.stderr)
-        except subprocess.TimeoutExpired:
-            raise GitSyncError("Git clone timed out, please check network connection", f"git clone {git_url}")
+            _run_git(
+                ["git", "-C", str(path), "clean", "-fd"],
+                command_desc="git clean -fd",
+                timeout=60,
+            )
+        except GitSyncError:
+            logger.warning("Failed to clean working tree for %s, continuing", local_path)
+        try:
+            _run_git(
+                ["git", "-C", str(path), "fetch", "origin", branch],
+                command_desc="git fetch",
+                timeout=300,
+            )
+            _run_git(
+                ["git", "-C", str(path), "checkout", "-B", branch, f"origin/{branch}"],
+                command_desc="git checkout",
+                timeout=60,
+            )
+        except GitSyncError as fetch_exc:
+            # If remote is unreachable but we already have a local checkout,
+            # continue with the existing code so offline / restricted-network
+            # environments can still index local data.
+            logger.warning(
+                "Remote fetch failed for %s branch %s, continuing with local checkout: %s",
+                local_path, branch, fetch_exc
+            )
+            try:
+                _run_git(
+                    ["git", "-C", str(path), "checkout", branch],
+                    command_desc="git checkout local",
+                    timeout=60,
+                )
+            except GitSyncError:
+                logger.warning("Local checkout of %s failed, continuing with current HEAD", branch)
 
-    return target_path
+    if default_branch and default_branch != branch:
+        try:
+            # Use an explicit refspec so the baseline lands in a remote-tracking
+            # ref (origin/{default_branch}); a plain "git fetch origin <branch>"
+            # would only update FETCH_HEAD when remote.origin.fetch does not
+            # match the requested branch.
+            _run_git(
+                [
+                    "git", "-C", str(path), "fetch", "origin",
+                    f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
+                ],
+                command_desc=f"git fetch baseline {default_branch}",
+                timeout=300,
+            )
+        except GitSyncError as baseline_exc:
+            logger.warning(
+                "Baseline fetch failed for %s branch %s: %s",
+                local_path, default_branch, baseline_exc
+            )
 
 
-def is_valid_git_url(url: str) -> bool:
-    """Basic validation of a Git URL."""
-    parsed = urlparse(url)
-    if parsed.scheme in ("http", "https", "ssh", "git"):
-        return True
-    if "@" in url and ":" in url:
-        return True
-    return False
+def _get_current_commit(local_path: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", local_path, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _run_git(cmd: List[str], command_desc: str, timeout: int = 300) -> None:
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        raise GitSyncError(
+            f"{command_desc} 失败: {exc.stderr.strip()}",
+            " ".join(cmd),
+            exc.stderr,
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GitSyncError(
+            f"{command_desc} 超时", " ".join(cmd), ""
+        ) from exc
+
+
+def preview_remote_branches(remote_url: str, limit: int = 50) -> dict:
+    """Return branch list and default branch for a remote repository.
+
+    Used by ``GET /api/repos/branches/preview``.
+    """
+    result = subprocess.run(
+        ["git", "ls-remote", "--heads", remote_url],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    branches = []
+    for line in result.stdout.strip().splitlines():
+        if not line.strip():
+            continue
+        ref = line.split()[1]
+        if ref.startswith("refs/heads/"):
+            branches.append(ref[len("refs/heads/"):])
+
+    default_branch = _detect_default_branch(remote_url)
+    return {
+        "branches": branches[:limit],
+        "default_branch": default_branch,
+    }
+
+
+def _detect_default_branch(remote_url: str) -> str:
+    """Detect remote default branch (HEAD ref), fallback to main/master."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--symref", remote_url, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("ref:"):
+                ref = line.split()[1]
+                if ref.startswith("refs/heads/"):
+                    return ref[len("refs/heads/"):]
+    except subprocess.CalledProcessError:
+        logger.warning("Failed to detect default branch via symref for %s", remote_url)
+
+    # Fallback: try to fetch branch list and pick main/master
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", remote_url, "main", "master"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        refs = {line.split()[1] for line in result.stdout.strip().splitlines() if line.strip()}
+        if "refs/heads/main" in refs:
+            return "main"
+        if "refs/heads/master" in refs:
+            return "master"
+    except subprocess.CalledProcessError:
+        pass
+
+    return "main"
+
+
+# ---------------------------------------------------------------------------
+# Sync orchestration
+# ---------------------------------------------------------------------------
+
+# Repo-level sync lock via Redis SET NX (cross-process), key=sync:lock:{repo_id}.
+# The lock TTL (5 min) protects against stale locks left by crashed workers;
+# the in-process asyncio lock above is the first layer of dedupe.
+_SYNC_LOCK_TTL_SECONDS = 300
+_SYNC_LOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+_redis_client: Optional[redis.Redis] = None
+
+
+def _get_redis() -> redis.Redis:
+    """Get the shared Redis client (thread-safe connection pool)."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    return _redis_client
+
+
+def _sync_lock_key(repo_id: str) -> str:
+    return f"sync:lock:{repo_id}"
+
+
+def _acquire_sync_lock(repo_id: str) -> Optional[str]:
+    """Try to acquire the repo-level sync lock via Redis SET NX.
+
+    Returns a unique token on success, or ``None`` if another sync holds the
+    lock. If Redis is unreachable we fail open (log a warning and allow the
+    sync) so that a Redis outage never permanently blocks all syncing; the
+    in-process asyncio lock still dedupes within this backend instance.
+    """
+    try:
+        token = uuid.uuid4().hex
+        ok = _get_redis().set(_sync_lock_key(repo_id), token, nx=True, ex=_SYNC_LOCK_TTL_SECONDS)
+        return token if ok else None
+    except Exception as exc:
+        logger.warning("Redis sync lock unavailable, proceeding without cross-process lock: %s", exc)
+        return uuid.uuid4().hex
+
+
+def _release_sync_lock(repo_id: str, token: Optional[str]) -> None:
+    """Release the lock only if we still own it (compare-and-delete)."""
+    if not token:
+        return
+    try:
+        _get_redis().eval(_SYNC_LOCK_SCRIPT, 1, _sync_lock_key(repo_id), token)
+    except Exception as exc:
+        logger.warning("Failed to release Redis sync lock for %s: %s", repo_id, exc)
+
+
+def _get_sync_lock(repo_id: str) -> asyncio.Lock:
+    """Get or create an in-process asyncio lock for a repository."""
+    if repo_id not in _sync_locks:
+        _sync_locks[repo_id] = asyncio.Lock()
+    return _sync_locks[repo_id]
+
+
+async def _sync_repo_branches(repo_id: UUID) -> dict:
+    """Orchestrate syncing default branch and active business branches.
+
+    - Acquires a repo-level advisory lock to dedupe concurrent syncs.
+    - Syncs ``default_branch`` first.
+    - Then diffs each active business branch whenever its HEAD changed or the
+      default branch baseline moved forward.
+    - Updates ``branch_commits`` and notifies via WebSocket.
+    """
+    from database import SessionLocal
+    from models import Repository
+    from services.notifier import notifier
+    from services.indexer import index_repo
+
+    repo_id_str = str(repo_id)
+    process_lock = _get_sync_lock(repo_id_str)
+    if process_lock.locked():
+        logger.info("Repo %s sync already in progress (in-process), skip", repo_id)
+        return {"status": "skipped", "repo_id": repo_id_str}
+
+    async with process_lock:
+        logger.info("[SYNC TRACE] acquired process lock for %s", repo_id)
+        db = SessionLocal()
+        lock_token = None
+        try:
+            lock_token = _acquire_sync_lock(repo_id_str)
+            if lock_token is None:
+                logger.info("Repo %s sync already in progress, skip", repo_id)
+                return {"status": "skipped", "repo_id": repo_id_str}
+
+            logger.info("[SYNC TRACE] acquired sync lock for %s", repo_id)
+            repo = db.query(Repository).filter(Repository.id == repo_id).first()
+            if not repo:
+                return {"status": "error", "repo_id": repo_id_str, "message": "repo not found"}
+
+            active_branches = json.loads(repo.active_branches or "[]") or [repo.default_branch]
+            branch_commits = json.loads(repo.branch_commits or "{}")
+            updated_branches: List[dict] = []
+            default_branch = repo.default_branch
+
+            # 1. Sync default branch (main/master)
+            main_path = get_repo_local_path(repo, default_branch)
+            logger.info("[SYNC TRACE] fetching default branch %s", default_branch)
+            fetch_branch(repo.git_url, main_path, default_branch, default_branch)
+            main_commit = _get_current_commit(main_path)
+            logger.info("[SYNC TRACE] default branch commit %s changed=%s", main_commit, branch_commits.get(default_branch) != main_commit)
+            main_changed = branch_commits.get(default_branch) != main_commit
+
+            if main_changed:
+                from_commit = branch_commits.get(default_branch)
+                logger.info("[SYNC TRACE] indexing default branch %s", default_branch)
+                await index_repo(repo_id, branch=default_branch)
+                branch_commits[default_branch] = main_commit
+                repo.branch_commits = json.dumps(branch_commits)
+                db.commit()
+                updated_branches.append({
+                    "branch": default_branch,
+                    "from": from_commit,
+                    "to": main_commit,
+                })
+
+            # 2. Sync business branches (diff indexing)
+            for branch in active_branches:
+                if branch == default_branch:
+                    continue
+                local_path = get_repo_local_path(repo, branch)
+                fetch_branch(repo.git_url, local_path, branch, default_branch)
+                current_commit = _get_current_commit(local_path)
+                if branch_commits.get(branch) != current_commit or main_changed:
+                    from_commit = branch_commits.get(branch)
+                    await index_repo(repo_id, branch=branch)
+                    branch_commits[branch] = current_commit
+                    repo.branch_commits = json.dumps(branch_commits)
+                    db.commit()
+                    updated_branches.append({
+                        "branch": branch,
+                        "from": from_commit,
+                        "to": current_commit,
+                    })
+
+            repo.status = RepoStatus.indexed.value
+            repo.error_message = None
+            repo.last_indexed_at = datetime.utcnow()
+            db.commit()
+
+            result = {
+                "status": "done",
+                "repo_id": repo_id_str,
+                "updated_branches": updated_branches,
+            }
+            logger.info("[SYNC TRACE] sending synced notification for %s", repo_id)
+            await notifier.send_repo_update(
+                repo_id,
+                status="synced",
+                progress=100.0,
+                sync_result=result,
+            )
+            logger.info("[SYNC TRACE] completed sync for %s", repo_id)
+            return result
+        except Exception as exc:
+            logger.exception("Failed to sync repo %s: %s", repo_id, exc)
+            await notifier.send_repo_update(
+                repo_id,
+                status="error",
+                progress=0.0,
+                error=str(exc),
+            )
+            raise
+        finally:
+            _release_sync_lock(repo_id_str, lock_token)
+            db.close()
+            logger.info("[SYNC TRACE] released locks for %s", repo_id)

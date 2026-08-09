@@ -40,6 +40,7 @@ class EmbeddingRepository(BaseRepository):
         self,
         query_embedding: List[float],
         repo_id: Optional[UUID] = None,
+        branch: str = "main",
         top_k: int = 50,
     ) -> List[dict]:
         """Return raw row dicts from pgvector cosine similarity search."""
@@ -59,6 +60,7 @@ class EmbeddingRepository(BaseRepository):
             JOIN code_files f ON f.id = e.file_id
             JOIN repositories r ON r.id = e.repo_id
             WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
+              AND e.branch = :branch
             ORDER BY e.embedding <=> (:embedding)::vector
             LIMIT :limit
             """
@@ -68,6 +70,7 @@ class EmbeddingRepository(BaseRepository):
             {
                 "embedding": query_embedding,
                 "repo_id": str(repo_id) if repo_id else None,
+                "branch": branch,
                 "limit": top_k,
             },
         ).fetchall()

@@ -1,6 +1,7 @@
 import type { SearchResult, ScoreBreakdown } from '../types';
+import type { SearchMeta } from '../store';
 import { CodePreview } from './CodePreview';
-import { FileText, Copy, CheckCircle, ChevronDown, BarChart3 } from 'lucide-react';
+import { FileText, Copy, CheckCircle, ChevronDown, BarChart3, AlertCircle } from 'lucide-react';
 import { useState } from 'react';
 import { clsx } from 'clsx';
 
@@ -8,6 +9,7 @@ interface SearchResultsProps {
   results: SearchResult[];
   isLoading?: boolean;
   unavailableSources?: string[];
+  meta?: SearchMeta | null;
 }
 
 const SCORE_LABELS: Record<string, string> = {
@@ -33,7 +35,7 @@ const UNAVAILABLE_LABELS: Record<string, string> = {
   graph: '调用图暂不可用',
 };
 
-export const SearchResults = ({ results, isLoading, unavailableSources = [] }: SearchResultsProps) => {
+export const SearchResults = ({ results, isLoading, unavailableSources = [], meta }: SearchResultsProps) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -112,6 +114,20 @@ export const SearchResults = ({ results, isLoading, unavailableSources = [] }: S
       <div className="text-sm text-slate-500 dark:text-slate-400 mb-4">
         找到 {results.length} 个匹配结果
       </div>
+      {meta?.branch_fallback && (
+        <div className="flex items-start gap-2 px-4 py-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-700 dark:text-amber-400">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium">
+              分支回落提示
+            </p>
+            <p>
+              {meta.message ||
+                `请求分支 "${meta.requested_branch}" 未建立索引，已切换到 "${meta.actual_branch}" 视角展示结果。`}
+            </p>
+          </div>
+        </div>
+      )}
       {unavailableSources.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {unavailableSources.map((source) => (
@@ -158,7 +174,19 @@ export const SearchResults = ({ results, isLoading, unavailableSources = [] }: S
                     className={clsx('w-3 h-3 transition-transform', isExpanded && 'rotate-180')}
                   />
                 </button>
-                <span className="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded">
+                <span
+                  className={clsx(
+                    'text-xs px-2 py-1 rounded border',
+                    result.isOverride
+                      ? 'bg-pink-100 dark:bg-pink-900/30 text-pink-600 dark:text-pink-400 border-pink-200 dark:border-pink-800'
+                      : 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800'
+                  )}
+                  title={result.isOverride ? '业务分支覆盖' : '来自默认分支'}
+                >
+                  {result.branch}
+                  {result.isOverride && ' · override'}
+                </span>
+                <span className="text-xs px-2 py-1 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded">
                   {result.repoName}
                 </span>
                 <button

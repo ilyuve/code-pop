@@ -47,6 +47,14 @@ class Repository(Base):
     last_indexed_at = Column(DateTime, nullable=True)
     indexing_heartbeat_at = Column(DateTime, nullable=True)
     indexing_started_at = Column(DateTime, nullable=True)
+
+    # 分支相关字段
+    default_branch = Column(String(128), default="main", nullable=False)
+    active_branches = Column(Text, nullable=True)  # JSON list, e.g. ["main", "feature-A"]
+    branch_commits = Column(Text, default="{}", nullable=False)  # JSON: {"main": "abc...", "feature-A": "def..."}
+    branch_deleted_files = Column(Text, default="{}", nullable=False)  # JSON: {"feature-A": ["src/x.py"]}
+    sync_mode = Column(String(32), default="auto", nullable=False)  # auto / manual
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -59,10 +67,11 @@ class Repository(Base):
 
 class CodeFile(Base):
     __tablename__ = "code_files"
-    __table_args__ = (UniqueConstraint("repo_id", "path", name="uix_file_repo_path"),)
+    __table_args__ = (UniqueConstraint("repo_id", "branch", "path", name="uix_file_repo_branch_path"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    branch = Column(String(128), default="main", nullable=False)
     path = Column(String(1024), nullable=False)
     language = Column(String(32), nullable=False)
     content_hash = Column(String(64), nullable=False)
@@ -80,6 +89,7 @@ class Symbol(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     file_id = Column(UUID(as_uuid=True), ForeignKey("code_files.id", ondelete="CASCADE"), nullable=False)
     repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    branch = Column(String(128), default="main", nullable=False)
     name = Column(String(512), nullable=False)
     type = Column(String(32), nullable=False)  # function / class / interface / variable
     kind = Column(String(32), nullable=False)
@@ -99,6 +109,7 @@ class Embedding(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     file_id = Column(UUID(as_uuid=True), ForeignKey("code_files.id", ondelete="CASCADE"), nullable=False)
     repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    branch = Column(String(128), default="main", nullable=False)
     chunk_index = Column(Integer, nullable=False)
     start_line = Column(Integer, nullable=False)
     end_line = Column(Integer, nullable=False)
@@ -136,6 +147,7 @@ class CallGraphEdge(Base):
     source_symbol_id = Column(UUID(as_uuid=True), ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
     target_symbol_id = Column(UUID(as_uuid=True), ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
     repo_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    branch = Column(String(128), default="main", nullable=False)
     call_type = Column(String(32), default="direct", nullable=False)
 
     repo = relationship("Repository", back_populates="edges")
@@ -226,6 +238,7 @@ class FrameworkRoute(Base):
         ForeignKey("code_files.id", ondelete="CASCADE"),
         nullable=False,
     )
+    branch = Column(String(128), default="main", nullable=False)
 
     framework = Column(String(32), nullable=False)
     http_method = Column(String(16), nullable=False)

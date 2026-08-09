@@ -19,7 +19,7 @@ const SORT_OPTIONS = [
 
 export const Search = () => {
   const { repos } = useRepos();
-  const { query, setQuery, results, isSearching, search, clearResults, recentSearches } =
+  const { query, setQuery, results, meta, isSearching, search, clearResults, recentSearches } =
     useSearch();
   const [selectedRepoId, setSelectedRepoId] = useState<string>('');
   const [selectedLanguage, setSelectedLanguage] = useState<string>('');
@@ -190,7 +190,7 @@ export const Search = () => {
 
       {/* Search Results */}
       {viewMode === 'simple' ? (
-        <SearchResults results={filteredResults} isLoading={isSearching} />
+        <SearchResults results={filteredResults} isLoading={isSearching} meta={meta} />
       ) : (
         contextResults ? (
           <FlowView context={contextResults} />

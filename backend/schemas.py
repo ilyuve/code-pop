@@ -1,10 +1,11 @@
 """Pydantic request / response schemas."""
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _format_datetime(dt: datetime) -> str:
@@ -18,6 +19,8 @@ class RepoCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     git_url: Optional[str] = None
     path: Optional[str] = None
+    active_branches: Optional[List[str]] = Field(default=None, description="业务分支列表，最多 2 个；为空时只索引 default_branch")
+    sync_mode: str = "auto"
 
 
 class RepoResponse(BaseModel):
@@ -28,21 +31,46 @@ class RepoResponse(BaseModel):
     status: str
     error_message: Optional[str] = None
     last_indexed_at: Optional[datetime]
+    default_branch: str = "main"
+    active_branches: Optional[List[str]] = None
+    sync_mode: str = "auto"
     created_at: datetime
     updated_at: datetime
     total_files: int = 0
     indexed_files: int = 0
+
+    @field_validator("active_branches", mode="before")
+    @classmethod
+    def _parse_active_branches(cls, value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value) if value.strip() else None
+            except Exception:
+                return None
+        return value
 
     class Config:
         from_attributes = True
         json_encoders = {datetime: _format_datetime}
 
 
+class RepoUpdate(BaseModel):
+    active_branches: Optional[List[str]] = Field(default=None, description="业务分支列表，最多 2 个；传空列表可清空业务分支")
+    sync_mode: Optional[str] = None
+
+
 class SearchQuery(BaseModel):
     query: str = Field(..., min_length=1)
     repo_id: Optional[UUID] = None
+    branch: str = "main"
     limit: int = Field(default=20, ge=1, le=100)
     mode: str = "hybrid"
+
+
+class SearchMeta(BaseModel):
+    requested_branch: str
+    actual_branch: str
+    branch_fallback: bool = False
 
 
 class SearchResultItem(BaseModel):
@@ -57,11 +85,19 @@ class SearchResultItem(BaseModel):
     score: float
     score_breakdown: dict
     file_role: str = "other"
+    branch: str = "main"
+    is_override: bool = False
+
+
+class SearchResponse(BaseModel):
+    results: List[SearchResultItem]
+    meta: SearchMeta
 
 
 class SymbolSearchQuery(BaseModel):
     query: str = Field(..., min_length=1)
     repo_id: Optional[UUID] = None
+    branch: str = "main"
     limit: int = Field(default=20, ge=1, le=100)
 
 
@@ -101,6 +137,7 @@ class SearchHistoryResponse(BaseModel):
 class BenchmarkCreate(BaseModel):
     query: str = Field(..., min_length=1)
     repo_id: Optional[UUID] = None
+    branch: str = "main"
     mode: str = "with_codepop"
     expected_files: List[str] = Field(default_factory=list)
     expected_lines: List[int] = Field(default_factory=list)
@@ -110,6 +147,7 @@ class BenchmarkResponse(BaseModel):
     id: UUID
     query: str
     repo_id: Optional[UUID]
+    branch: str = "main"
     mode: str
     latency_ms: int
     results_count: int
@@ -222,6 +260,7 @@ class FileSummary(BaseModel):
 class CodeContext(BaseModel):
     query: str
     query_intent: str
+    branch: str = "main"
     matched_concepts: List[str] = []
     entry_points: List[SymbolEntry] = []
     call_chain: Optional[CallChain] = None
@@ -231,6 +270,7 @@ class CodeContext(BaseModel):
     total_files: int = 0
     total_symbols: int = 0
     search_latency_ms: int = 0
+    meta: Optional[SearchMeta] = None
 
 
 class DebugPathOverrides(BaseModel):
@@ -247,6 +287,7 @@ class DebugPathOverrides(BaseModel):
 class DebugSearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     repo_id: UUID
+    branch: str = "main"
     limit: int = Field(default=20, ge=1, le=100)
     path_overrides: Optional[DebugPathOverrides] = None
     enable_llm_expand: bool = False
@@ -298,6 +339,7 @@ class RouteSearchRequest(BaseModel):
     handler_name: Optional[str] = None
     http_method: Optional[str] = None
     repo_id: str
+    branch: str = "main"
 
 
 class RouteResponse(BaseModel):
@@ -312,6 +354,7 @@ class RouteResponse(BaseModel):
 class ImpactRequest(BaseModel):
     symbol_name: str
     repo_id: Optional[str] = None
+    branch: str = "main"
 
 
 class ImpactResponse(BaseModel):

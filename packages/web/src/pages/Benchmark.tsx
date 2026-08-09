@@ -1,5 +1,4 @@
 import { useState, useMemo } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import {
   Search,
   Play,
@@ -18,6 +17,7 @@ import {
   SlidersHorizontal,
   X,
   Cpu,
+  Lock,
 } from 'lucide-react';
 import { useRepos } from '../hooks/useRepos';
 import { debugSearch } from '../api';
@@ -39,6 +39,13 @@ const MAX_TOP_K = 20;
 export const Benchmark = () => {
   const { repos, isLoading: reposLoading } = useRepos();
   const [selectedRepo, setSelectedRepo] = useState('');
+  // 主分支：自动识别为仓库默认分支（锁定，不可选）；副分支：可选业务分支，默认=主分支
+  const [mainBranch, setMainBranch] = useState('');
+  const [compareBranch, setCompareBranch] = useState('');
+  const [branchResults, setBranchResults] = useState<Record<string, DebugSearchResponse>>({});
+  const [activeResultBranch, setActiveResultBranch] = useState('');
+  const [isRunning, setIsRunning] = useState(false);
+  const [runError, setRunError] = useState<Error | null>(null);
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
   const [paramsOpen, setParamsOpen] = useState(false);
@@ -57,24 +64,51 @@ export const Benchmark = () => {
     return result;
   }, [topK]);
 
-  const debugMutation = useMutation({
-    mutationFn: () =>
-      debugSearch(
-        query.trim(),
-        selectedRepo,
-        limit,
-        {
-          enabled: Array.from(enabledPaths),
-          top_k: Object.fromEntries(Object.entries(effectiveTopK).filter(([, v]) => v > 0)),
-        }
-      ),
-  });
+  // 可选分支：默认分支 + 已配置的业务分支
+  const branchOptions = useMemo(() => {
+    const repo = repos.find((r) => r.id === selectedRepo);
+    if (!repo) return [];
+    const def = repo.defaultBranch || 'main';
+    const active = repo.activeBranches || [];
+    return [def, ...active.filter((b) => b !== def)];
+  }, [repos, selectedRepo]);
 
-  const result: DebugSearchResponse | null = debugMutation.data || null;
+  const handleRepoChange = (repoId: string) => {
+    setSelectedRepo(repoId);
+    const repo = repos.find((r) => r.id === repoId);
+    const def = repo?.defaultBranch || 'main';
+    setMainBranch(def);
+    setCompareBranch(def);
+    setActiveResultBranch(def);
+    setBranchResults({});
+    setRunError(null);
+  };
 
-  const handleRun = () => {
-    if (!selectedRepo || !query.trim()) return;
-    debugMutation.mutate();
+  const result: DebugSearchResponse | null =
+    (activeResultBranch && branchResults[activeResultBranch]) || null;
+
+  const handleRun = async () => {
+    if (!selectedRepo || !query.trim() || isRunning) return;
+    setIsRunning(true);
+    setRunError(null);
+    setBranchResults({});
+    try {
+      const pathOverrides = {
+        enabled: Array.from(enabledPaths),
+        top_k: Object.fromEntries(Object.entries(effectiveTopK).filter(([, v]) => v > 0)),
+      };
+      const branches =
+        compareBranch && compareBranch !== mainBranch ? [mainBranch, compareBranch] : [mainBranch];
+      for (const b of branches) {
+        const data = await debugSearch(query.trim(), selectedRepo, b, limit, pathOverrides);
+        setBranchResults((prev) => ({ ...prev, [b]: data }));
+      }
+      setActiveResultBranch(mainBranch);
+    } catch (err) {
+      setRunError(err as Error);
+    } finally {
+      setIsRunning(false);
+    }
   };
 
   const togglePath = (key: string) => {
@@ -135,7 +169,7 @@ export const Benchmark = () => {
             <label className="block text-sm font-medium text-[#666] mb-1">选择仓库 <span className="text-[#ff3d8a]">*</span></label>
             <select
               value={selectedRepo}
-              onChange={(e) => setSelectedRepo(e.target.value)}
+              onChange={(e) => handleRepoChange(e.target.value)}
               disabled={reposLoading}
               className="w-full px-3 py-2 rounded-xl border-2 border-[#2D2D2D] bg-[#F5F5F0] disabled:opacity-60"
             >
@@ -151,28 +185,67 @@ export const Benchmark = () => {
             )}
           </div>
 
-          <div className="md:col-span-3">
-            <label className="block text-sm font-medium text-[#666] mb-1">自然语言查询</label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleRun()}
-                disabled={!selectedRepo}
-                placeholder={selectedRepo ? '输入中文或中英混合查询，例如：订单创建流程 / redis cache config' : '请先选择仓库'}
-                className="flex-1 px-3 py-2 rounded-xl border-2 border-[#2D2D2D] bg-[#F5F5F0] disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-[#ff3d8a]"
-              />
-              <button
-                onClick={handleRun}
-                disabled={!selectedRepo || !query.trim() || debugMutation.isPending}
-                className="px-5 py-2 rounded-xl font-bold flex items-center gap-2 transition-transform active:scale-95 disabled:opacity-60"
-                style={{ background: '#ff3d8a', color: 'white', border: '2px solid #2D2D2D', boxShadow: '4px 4px 0 #2D2D2D' }}
-              >
-                {debugMutation.isPending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
-                执行检索
-              </button>
+          <div className="md:col-span-1">
+            <label className="block text-sm font-medium text-[#666] mb-1">
+              主分支（默认分支，自动识别）
+            </label>
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl border-2 border-[#2D2D2D] bg-[#F5F5F0] text-sm text-[#2D2D2D]">
+              {mainBranch ? (
+                <>
+                  <Lock className="w-3.5 h-3.5 text-[#999]" />
+                  <span className="font-bold">{mainBranch}</span>
+                  <span className="text-xs text-[#999]">（不可修改）</span>
+                </>
+              ) : (
+                <span className="text-[#999]">请先选择仓库</span>
+              )}
             </div>
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-[#666] mb-1">
+              副分支（对比分支，默认与主分支一致）
+            </label>
+            <select
+              value={compareBranch || mainBranch}
+              onChange={(e) => setCompareBranch(e.target.value)}
+              disabled={!selectedRepo}
+              className="w-full px-3 py-2 rounded-xl border-2 border-[#2D2D2D] bg-[#F5F5F0] disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {branchOptions.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-[#666] mt-1">
+              选择业务分支时，将分别对主分支与副分支执行检索并对比结果。
+            </p>
+          </div>
+        </div>
+
+        {/* Query area */}
+        <div className="mt-4">
+          <label className="block text-sm font-medium text-[#666] mb-1">自然语言查询</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleRun()}
+              disabled={!selectedRepo}
+              placeholder={selectedRepo ? '输入中文或中英混合查询，例如：订单创建流程 / redis cache config' : '请先选择仓库'}
+              className="flex-1 px-3 py-2 rounded-xl border-2 border-[#2D2D2D] bg-[#F5F5F0] disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-[#ff3d8a]"
+            />
+            <button
+              onClick={handleRun}
+              disabled={!selectedRepo || !query.trim() || isRunning}
+              className="px-5 py-2 rounded-xl font-bold flex items-center gap-2 transition-transform active:scale-95 disabled:opacity-60"
+              style={{ background: '#ff3d8a', color: 'white', border: '2px solid #2D2D2D', boxShadow: '4px 4px 0 #2D2D2D' }}
+            >
+              {isRunning ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
+              {isRunning ? '检索中...' : '执行检索'}
+            </button>
           </div>
         </div>
 
@@ -248,13 +321,36 @@ export const Benchmark = () => {
         </div>
       </section>
 
-      {debugMutation.error && (
+      {runError && (
         <div
           className="p-4 rounded-xl flex items-center gap-3"
           style={{ background: '#ffe6e6', border: '2px solid #ff3d8a' }}
         >
           <AlertCircle className="w-5 h-5 text-[#ff3d8a]" />
-          <p className="font-bold text-[#2D2D2D]">检索失败：{(debugMutation.error as any)?.response?.data?.detail || (debugMutation.error as Error).message}</p>
+          <p className="font-bold text-[#2D2D2D]">检索失败：{(runError as any)?.response?.data?.detail || runError.message}</p>
+        </div>
+      )}
+
+      {/* Branch comparison switcher */}
+      {Object.keys(branchResults).length > 0 && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-bold text-[#2D2D2D]">查看分支：</span>
+          {Object.keys(branchResults).map((b) => (
+            <button
+              key={b}
+              onClick={() => setActiveResultBranch(b)}
+              className={clsx(
+                'px-3 py-1.5 rounded-lg text-sm font-bold border-2 transition-colors',
+                activeResultBranch === b
+                  ? 'bg-[#2D2D2D] text-white border-[#2D2D2D]'
+                  : 'bg-white text-[#2D2D2D] border-[#2D2D2D] hover:bg-[#F5F5F0]'
+              )}
+            >
+              {b}
+              {b === mainBranch && <span className="ml-1 text-xs opacity-70">主</span>}
+              {b !== mainBranch && <span className="ml-1 text-xs opacity-70">副</span>}
+            </button>
+          ))}
         </div>
       )}
 
@@ -536,8 +632,11 @@ function ContextView({ context }: { context: CodeContext }) {
           <p className="font-bold text-sm">{context.query_intent}</p>
         </div>
         <div className="p-3 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-          <p className="text-xs text-[#666]">Matched Concepts</p>
-          <p className="font-bold text-sm">{context.matched_concepts.join(', ') || '-'}</p>
+          <p className="text-xs text-[#666]">Branch</p>
+          <p className="font-bold text-sm">
+            {context.branch}
+            {context.meta?.branch_fallback && <span className="text-[#ff3d8a] ml-1 text-xs">(fallback)</span>}
+          </p>
         </div>
         <div className="p-3 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
           <p className="text-xs text-[#666]">Files / Symbols</p>

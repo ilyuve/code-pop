@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://postgres:codepop123@localhost:5432/codepop"
 
+    # Redis (repo-level sync task lock)
+    redis_url: str = "redis://localhost:6379/0"
+
     # Repositories storage
     repos_dir: Path = Path("./repos").resolve()
 

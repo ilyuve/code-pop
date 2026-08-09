@@ -3,6 +3,13 @@ import { persist } from 'zustand/middleware';
 import type { Repo, SearchResult, Settings } from '../types';
 import type { WebSocketStatus } from '../hooks/useWebSocket';
 
+export interface SearchMeta {
+  requested_branch: string;
+  actual_branch: string;
+  branch_fallback: boolean;
+  message?: string;
+}
+
 interface LogEntry {
   timestamp: string;
   level: string;
@@ -21,6 +28,8 @@ interface AppStore {
   // Search State
   searchResults: SearchResult[];
   setSearchResults: (results: SearchResult[]) => void;
+  searchMeta: SearchMeta | null;
+  setSearchMeta: (meta: SearchMeta | null) => void;
   recentSearches: string[];
   addRecentSearch: (query: string) => void;
 
@@ -67,6 +76,8 @@ export const useStore = create<AppStore>()(
       // Search State
       searchResults: [],
       setSearchResults: (results) => set({ searchResults: results }),
+      searchMeta: null,
+      setSearchMeta: (meta) => set({ searchMeta: meta }),
       recentSearches: [],
       addRecentSearch: (query) =>
         set((state) => ({

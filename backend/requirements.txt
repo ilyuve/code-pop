@@ -13,6 +13,9 @@ sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 pgvector==0.3.6
 
+# Redis (repo-level sync task lock)
+redis==5.2.1
+
 # Embeddings (local, no OpenAI)
 sentence-transformers==3.3.0
 huggingface-hub==0.26.0

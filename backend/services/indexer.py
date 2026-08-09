@@ -4,6 +4,7 @@ import asyncio
 import gc
 import json
 import logging
+import subprocess
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,6 @@ from services.parser import (
     should_skip_path,
 )
 from services.router_parser import RouterParser
-from services.repo_sync import clone_or_pull
 from services.chinese_enricher import (
     EnrichmentResult,
     aggregate_domain_synonyms,
@@ -204,12 +204,13 @@ def _notify(
     stage_progress: Optional[dict] = None,
     log_message: Optional[str] = None,
     log_level: str = "info",
+    branch: str = "main",
     db: Optional[Session] = None,
 ) -> None:
     """Schedule a WebSocket notification on the main event loop from a worker thread."""
     if log_message:
         _add_log(db, repo_id, log_level, log_message, stage)
-    
+
     if db and stage:
         _update_progress(
             db,
@@ -221,12 +222,12 @@ def _notify(
             status,
             log_message,
         )
-    
+
     try:
         asyncio.run_coroutine_threadsafe(
             notifier.send_repo_update(
                 repo_id, status, progress, error, stage=stage, stage_progress=stage_progress,
-                log_message=log_message, log_level=log_level
+                log_message=log_message, log_level=log_level, branch=branch
             ),
             loop,
         )
@@ -254,6 +255,7 @@ def _index_file(
     repo_id: UUID,
     repo_path: Path,
     file_path: Path,
+    branch: str = "main",
 ) -> Optional[Tuple[CodeFile, ParseResult, str]]:
     """Index a single source file with degradation fallback. Returns inserted CodeFile, parse result and raw content."""
     rel_path = str(file_path.relative_to(repo_path))
@@ -268,7 +270,7 @@ def _index_file(
 
     existing = (
         db.query(CodeFile)
-        .filter(CodeFile.repo_id == repo_id, CodeFile.path == rel_path)
+        .filter(CodeFile.repo_id == repo_id, CodeFile.branch == branch, CodeFile.path == rel_path)
         .first()
     )
 
@@ -356,6 +358,7 @@ def _index_file(
     language = detect_language(rel_path) or parsed.language
     code_file = CodeFile(
         repo_id=repo_id,
+        branch=branch,
         path=rel_path,
         language=language or "unknown",
         content_hash=parsed.content_hash,
@@ -389,15 +392,17 @@ def _bulk_insert_symbols_and_embeddings(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    branch: str = "main",
     chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
     enrichment_provider_id: Optional[UUID] = None,
     enrichment_model_name: str = "unknown",
 ) -> None:
     """Embed chunks and bulk insert symbols + embeddings for parsed files."""
     logger.info(
-        "Bulk inserting %d parsed files for repo %s",
+        "Bulk inserting %d parsed files for repo %s branch %s",
         len(file_records),
         repo_id,
+        branch,
     )
     if not file_records:
         return
@@ -412,6 +417,7 @@ def _bulk_insert_symbols_and_embeddings(
                 {
                     "file_id": code_file.id,
                     "repo_id": repo_id,
+                    "branch": branch,
                     "name": sym.name,
                     "type": sym.type,
                     "kind": sym.kind,
@@ -438,6 +444,7 @@ def _bulk_insert_symbols_and_embeddings(
                     "total": 0,
                     "percentage": 100.0,
                 },
+                branch=branch,
                 db=db,
             )
     else:
@@ -461,6 +468,7 @@ def _bulk_insert_symbols_and_embeddings(
                     "total": total_symbols,
                     "percentage": round(pct, 2),
                 },
+                branch=branch,
                 db=db,
             )
 
@@ -497,7 +505,8 @@ def _bulk_insert_symbols_and_embeddings(
             "percentage": 0.0,
         },
         log_message=f"开始生成向量，共 {total_chunks} 个 chunks",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
     if not texts_to_embed:
@@ -514,7 +523,8 @@ def _bulk_insert_symbols_and_embeddings(
                 "percentage": 100.0,
             },
             log_message="无 chunks 需要编码",
-            db=db,
+            branch=branch,
+                db=db,
         )
         return
 
@@ -563,7 +573,8 @@ def _bulk_insert_symbols_and_embeddings(
                 "percentage": round(encode_pct, 2),
             },
             log_message=f"已编码 {encoded}/{total_chunks} chunks",
-            db=db,
+            branch=branch,
+                db=db,
         )
 
     sparse_embeddings_data: List[Dict[str, Any]] = []
@@ -574,6 +585,7 @@ def _bulk_insert_symbols_and_embeddings(
             {
                 "file_id": file_id,
                 "repo_id": repo_id,
+                "branch": branch,
                 "chunk_index": chunk_index,
                 "start_line": start_line,
                 "end_line": end_line,
@@ -598,7 +610,8 @@ def _bulk_insert_symbols_and_embeddings(
             "percentage": 0.0,
         },
         log_message=f"开始插入向量，共 {total_embeddings} 条",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
     for i in range(0, total_embeddings, batch_size):
@@ -622,7 +635,8 @@ def _bulk_insert_symbols_and_embeddings(
                 "percentage": round(pct, 2),
             },
             log_message=f"已插入 {inserted}/{total_embeddings} 条向量",
-            db=db,
+            branch=branch,
+                db=db,
         )
 
     # Persist enrichments now that embeddings have IDs.
@@ -655,7 +669,8 @@ def _bulk_insert_symbols_and_embeddings(
             "percentage": 0.0,
         },
         log_message=f"开始生成稀疏向量，共 {total_chunks} 个 chunks",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
     sparse_vectors = embedder.encode_sparse(texts_to_embed)
@@ -700,6 +715,7 @@ def _bulk_insert_symbols_and_embeddings(
                     "percentage": round(pct, 2),
                 },
                 log_message=f"已插入 {inserted}/{total_sparse} 条稀疏向量",
+                branch=branch,
                 db=db,
             )
 
@@ -716,7 +732,8 @@ def _bulk_insert_symbols_and_embeddings(
             "percentage": 100.0,
         },
         log_message="向量生成完成",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
 
@@ -750,6 +767,7 @@ async def _enrich_chunks_for_indexing_async(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    branch: str = "main",
 ) -> Tuple[Optional[UUID], str, Dict[str, EnrichmentResult]]:
     """Enrich chunks via LLM before embedding. Returns (provider_id, model_name, chunk_hash->result)."""
     import hashlib
@@ -766,7 +784,8 @@ async def _enrich_chunks_for_indexing_async(
             stage="chinese_enrichment",
             stage_progress={"stage": "chinese_enrichment", "current": 0, "total": 0, "percentage": 100.0},
             log_message="未配置 LLM chat provider，跳过中文语义增强",
-            db=db,
+            branch=branch,
+                db=db,
         )
         return None, "unknown", {}
 
@@ -800,7 +819,8 @@ async def _enrich_chunks_for_indexing_async(
         stage="chinese_enrichment",
         stage_progress={"stage": "chinese_enrichment", "current": 0, "total": total, "percentage": 0.0},
         log_message=f"开始中文语义增强，命中缓存 {len(cached)}，待生成 {total}",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
     async def enrich_one(chunk_hash: str) -> None:
@@ -832,6 +852,7 @@ async def _enrich_chunks_for_indexing_async(
                     "percentage": round(pct, 2),
                 },
                 log_message=f"中文语义增强进度: {processed}/{total}",
+                branch=branch,
                 db=db,
             )
 
@@ -848,6 +869,7 @@ async def _enrich_repository_async(
     chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
     enable_flow_label: bool = True,
     file_contents: Optional[Dict[UUID, str]] = None,
+    branch: str = "main",
 ) -> None:
     """Aggregate domain synonyms and generate symbol flow labels via LLM."""
     router = LLMRouter(db)
@@ -862,7 +884,8 @@ async def _enrich_repository_async(
             stage="flow_labels",
             stage_progress={"stage": "flow_labels", "current": 0, "total": 0, "percentage": 100.0},
             log_message="未配置 LLM chat provider，跳过流程标签",
-            db=db,
+            branch=branch,
+                db=db,
         )
         return
 
@@ -889,7 +912,8 @@ async def _enrich_repository_async(
             stage="flow_labels",
             stage_progress={"stage": "flow_labels", "current": 0, "total": 0, "percentage": 100.0},
             log_message="流程标签功能已关闭",
-            db=db,
+            branch=branch,
+                db=db,
         )
         return
 
@@ -906,7 +930,8 @@ async def _enrich_repository_async(
         stage="flow_labels",
         stage_progress={"stage": "flow_labels", "current": 0, "total": symbol_total, "percentage": 0.0},
         log_message=f"开始生成流程标签，共 {symbol_total} 个 symbols",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
     file_embeddings: Dict[UUID, str] = {}
@@ -951,6 +976,7 @@ async def _enrich_repository_async(
                     "percentage": round(pct, 2),
                 },
                 log_message=f"流程标签进度: {symbol_processed}/{symbol_total}",
+                branch=branch,
                 db=db,
             )
 
@@ -963,7 +989,8 @@ async def _enrich_repository_async(
         stage="flow_labels",
         stage_progress={"stage": "flow_labels", "current": symbol_total, "total": symbol_total, "percentage": 100.0},
         log_message="流程标签完成",
-        db=db,
+        branch=branch,
+                db=db,
     )
 
 
@@ -977,6 +1004,7 @@ def _enrich_repository(
     chunk_enrichments: Optional[Dict[str, EnrichmentResult]] = None,
     enable_flow_label: bool = True,
     file_contents: Optional[Dict[UUID, str]] = None,
+    branch: str = "main",
 ) -> None:
     """Synchronous wrapper to run async enrichment in a worker thread."""
     asyncio.run(
@@ -990,6 +1018,7 @@ def _enrich_repository(
             chunk_enrichments=chunk_enrichments,
             enable_flow_label=enable_flow_label,
             file_contents=file_contents,
+            branch=branch,
         )
     )
 
@@ -1000,8 +1029,9 @@ def _rebuild_call_graph(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    branch: str = "main",
 ) -> None:
-    """Rebuild call graph edges ONLY for changed files."""
+    """Rebuild call graph edges ONLY for changed files on the given branch."""
     _check_cancelled(repo_id_str)
     if not file_records:
         return
@@ -1014,10 +1044,10 @@ def _rebuild_call_graph(
             changed_symbol_names.add(caller)
             changed_symbol_names.add(callee)
 
-    # 2. Find symbol IDs that belong to changed files OR appear in changed calls.
+    # 2. Find symbol IDs that belong to changed files OR appear in changed calls on this branch.
     symbols_to_update = (
         db.query(Symbol)
-        .filter(Symbol.repo_id == repo_id)
+        .filter(Symbol.repo_id == repo_id, Symbol.branch == branch)
         .filter(
             (Symbol.file_id.in_(changed_file_ids))
             | (Symbol.name.in_(list(changed_symbol_names)))
@@ -1039,19 +1069,21 @@ def _rebuild_call_graph(
                 "total": 0,
                 "percentage": 100.0,
             },
-            db=db,
+            branch=branch,
+                db=db,
         )
         return
 
-    # 3. Delete ONLY edges where source or target is in the affected set.
+    # 3. Delete ONLY edges where source or target is in the affected set on this branch.
     db.query(CallGraphEdge).filter(
         CallGraphEdge.repo_id == repo_id,
+        CallGraphEdge.branch == branch,
         (CallGraphEdge.source_symbol_id.in_(symbol_ids_to_update))
         | (CallGraphEdge.target_symbol_id.in_(symbol_ids_to_update)),
     ).delete(synchronize_session=False)
 
-    # 4. Build name -> id map for ALL symbols in repo (needed for cross-file calls).
-    all_symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id).all()
+    # 4. Build name -> id map for symbols on this branch (needed for cross-file calls).
+    all_symbols = db.query(Symbol).filter(Symbol.repo_id == repo_id, Symbol.branch == branch).all()
     name_to_ids: Dict[str, List[UUID]] = {}
     for sym in all_symbols:
         name_to_ids.setdefault(sym.name, []).append(sym.id)
@@ -1075,6 +1107,7 @@ def _rebuild_call_graph(
                             "source_symbol_id": source_id,
                             "target_symbol_id": target_id,
                             "repo_id": repo_id,
+                            "branch": branch,
                             "call_type": "direct",
                         }
                     )
@@ -1101,6 +1134,7 @@ def _rebuild_call_graph(
                     "total": total_edges,
                     "percentage": round(pct, 2),
                 },
+                branch=branch,
                 db=db,
             )
     else:
@@ -1116,12 +1150,57 @@ def _rebuild_call_graph(
                 "total": 0,
                 "percentage": 100.0,
             },
-            db=db,
+            branch=branch,
+                db=db,
         )
 
 
-def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
-    """Synchronous indexing routine executed in a worker thread."""
+def _get_branch_diff_changes(local_path: Path, base_branch: str, head_branch: str) -> Optional[Dict[str, str]]:
+    """Return ``{relative_path: status}`` (A/M/D/R) comparing base_branch..head_branch.
+
+    Uses ``git diff --name-status`` against the baseline ref that
+    ``fetch_branch`` already fetched into the shallow clone. Returns ``None``
+    when the diff cannot be computed (missing baseline / git error) so callers
+    can fall back to a full index.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(local_path), "diff", "--name-status",
+                f"origin/{base_branch}", f"origin/{head_branch}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "git diff failed for %s %s..%s: %s",
+                local_path, base_branch, head_branch, result.stderr.strip()[:300],
+            )
+            return None
+        changes: Dict[str, str] = {}
+        for line in result.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            status = parts[0][:1]  # A/M/D/R; ignore rename score column
+            path = parts[-1]
+            changes[path] = status
+        return changes
+    except subprocess.TimeoutExpired:
+        logger.warning("git diff timed out for %s %s..%s", local_path, base_branch, head_branch)
+        return None
+    except Exception as exc:
+        logger.warning("Failed to compute branch diff for %s: %s", local_path, exc)
+        return None
+
+
+def _sync_index_repo(repo_id: UUID, branch: str, loop: asyncio.AbstractEventLoop) -> None:
+    """Synchronous indexing routine executed in a worker thread for a specific branch."""
     db = SessionLocal()
     repo_id_str = str(repo_id)
     file_records: List[Tuple[CodeFile, ParseResult]] = []
@@ -1165,7 +1244,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         repo.error_message = None
         repo.indexing_started_at = datetime.utcnow()
         db.commit()
-        _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0, log_message="初始化索引状态", db=db)
+        _notify(loop, repo_id_str, RepoStatus.indexing.value, 0.0, log_message="初始化索引状态", branch=branch, db=db)
         _check_cancelled(repo_id_str)
 
         _notify(
@@ -1181,11 +1260,14 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 "percentage": 0.0,
             },
             log_message="开始同步代码仓库",
-            db=db,
+            branch=branch,
+                db=db,
         )
 
         try:
-            local_path = clone_or_pull(repo.name, repo.git_url, repo.local_path)
+            from services.repo_sync import fetch_branch, get_repo_local_path
+            local_path = Path(get_repo_local_path(repo, branch))
+            fetch_branch(repo.git_url, str(local_path), branch, default_branch=repo.default_branch)
             repo.local_path = str(local_path)
             db.commit()
             _notify(
@@ -1200,16 +1282,33 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                     "total": 1,
                     "percentage": 100.0,
                 },
-                log_message=f"代码同步完成，本地路径: {local_path}",
+                log_message=f"代码同步完成，本地路径: {local_path}，分支: {branch}",
+                branch=branch,
                 db=db,
             )
             _check_cancelled(repo_id_str)
         except Exception as sync_exc:
-            error_msg = f"代码同步失败: {str(sync_exc)}"
+            error_msg = f"代码同步失败 [{branch}]: {str(sync_exc)}"
             _add_log(db, repo_id_str, "error", error_msg, "git_sync")
             raise
 
         source_files = list_source_files(local_path)
+        diff_changes: Optional[Dict[str, str]] = None
+        changed_paths: set = set()
+        if branch != repo.default_branch:
+            # 真 diff 索引：只索引相对 default_branch 有变化（新增/修改/重命名）的文件
+            diff_changes = _get_branch_diff_changes(local_path, repo.default_branch, branch)
+            if diff_changes is None:
+                logger.warning("无法计算分支 diff [%s]，回退全量索引", branch)
+                _add_log(db, repo_id_str, "warning", f"无法计算分支 diff，回退全量索引 [{branch}]", "scan")
+            else:
+                changed_paths = {p for p, s in diff_changes.items() if s in ("A", "M", "R")}
+                total_before = len(source_files)
+                source_files = [f for f in source_files if str(f.relative_to(local_path)) in changed_paths]
+                skipped_unchanged = total_before - len(source_files)
+                if skipped_unchanged:
+                    logger.info("分支 %s diff 索引：%d 个未变化文件跳过", branch, skipped_unchanged)
+                    _add_log(db, repo_id_str, "info", f"diff 索引 [{branch}]：跳过 {skipped_unchanged} 个未变化文件", "scan")
         total = len(source_files)
         processed = 0
         skipped = 0
@@ -1227,13 +1326,14 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 "percentage": 0.0,
             },
             log_message=f"开始扫描文件，共发现 {total} 个源文件",
-            db=db,
+            branch=branch,
+                db=db,
         )
 
         for file_path in source_files:
             _check_cancelled(repo_id_str)
             try:
-                result = _index_file(db, repo_id, local_path, file_path)
+                result = _index_file(db, repo_id, local_path, file_path, branch=branch)
                 if result:
                     code_file, parsed, content = result
                     file_records.append((code_file, parsed))
@@ -1243,7 +1343,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                     skipped += 1
             except Exception as exc:
                 logger.warning("Failed to index %s: %s", file_path.relative_to(local_path), exc)
-                _add_log(db, repo_id_str, "warning", f"文件索引失败 {file_path.relative_to(local_path)}: {str(exc)}", "scan")
+                _add_log(db, repo_id_str, "warning", f"文件索引失败 [{branch}] {file_path.relative_to(local_path)}: {str(exc)}", "scan")
                 skipped += 1
 
             processed += 1
@@ -1264,7 +1364,8 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                         "percentage": round(scan_pct, 2),
                     },
                     log_message=f"文件扫描进度: {processed}/{total}",
-                    db=db,
+                    branch=branch,
+                db=db,
                 )
 
         _add_log(db, repo_id_str, "info", f"文件扫描完成，共处理 {processed} 个文件，跳过 {skipped} 个", "scan")
@@ -1280,20 +1381,21 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
 
         if enable_index_enrich and all_file_records:
             enrichment_provider_id, enrichment_model_name, chunk_enrichments = asyncio.run(
-                _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop)
+                _enrich_chunks_for_indexing_async(db, repo_id, repo_id_str, all_file_records, loop, branch=branch)
             )
             db.commit()
 
         _check_cancelled(repo_id_str)
 
         if all_file_records:
-            print(f"[INDEXER] flushing {len(all_file_records)} records for repo {repo_id}", flush=True)
+            print(f"[INDEXER] flushing {len(all_file_records)} records for repo {repo_id} branch {branch}", flush=True)
             _bulk_insert_symbols_and_embeddings(
                 db,
                 repo_id,
                 repo_id_str,
                 all_file_records,
                 loop,
+                branch=branch,
                 chunk_enrichments=chunk_enrichments,
                 enrichment_provider_id=enrichment_provider_id,
                 enrichment_model_name=enrichment_model_name,
@@ -1315,6 +1417,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
             chunk_enrichments=chunk_enrichments,
             enable_flow_label=enable_flow_label,
             file_contents=file_contents,
+            branch=branch,
         )
 
         _check_cancelled(repo_id_str)
@@ -1332,41 +1435,72 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 "percentage": 0.0,
             },
             log_message="开始构建调用图",
-            db=db,
+            branch=branch,
+                db=db,
         )
 
         _check_cancelled(repo_id_str)
-        _rebuild_call_graph(db, repo_id, repo_id_str, all_file_records, loop)
+        _rebuild_call_graph(db, repo_id, repo_id_str, all_file_records, loop, branch=branch)
         db.commit()
 
-        _add_log(db, repo_id_str, "info", "调用图构建完成", "call_graph")
+        _add_log(db, repo_id_str, "info", f"调用图构建完成 [{branch}]", "call_graph")
 
         _check_cancelled(repo_id_str)
-        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop, file_contents=file_contents)
+        _parse_framework_routes(db, repo_id, repo_id_str, all_file_records, loop, branch=branch, file_contents=file_contents)
         db.commit()
 
-        _add_log(db, repo_id_str, "info", "框架路由解析完成", "routes")
+        _add_log(db, repo_id_str, "info", f"框架路由解析完成 [{branch}]", "routes")
         _check_cancelled(repo_id_str)
 
         # ---- 清理已删除的文件 ----
-        # 扫描仓库当前所有文件路径，删除数据库中不存在于仓库的记录
-        current_file_paths = set(str(f.relative_to(local_path)) for f in source_files)
-        db_files = db.query(CodeFile).filter(CodeFile.repo_id == repo_id).all()
+        if branch != repo.default_branch and diff_changes is not None:
+            # 业务分支 diff 索引：清理 DB 中不在本次变化集合（A/M/R）内的旧记录
+            #（含之前全量索引残留的未变化文件）；git diff 状态为 D 的文件写入
+            # branch_deleted_files，供查询时过滤 main 结果。
+            deleted_status_paths = {p for p, s in diff_changes.items() if s == "D"}
+            db_files = db.query(CodeFile).filter(
+                CodeFile.repo_id == repo_id,
+                CodeFile.branch == branch,
+                CodeFile.path.notin_(changed_paths),
+            ).all()
+
+            branch_deleted = json.loads(repo.branch_deleted_files or "{}")
+            # 删除记录直接反映当前 diff 的 D 状态集合：被删的写入、
+            # 已恢复的（重新出现于分支）自动移除。
+            branch_deleted[branch] = sorted(deleted_status_paths)
+            repo.branch_deleted_files = json.dumps(branch_deleted)
+        else:
+            # main 分支（或 diff 计算失败回退全量）：本地扫描不到即视为删除
+            current_file_paths = set(str(f.relative_to(local_path)) for f in source_files)
+            db_files = db.query(CodeFile).filter(
+                CodeFile.repo_id == repo_id,
+                CodeFile.branch == branch,
+                CodeFile.path.notin_(current_file_paths),
+            ).all()
+
+            if branch != repo.default_branch:
+                deleted_files_for_branch = [f.path for f in db_files]
+                if deleted_files_for_branch:
+                    branch_deleted = json.loads(repo.branch_deleted_files or "{}")
+                    existing_deleted = set(branch_deleted.get(branch, []))
+                    existing_deleted.update(deleted_files_for_branch)
+                    branch_deleted[branch] = list(existing_deleted)
+                    repo.branch_deleted_files = json.dumps(branch_deleted)
+
         deleted_count = 0
         for db_file in db_files:
-            if db_file.path not in current_file_paths:
-                db.delete(db_file)
-                deleted_count += 1
+            db.delete(db_file)
+            deleted_count += 1
         if deleted_count > 0:
             db.commit()
-            logger.info("Deleted %d removed files from database for repo %s", deleted_count, repo_id)
-            _add_log(db, repo_id_str, "info", f"清理已删除文件: {deleted_count} 个", "cleanup")
+            logger.info("Deleted %d removed files from database for repo %s branch %s", deleted_count, repo_id, branch)
+            _add_log(db, repo_id_str, "info", f"清理已删除文件 [{branch}]: {deleted_count} 个", "cleanup")
 
         repo.status = RepoStatus.indexed.value
         repo.last_indexed_at = datetime.utcnow()
         db.commit()
 
-        _notify(loop, repo_id_str, RepoStatus.indexed.value, 100.0, log_message="索引完成", db=db)
+        _notify(loop, repo_id_str, RepoStatus.indexed.value, 100.0, log_message="索引完成", branch=branch, db=db)
         _add_log(db, repo_id_str, "info", f"索引完成: {total} 个文件处理，{total_inserted} 个插入/更新，{skipped} 个跳过", "complete")
 
         logger.info(
@@ -1386,7 +1520,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 repo.error_message = "索引已取消"
                 db.commit()
             _add_log(db, repo_id_str, "info", "索引已取消", "cancel")
-            _notify(loop, repo_id_str, RepoStatus.pending.value, 0.0, "索引已取消", db=db)
+            _notify(loop, repo_id_str, RepoStatus.pending.value, 0.0, "索引已取消", branch=branch, db=db)
         except Exception:
             pass
     except Exception as exc:
@@ -1402,7 +1536,7 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
                 repo.status = RepoStatus.error.value
                 repo.error_message = error_msg
                 db.commit()
-            _notify(loop, repo_id_str, RepoStatus.error.value, 0.0, error_msg, db=db)
+            _notify(loop, repo_id_str, RepoStatus.error.value, 0.0, error_msg, branch=branch, db=db)
         except Exception:
             pass
     finally:
@@ -1415,38 +1549,39 @@ def _sync_index_repo(repo_id: UUID, loop: asyncio.AbstractEventLoop) -> None:
         db.close()
 
 
-async def index_repo(repo_id: UUID) -> None:
-    """Public async entry point to index a repository in the background."""
+async def index_repo(repo_id: UUID, branch: str = "main") -> None:
+    """Public async entry point to index a specific branch in the background."""
     repo_id_str = str(repo_id)
+    branch_key = f"{repo_id_str}:{branch}"
     loop = asyncio.get_running_loop()
-    
-    lock = _get_indexing_lock(repo_id_str)
+
+    lock = _get_indexing_lock(branch_key)
 
     async with lock:
-        if _cancel_indexing(repo_id_str):
-            logger.info("Cancelled existing indexing task for repo %s", repo_id_str)
+        if _cancel_indexing(branch_key):
+            logger.info("Cancelled existing indexing task for repo %s branch %s", repo_id_str, branch)
 
         # Start fresh: clear any stale cancellation signal from a previous run.
-        event = _get_cancel_event(repo_id_str)
+        event = _get_cancel_event(branch_key)
         event.clear()
 
         def _run_index():
-            _sync_index_repo(repo_id, loop)
-        
+            _sync_index_repo(repo_id, branch, loop)
+
         task = loop.run_in_executor(
             _index_executor,
             _run_index,
         )
-        _active_indexing_tasks[repo_id_str] = task
+        _active_indexing_tasks[branch_key] = task
         
         try:
             await task
         except asyncio.CancelledError:
-            logger.info("Indexing task cancelled for repo %s", repo_id_str)
+            logger.info("Indexing task cancelled for repo %s branch %s", repo_id_str, branch)
         except Exception as exc:
-            logger.exception("Indexing task failed for repo %s: %s", repo_id_str, exc)
+            logger.exception("Indexing task failed for repo %s branch %s: %s", repo_id_str, branch, exc)
         finally:
-            _clear_indexing_state(repo_id_str)
+            _clear_indexing_state(branch_key)
 
 
 def shutdown_indexer() -> None:
@@ -1463,13 +1598,20 @@ def _parse_framework_routes(
     repo_id_str: str,
     file_records: List[Tuple[CodeFile, ParseResult]],
     loop: asyncio.AbstractEventLoop,
+    branch: str = "main",
     file_contents: Optional[Dict[UUID, str]] = None,
 ) -> None:
-    """解析框架路由并写入数据库。"""
+    """解析框架路由并写入数据库（P0 仅 main 分支维护）。"""
+    if branch != "main":
+        return
+
     router_parser = RouterParser()
     total_routes = 0
 
-    db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == repo_id).delete(synchronize_session=False)
+    db.query(FrameworkRoute).filter(
+        FrameworkRoute.repo_id == repo_id,
+        FrameworkRoute.branch == branch,
+    ).delete(synchronize_session=False)
 
     for code_file, parsed in file_records:
         _check_cancelled(repo_id_str)
@@ -1481,6 +1623,7 @@ def _parse_framework_routes(
                     db_route = FrameworkRoute(
                         repo_id=repo_id,
                         file_id=code_file.id,
+                        branch=branch,
                         framework=route.framework,
                         http_method=route.method,
                         path=route.path,

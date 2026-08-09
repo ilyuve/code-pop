@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchRepos, fetchRepo, addRepo, deleteRepo, reindexRepo } from '../api';
+import { fetchRepos, fetchRepo, addRepo, updateRepo, deleteRepo, reindexRepo } from '../api';
 import { useStore } from '../store';
 import type { AddRepoForm } from '../types';
 
@@ -49,6 +49,18 @@ export const useRepos = () => {
     },
   });
 
+  const updateRepoMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<AddRepoForm> }) => updateRepo(id, data),
+    onSuccess: (updatedRepo) => {
+      queryClient.invalidateQueries({ queryKey: ['repos'] });
+      queryClient.invalidateQueries({ queryKey: ['repo', updatedRepo.id] });
+    },
+    onError: (error) => {
+      const detail = (error as any)?.response?.data?.detail || error?.message || '更新仓库失败';
+      alert(`更新失败: ${detail}`);
+    },
+  });
+
   const addRepoWithCallbacks = (form: AddRepoForm, options?: { onSuccess?: () => void; onError?: (error: any) => void }) => {
     addRepoMutation.mutate({ form, ...options });
   };
@@ -59,9 +71,11 @@ export const useRepos = () => {
     error: reposQuery.error,
     refetch: reposQuery.refetch,
     addRepo: addRepoWithCallbacks,
+    updateRepo: updateRepoMutation.mutate,
     deleteRepo: deleteRepoMutation.mutate,
     reindex: reindexMutation.mutate,
     isAdding: addRepoMutation.isPending,
+    isUpdating: updateRepoMutation.isPending,
     isDeleting: deleteRepoMutation.isPending,
     isReindexing: reindexMutation.isPending,
   };

@@ -10,20 +10,28 @@ RUN (sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g; s|http://secur
     apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 
+# Keep the torch layer independent from requirements.txt so adding/upgrading
+# a small runtime dependency never forces a full torch re-download/re-install.
+# The Docker Desktop HTTP proxy (http.docker.internal:3128) cannot reach external
+# package indexes, so clear the proxy for the direct (working) NAT network path.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
+    pip install --upgrade pip && \
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 
-# Use a BuildKit cache mount for pip so interrupted downloads can resume on
-# the next build. Show a progress bar even when Docker build is not a TTY.
-ENV PIP_PROGRESS_BAR=on
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    pip install torch --index-url https://download.pytorch.org/whl/cpu && \
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
     pip install -r requirements.txt --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
     python -c "from mcp.server.fastmcp import FastMCP; print('mcp fastmcp ok')"
 
 # Install model downloader tools. These are not strictly required at runtime
 # but make it easy to fetch BGE-M3 inside the container for offline use.
 RUN --mount=type=cache,target=/root/.cache/pip \
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
     pip install --index-url https://pypi.org/simple uv modelscope
 
 # Patch FlagEmbedding: AutoModel.from_pretrained expects `torch_dtype`, not

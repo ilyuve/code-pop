@@ -5,7 +5,7 @@ import logging
 import time
 import traceback
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
@@ -54,15 +54,33 @@ def _record_mcp_search(db, query: str, repo_id: Optional[UUID], mode: str, resul
     db.commit()
 
 
-def _resolve_repo_id(db, repo_id: Optional[str]) -> Optional[UUID]:
-    """Resolve the target repository when the caller does not provide one.
+def _resolve_repo(
+    db,
+    repo_id: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> Optional[Repository]:
+    """Resolve the target repository by id or name.
 
-    Prefer a single indexed repo; otherwise fall back to the user's most
-    recent search repo. Return None when no safe default exists so the
-    caller can ask the user to call list_repositories.
+    Returns None when no matching repo exists.
     """
     if repo_id:
-        return UUID(repo_id)
+        return db.query(Repository).filter(Repository.id == UUID(repo_id)).first()
+    if repo_name:
+        return db.query(Repository).filter(Repository.name == repo_name).first()
+    return None
+
+
+def _resolve_repo_id(db, repo_id: Optional[str] = None, repo_name: Optional[str] = None) -> Optional[UUID]:
+    """Resolve the target repository UUID when the caller provides one.
+
+    If neither repo_id nor repo_name is provided, fall back to a default:
+    a single indexed repo, or the user's most recent search repo.
+    Return None when no safe default exists so the caller can ask the user
+    to call list_repositories.
+    """
+    repo = _resolve_repo(db, repo_id, repo_name)
+    if repo:
+        return repo.id
 
     indexed_repos = (
         db.query(Repository)
@@ -86,10 +104,29 @@ def _resolve_repo_id(db, repo_id: Optional[str]) -> Optional[UUID]:
     return None
 
 
+def _resolve_branch(repo: Optional[Repository], branch: Optional[str]) -> Tuple[str, bool]:
+    """Resolve requested branch to actual indexed branch with fallback.
+
+    Returns (actual_branch, branch_fallback).
+    """
+    if not repo:
+        return branch or "main", False
+    default_branch = repo.default_branch or "main"
+    requested = branch or default_branch
+    if requested == default_branch:
+        return requested, False
+    active_branches = json.loads(repo.active_branches or "[]") or [default_branch]
+    if requested in active_branches:
+        return requested, False
+    return default_branch, True
+
+
 @mcp.tool()
 def search_code(
     query: str,
     repo_id: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    branch: Optional[str] = None,
     limit: int = 10,
 ) -> str:
     """
@@ -112,29 +149,42 @@ def search_code(
     系统会跨所有已索引仓库搜索，每个结果都带有 repo_name 字段，可根据 repo_name 区分来源仓库。
     仅当用户明确提到某个具体项目时，才需要先调用 list_repositories 获取其 repo_id 再传入。
 
+    【分支感知】
+    如果用户问题中明确包含分支名（如 feature/xxx、dev/xxx、release/xxx、develop、main、master），
+    请通过 branch 参数传入。如果当前 IDE/编辑器有 shell 工具，也可以主动执行
+    `git rev-parse --abbrev-ref HEAD` 获取当前分支并传入。未传入或分支未索引时，
+    系统会自动回落到仓库的 default_branch（main/master）。
+
     Args:
         query: Natural language query in Chinese or English.
             Examples: '登录流程在哪', 'how does authentication work', '改了 UserService 会影响哪里'
-        repo_id: Optional repository UUID to restrict search. 不传时自动选择唯一已索引仓库或最近搜索过的仓库。
+        repo_id: Optional repository UUID to restrict search.
+        repo_name: Optional repository name to restrict search. 优先于 repo_id 使用名称匹配。
+        branch: Optional branch name. 不传时回落到仓库 default_branch。
         limit: Maximum number of code snippets (default: 10)
     """
     try:
         with _db_session() as db:
-            repo_uuid = _resolve_repo_id(db, repo_id)
+            repo = _resolve_repo(db, repo_id, repo_name)
+            repo_uuid = _resolve_repo_id(db, repo_id, repo_name)
             if repo_uuid is None:
                 return json.dumps(
                     {
-                        "error": "未找到默认仓库，请先调用 list_repositories 选择仓库并提供 repo_id",
+                        "error": "未找到默认仓库，请先调用 list_repositories 选择仓库并提供 repo_id 或 repo_name",
                         "degraded": True,
                     },
                     ensure_ascii=False,
                 )
+            actual_branch, branch_fallback = _resolve_branch(repo, branch)
             searcher = Searcher(db)
 
             start = time.time()
-            context = searcher.search_with_context(query, repo_uuid, limit)
+            context = searcher.search_with_context(query, repo_uuid, actual_branch, limit)
             latency_ms = int((time.time() - start) * 1000)
             context.search_latency_ms = latency_ms
+            if context.meta:
+                context.meta.requested_branch = branch or actual_branch
+                context.meta.branch_fallback = branch_fallback
 
             output_tokens = 0
             if context.code_snippets:
@@ -158,6 +208,8 @@ def search_code(
 def analyze_impact(
     query: str,
     repo_id: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    branch: Optional[str] = None,
     depth: int = 3,
 ) -> str:
     """
@@ -171,15 +223,23 @@ def analyze_impact(
     结果会跨所有已索引仓库分析，并带有 repo_name 区分来源仓库。
     仅当用户明确提到某个具体项目时，才需要先调用 list_repositories 获取其 repo_id 再传入。
 
+    【分支感知】
+    如果用户问题中明确包含分支名，请通过 branch 参数传入；未传入或分支未索引时，
+    系统会自动回落到仓库的 default_branch（main/master）。
+
     Args:
         query: Symbol name or description.
             Examples: 'UserService.findById', '如果改了登录接口'
-        repo_id: Optional repository UUID. 不传则全局分析所有仓库。
+        repo_id: Optional repository UUID.
+        repo_name: Optional repository name. 优先于 repo_id 使用名称匹配。
+        branch: Optional branch name. 不传时回落到仓库 default_branch。
         depth: Call chain depth for impact analysis (default: 3)
     """
     try:
         with _db_session() as db:
-            repo_uuid = UUID(repo_id) if repo_id else None
+            repo = _resolve_repo(db, repo_id, repo_name)
+            repo_uuid = _resolve_repo_id(db, repo_id, repo_name)
+            actual_branch, branch_fallback = _resolve_branch(repo, branch)
             searcher = Searcher(db)
 
             intent = searcher.intent_analyzer.analyze(query)
@@ -188,10 +248,13 @@ def analyze_impact(
             intent.search_strategy.call_depth = depth
 
             start = time.time()
-            context = searcher.search_with_context(query, repo_uuid, 20, intent=intent)
+            context = searcher.search_with_context(query, repo_uuid, actual_branch, 20, intent=intent)
             latency_ms = int((time.time() - start) * 1000)
             context.search_latency_ms = latency_ms
             context.query_intent = "impact_analysis"
+            if context.meta:
+                context.meta.requested_branch = branch or actual_branch
+                context.meta.branch_fallback = branch_fallback
 
             output_tokens = 0
             if context.code_snippets:
@@ -213,20 +276,26 @@ def analyze_impact(
 
 @mcp.tool()
 def list_repositories() -> str:
-    """List all indexed code repositories."""
+    """List all indexed code repositories with branch info."""
     try:
         with _db_session() as db:
             repos = db.query(Repository).order_by(Repository.created_at.desc()).all()
-            result = [
-                {
+            result = []
+            for r in repos:
+                active_branches = []
+                try:
+                    active_branches = json.loads(r.active_branches or "[]") or []
+                except Exception:
+                    pass
+                result.append({
                     "id": str(r.id),
                     "name": r.name,
                     "git_url": r.git_url,
                     "status": r.status,
+                    "default_branch": r.default_branch or "main",
+                    "active_branches": active_branches,
                     "last_indexed_at": r.last_indexed_at.isoformat() if r.last_indexed_at else None,
-                }
-                for r in repos
-            ]
+                })
             return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as e:
         logger.error("MCP list_repositories failed: %s\n%s", e, traceback.format_exc())
@@ -240,26 +309,35 @@ def list_repositories() -> str:
 
 
 @mcp.tool()
-def list_file_symbols(repo_id: str, file_path: str) -> str:
+def list_file_symbols(
+    repo_id: str,
+    file_path: str,
+    branch: Optional[str] = "main",
+) -> str:
     """
     List symbols (functions, classes, methods) for a given file.
 
     Args:
         repo_id: Repository UUID
         file_path: Relative file path
+        branch: Branch name (default: main)
     """
     try:
         with _db_session() as db:
             code_file = (
                 db.query(CodeFile)
-                .filter(CodeFile.repo_id == UUID(repo_id), CodeFile.path == file_path)
+                .filter(
+                    CodeFile.repo_id == UUID(repo_id),
+                    CodeFile.branch == branch,
+                    CodeFile.path == file_path,
+                )
                 .first()
             )
             if not code_file:
                 return json.dumps([], ensure_ascii=False)
             symbols = (
                 db.query(Symbol)
-                .filter(Symbol.file_id == code_file.id)
+                .filter(Symbol.file_id == code_file.id, Symbol.branch == branch)
                 .order_by(Symbol.line)
                 .all()
             )
@@ -292,6 +370,8 @@ def list_file_symbols(repo_id: str, file_path: str) -> str:
 def codepop_impact(
     symbol_name: str,
     repo_id: str = None,
+    repo_name: str = None,
+    branch: str = None,
 ) -> str:
     """
     分析修改某个函数的影响面。
@@ -301,9 +381,15 @@ def codepop_impact(
     结果会跨所有已索引仓库分析。仅当用户明确提到某个具体项目时，
     才需要先调用 list_repositories 获取其 repo_id 再传入。
 
+    【分支感知】
+    如果用户问题中明确包含分支名，请通过 branch 参数传入；未传入或分支未索引时，
+    系统会自动回落到仓库的 default_branch（main/master）。
+
     Args:
         symbol_name: 要分析的函数/方法名
         repo_id: 仓库 ID，不传则全局分析所有仓库
+        repo_name: 仓库名称，优先于 repo_id 使用名称匹配
+        branch: 分支名称，不传时回落到仓库 default_branch
 
     Returns:
         影响面分析报告，包括受影响的路由和调用链
@@ -312,9 +398,11 @@ def codepop_impact(
         with _db_session() as db:
             from services.impact_analyzer import ImpactAnalyzer
 
-            target_repo = UUID(repo_id) if repo_id else None
+            repo = _resolve_repo(db, repo_id, repo_name)
+            target_repo = repo.id if repo else (UUID(repo_id) if repo_id else None)
+            actual_branch, _ = _resolve_branch(repo, branch)
             analyzer = ImpactAnalyzer(db)
-            result = analyzer.analyze(symbol_name, target_repo)
+            result = analyzer.analyze(symbol_name, target_repo, actual_branch)
 
             lines = [
                 f"Impact Analysis: `{result.symbol}`",

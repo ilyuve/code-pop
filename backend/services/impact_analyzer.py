@@ -29,6 +29,7 @@ class ImpactAnalyzer:
         self,
         symbol_name: str,
         repo_id,
+        branch: str = "main",
         max_depth: int = 5,
     ) -> ImpactResult:
         """
@@ -37,6 +38,7 @@ class ImpactAnalyzer:
         Args:
             symbol_name: 目标函数/方法名，如 "send_notification"
             repo_id: 仓库 ID
+            branch: 分支名称
             max_depth: 最大向上遍历深度，防止循环依赖导致无限递归
 
         Returns:
@@ -55,7 +57,7 @@ class ImpactAnalyzer:
                 continue
             visited.add(current)
 
-            routes = self._find_routes_by_handler(current, repo_id)
+            routes = self._find_routes_by_handler(current, repo_id, branch)
             for route in routes:
                 affected_routes.append({
                     "framework": route.framework,
@@ -64,7 +66,7 @@ class ImpactAnalyzer:
                     "handler": route.handler_symbol,
                 })
 
-            callers = self._get_callers(current, repo_id)
+            callers = self._get_callers(current, repo_id, branch)
             for caller in callers:
                 new_chain = chain + [caller]
                 queue.append((caller, depth + 1, new_chain))
@@ -72,7 +74,7 @@ class ImpactAnalyzer:
                 if len(new_chain) > len(upstream_chain):
                     upstream_chain = new_chain
 
-        symbol_info = self._get_symbol_info(symbol_name, repo_id)
+        symbol_info = self._get_symbol_info(symbol_name, repo_id, branch)
 
         risk = self._calculate_risk(affected_routes, upstream_chain)
 
@@ -92,17 +94,23 @@ class ImpactAnalyzer:
             risk_level=risk,
         )
 
-    def _find_routes_by_handler(self, handler_name: str, repo_id) -> List[FrameworkRoute]:
+    def _find_routes_by_handler(
+        self, handler_name: str, repo_id, branch: str = "main"
+    ) -> List[FrameworkRoute]:
         """根据 handler 名称查找路由。"""
         return self.db.query(FrameworkRoute).filter(
             FrameworkRoute.repo_id == repo_id,
+            FrameworkRoute.branch == branch,
             FrameworkRoute.handler_symbol == handler_name,
         ).all()
 
-    def _get_callers(self, symbol_name: str, repo_id) -> List[str]:
+    def _get_callers(
+        self, symbol_name: str, repo_id, branch: str = "main"
+    ) -> List[str]:
         """查找调用指定符号的符号名列表。"""
         symbol_ids = self.db.query(Symbol.id).filter(
             Symbol.repo_id == repo_id,
+            Symbol.branch == branch,
             Symbol.name == symbol_name,
         ).all()
 
@@ -113,6 +121,7 @@ class ImpactAnalyzer:
 
         edge_ids = self.db.query(CallGraphEdge.source_symbol_id).filter(
             CallGraphEdge.repo_id == repo_id,
+            CallGraphEdge.branch == branch,
             CallGraphEdge.target_symbol_id.in_(target_ids),
         ).distinct().all()
 
@@ -123,15 +132,19 @@ class ImpactAnalyzer:
 
         callers = self.db.query(Symbol.name).filter(
             Symbol.repo_id == repo_id,
+            Symbol.branch == branch,
             Symbol.id.in_(source_ids),
         ).distinct().all()
 
         return [c.name for c in callers]
 
-    def _get_symbol_info(self, symbol_name: str, repo_id) -> Optional[Symbol]:
+    def _get_symbol_info(
+        self, symbol_name: str, repo_id, branch: str = "main"
+    ) -> Optional[Symbol]:
         """获取符号位置信息。"""
         return self.db.query(Symbol).filter(
             Symbol.repo_id == repo_id,
+            Symbol.branch == branch,
             Symbol.name == symbol_name,
         ).first()
 

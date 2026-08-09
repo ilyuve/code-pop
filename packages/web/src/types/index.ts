@@ -10,6 +10,9 @@ export interface Repo {
   indexedFiles: number;
   fileCount?: number;
   symbolCount?: number;
+  defaultBranch: string;
+  activeBranches: string[];
+  syncMode: string;
   createdAt: string;
   lastIndexedAt: string;
 }
@@ -33,6 +36,8 @@ export interface SearchResult {
   language: string;
   score: number;
   scoreBreakdown: ScoreBreakdown;
+  branch: string;
+  isOverride: boolean;
 }
 
 // Settings types
@@ -59,6 +64,7 @@ export interface BenchmarkRun {
   id: string;
   query: string;
   repoId?: string;
+  branch: string;
   mode: 'with_codepop' | 'without_codepop';
   latencyMs: number;
   resultsCount: number;
@@ -149,6 +155,8 @@ export interface AddRepoForm {
   name?: string;
   path?: string;
   gitUrl?: string;
+  activeBranches?: string[];
+  syncMode?: string;
 }
 
 // CodeContext types
@@ -175,9 +183,16 @@ export interface FileSummary {
   key_symbols: string[];
 }
 
+export interface SearchMeta {
+  requested_branch: string;
+  actual_branch: string;
+  branch_fallback: boolean;
+}
+
 export interface CodeContext {
   query: string;
   query_intent: string;
+  branch: string;
   matched_concepts: string[];
   entry_points: SymbolEntry[];
   call_chain: CallChain | null;
@@ -187,6 +202,7 @@ export interface CodeContext {
   total_files: number;
   total_symbols: number;
   search_latency_ms: number;
+  meta?: SearchMeta;
   degraded: boolean;
   degradation_reason?: string;
   unavailable_sources: string[];

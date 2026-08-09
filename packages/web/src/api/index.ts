@@ -35,6 +35,9 @@ const mapRepo = (data: any): Repo => ({
   indexedFiles: data.indexed_files || 0,
   fileCount: data.total_files || 0,
   symbolCount: 0,
+  defaultBranch: data.default_branch || 'main',
+  activeBranches: data.active_branches || [],
+  syncMode: data.sync_mode || 'auto',
   createdAt: data.created_at || data.createdAt,
   lastIndexedAt: data.last_indexed_at || data.lastIndexedAt,
 });
@@ -48,6 +51,8 @@ const mapSearchResult = (data: any): SearchResult => ({
   language: data.language || '',
   score: data.score,
   scoreBreakdown: data.score_breakdown || {},
+  branch: data.branch || 'main',
+  isOverride: data.is_override || false,
 });
 
 // Repository APIs
@@ -61,6 +66,28 @@ export const fetchRepo = async (id: string): Promise<Repo> => {
   return mapRepo(response.data);
 };
 
+export interface BranchPreview {
+  default_branch: string;
+  branches: string[];
+}
+
+export const previewRepoBranches = async (gitUrl: string): Promise<BranchPreview> => {
+  const response = await apiClient.get('/repos/branches/preview', {
+    params: { git_url: gitUrl },
+  });
+  return response.data;
+};
+
+export interface RepoBranches {
+  default_branch: string;
+  active_branches: string[];
+}
+
+export const fetchRepoBranches = async (id: string): Promise<RepoBranches> => {
+  const response = await apiClient.get(`/repos/${id}/branches`);
+  return response.data;
+};
+
 export const addRepo = async (data: AddRepoForm): Promise<Repo> => {
   const payload: any = {
     name: data.name || data.gitUrl?.split('/').pop()?.replace(/\.git$/, '') || data.path?.split('/').pop() || 'repo',
@@ -70,6 +97,12 @@ export const addRepo = async (data: AddRepoForm): Promise<Repo> => {
   }
   if (data.path) {
     payload.path = data.path;
+  }
+  if (data.activeBranches && data.activeBranches.length > 0) {
+    payload.active_branches = data.activeBranches;
+  }
+  if (data.syncMode) {
+    payload.sync_mode = data.syncMode;
   }
   const response = await apiClient.post('/repos', payload);
   return mapRepo(response.data);
@@ -85,16 +118,20 @@ export const deleteRepo = async (id: string): Promise<void> => {
 };
 
 export const reindexRepo = async (id: string): Promise<void> => {
-  await apiClient.post(`/repos/${id}/index`);
+  await apiClient.post(`/repos/${id}/sync`);
 };
 
-export const fetchRepoFiles = async (id: string): Promise<any[]> => {
-  const response = await apiClient.get(`/repos/${id}/files`);
+export const fetchRepoFiles = async (id: string, branch?: string): Promise<any[]> => {
+  const url = branch ? `/repos/${id}/files?branch=${encodeURIComponent(branch)}` : `/repos/${id}/files`;
+  const response = await apiClient.get(url);
   return response.data;
 };
 
-export const fetchRepoSymbols = async (id: string, filePath?: string): Promise<any[]> => {
-  const url = filePath ? `/repos/${id}/symbols?file_path=${encodeURIComponent(filePath)}` : `/repos/${id}/symbols`;
+export const fetchRepoSymbols = async (id: string, filePath?: string, branch?: string): Promise<any[]> => {
+  const params = new URLSearchParams();
+  if (filePath) params.append('file_path', filePath);
+  if (branch) params.append('branch', branch);
+  const url = `/repos/${id}/symbols${params.toString() ? `?${params.toString()}` : ''}`;
   const response = await apiClient.get(url);
   return response.data;
 };
@@ -114,34 +151,52 @@ export const cancelIndexing = async (id: string): Promise<void> => {
 };
 
 // Search APIs
-export const searchCode = async (query: string, repoId?: string, limit: number = 20): Promise<SearchResult[]> => {
-  const response = await apiClient.post('/search', { query, repo_id: repoId, limit });
-  return response.data.map(mapSearchResult);
+export interface SearchCodeResponse {
+  results: SearchResult[];
+  meta?: {
+    requested_branch: string;
+    actual_branch: string;
+    branch_fallback: boolean;
+    message?: string;
+  };
+}
+
+export const searchCode = async (
+  query: string,
+  repoId?: string,
+  branch?: string,
+  limit: number = 20,
+): Promise<SearchCodeResponse> => {
+  const response = await apiClient.post('/search', { query, repo_id: repoId, branch, limit });
+  const data = response.data;
+  const results = (data.results || data).map(mapSearchResult);
+  return { results, meta: data.meta };
 };
 
-export const searchSymbol = async (query: string, repoId?: string): Promise<any[]> => {
-  const response = await apiClient.post('/search/symbol', { query, repo_id: repoId });
+export const searchSymbol = async (query: string, repoId?: string, branch?: string): Promise<any[]> => {
+  const response = await apiClient.post('/search/symbol', { query, repo_id: repoId, branch });
   return response.data;
 };
 
-export const searchContext = async (query: string, repoId?: string, limit: number = 20): Promise<CodeContext> => {
-  const response = await apiClient.post('/search/context', { query, repo_id: repoId, limit });
+export const searchContext = async (query: string, repoId?: string, branch?: string, limit: number = 20): Promise<CodeContext> => {
+  const response = await apiClient.post('/search/context', { query, repo_id: repoId, branch, limit });
   const context = response.data.context;
-  
+  context.branch = context.branch || branch || 'main';
   context.code_snippets = context.code_snippets.map((snippet: any) => mapSearchResult(snippet));
-  
   return context;
 };
 
 export const debugSearch = async (
   query: string,
   repoId: string,
+  branch: string = 'main',
   limit: number = 20,
   pathOverrides?: DebugPathOverrides,
 ): Promise<DebugSearchResponse> => {
   const response = await apiClient.post('/search/debug', {
     query,
     repo_id: repoId,
+    branch,
     limit,
     path_overrides: pathOverrides,
   });
@@ -214,6 +269,7 @@ export const fetchSearchHistoryRecent = async (
 export const runBenchmark = async (payload: {
   query: string;
   repo_id?: string;
+  branch?: string;
   mode: 'with_codepop' | 'without_codepop';
   expected_files?: string[];
   expected_lines?: number[];
@@ -223,6 +279,7 @@ export const runBenchmark = async (payload: {
     id: response.data.id,
     query: response.data.query,
     repoId: response.data.repo_id,
+    branch: response.data.branch || 'main',
     mode: response.data.mode,
     latencyMs: response.data.latency_ms,
     resultsCount: response.data.results_count,
@@ -233,15 +290,17 @@ export const runBenchmark = async (payload: {
   };
 };
 
-export const fetchBenchmarks = async (params?: { repoId?: string; mode?: string }): Promise<BenchmarkRun[]> => {
+export const fetchBenchmarks = async (params?: { repoId?: string; mode?: string; branch?: string }): Promise<BenchmarkRun[]> => {
   const query = new URLSearchParams();
   if (params?.repoId) query.append('repo_id', params.repoId);
   if (params?.mode) query.append('mode', params.mode);
+  if (params?.branch) query.append('branch', params.branch);
   const response = await apiClient.get(`/search/benchmark?${query.toString()}`);
   return response.data.map((r: any) => ({
     id: r.id,
     query: r.query,
     repoId: r.repo_id,
+    branch: r.branch || 'main',
     mode: r.mode,
     latencyMs: r.latency_ms,
     resultsCount: r.results_count,

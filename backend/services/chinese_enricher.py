@@ -3,6 +3,7 @@
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -274,13 +275,22 @@ def save_symbol_flow_label(
     result: FlowLabelResult,
     provider_id: Optional[UUID] = None,
 ) -> None:
-    """Persist flow label for a symbol."""
-    label = SymbolFlowLabel(
-        symbol_id=symbol_id,
-        provider_id=provider_id,
-        layer=result.layer,
-        module=result.module,
-        chinese_name=result.chinese_name,
-        io_description=result.io_description,
-    )
-    db.add(label)
+    """Persist flow label for a symbol, updating existing label if present."""
+    existing = db.query(SymbolFlowLabel).filter(SymbolFlowLabel.symbol_id == symbol_id).first()
+    if existing:
+        existing.provider_id = provider_id
+        existing.layer = result.layer
+        existing.module = result.module
+        existing.chinese_name = result.chinese_name
+        existing.io_description = result.io_description
+        existing.updated_at = datetime.utcnow()
+    else:
+        label = SymbolFlowLabel(
+            symbol_id=symbol_id,
+            provider_id=provider_id,
+            layer=result.layer,
+            module=result.module,
+            chinese_name=result.chinese_name,
+            io_description=result.io_description,
+        )
+        db.add(label)

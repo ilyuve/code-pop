@@ -93,6 +93,25 @@ async def _recover_indexing_repos() -> None:
         db.close()
 
 
+async def _migrate_repo_paths() -> None:
+    """Migrate legacy repo paths to branch-aware layout at startup."""
+    from services.repo_sync import get_repo_local_path, migrate_legacy_repo_path
+
+    db = SessionLocal()
+    try:
+        repos = db.query(Repository).all()
+        for repo in repos:
+            migrate_legacy_repo_path(repo)
+            expected_path = get_repo_local_path(repo)
+            if repo.local_path != expected_path:
+                repo.local_path = expected_path
+                logger.info("Updated repo %s local_path to %s", repo.id, expected_path)
+        if repos:
+            db.commit()
+    finally:
+        db.close()
+
+
 async def _warmup_models() -> None:
     """Pre-load embedding model at startup to avoid cold-start latency.
 
@@ -119,6 +138,7 @@ else:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _recover_indexing_repos()
+    await _migrate_repo_paths()
     await _warmup_models()
 
     mcp_session_manager = get_mcp_session_manager()
