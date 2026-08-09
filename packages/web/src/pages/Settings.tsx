@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Save, RotateCcw, Sun, Moon, Server, Brain, Plus, Trash2, Play, AlertCircle, CheckCircle2, Loader2, TrendingUp } from 'lucide-react';
+import { Save, RotateCcw, Server, Brain, Plus, Trash2, Play, AlertCircle, CheckCircle2, Loader2, TrendingUp } from 'lucide-react';
 import { useStore } from '../store';
 import {
   fetchLLMProviders,
@@ -82,7 +82,6 @@ const PRESET_COSTS: Record<string, { input: number; output: number }> = {
 export const Settings = () => {
   const { settings, updateSettings } = useStore();
   const [embeddingProvider, setEmbeddingProvider] = useState(settings.embeddingProvider);
-  const [theme, setTheme] = useState(settings.theme);
   const [hasChanges, setHasChanges] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -98,11 +97,9 @@ export const Settings = () => {
   const [costPeriod, setCostPeriod] = useState<number>(60);
 
   useEffect(() => {
-    const changed =
-      embeddingProvider !== settings.embeddingProvider ||
-      theme !== settings.theme;
+    const changed = embeddingProvider !== settings.embeddingProvider;
     setHasChanges(changed);
-  }, [embeddingProvider, theme, settings]);
+  }, [embeddingProvider, settings]);
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true);
@@ -166,9 +163,7 @@ export const Settings = () => {
   const handleSave = () => {
     updateSettings({
       embeddingProvider,
-      theme,
     });
-    document.documentElement.classList.toggle('dark', theme === 'dark');
     setHasChanges(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -176,13 +171,7 @@ export const Settings = () => {
 
   const handleReset = () => {
     setEmbeddingProvider('openai');
-    setTheme('dark');
     setHasChanges(true);
-  };
-
-  const handleThemeChange = (newTheme: 'light' | 'dark') => {
-    setTheme(newTheme);
-    document.documentElement.classList.toggle('dark', newTheme === 'dark');
   };
 
   const handleAddProvider = () => {
@@ -275,18 +264,18 @@ export const Settings = () => {
   return (
     <div className="space-y-6 animate-fadeIn max-w-4xl">
       {/* LLM Provider Management */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-violet-100 dark:bg-violet-900/30 rounded-lg">
-              <Brain className="w-5 h-5 text-violet-600 dark:text-violet-400" />
+            <div className="p-2 bg-[#fff34d] rounded-lg border-2 border-[#2D2D2D] shadow-[2px_2px_0_#2D2D2D]">
+              <Brain className="w-5 h-5 text-[#2D2D2D]" />
             </div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">LLM Provider 管理</h2>
+            <h2 className="text-lg font-black text-[#2D2D2D]">LLM Provider 管理</h2>
           </div>
           <button
             onClick={handleAddProvider}
             disabled={editingProvider !== null}
-            className="flex items-center gap-2 px-4 py-2 bg-violet-500 hover:bg-violet-600 disabled:bg-slate-300 text-white rounded-lg text-sm font-medium"
+            className="flex items-center gap-2 px-4 py-2 bg-[#ff3d8a] hover:bg-[#ff5c9d] disabled:bg-slate-300 text-white border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] rounded-lg text-sm font-bold"
           >
             <Plus className="w-4 h-4" />
             新增 Provider
@@ -294,7 +283,7 @@ export const Settings = () => {
         </div>
 
         <p className="text-xs text-slate-500 dark:text-slate-400 mb-5 leading-relaxed">
-          该配置用于 CodePop 的<strong className="text-slate-600 dark:text-slate-300">中文增强能力</strong>：
+          该配置用于 Code:Pop 的<strong className="text-slate-600 dark:text-slate-300">中文增强能力</strong>：
           索引时为代码块生成中文摘要、关键词、同义词（中文语义增强），为符号生成流程标签（Flow Label），
           查询时用 LLM 生成扩展词（查询 LLM 扩展）。未配置或未启用时，这些中文能力会被跳过、按本地词库降级运行。
           「输入/输出成本」以 USD/1K tokens 为单位填写，用于下方「LLM 成本估算」面板（如 DeepSeek 约输入 0.00027、输出 0.0011，可参考厂商官网按实际套餐调整）。
@@ -309,7 +298,7 @@ export const Settings = () => {
                   type="text"
                   value={editingProvider.name}
                   onChange={(e) => setEditingProvider({ ...editingProvider, name: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -317,7 +306,7 @@ export const Settings = () => {
                 <select
                   value={editingProvider.provider_type}
                   onChange={(e) => handleProviderTypeChange(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 >
                   <option value="openai_compatible">OpenAI Compatible</option>
                   <option value="deepseek">DeepSeek</option>
@@ -332,7 +321,7 @@ export const Settings = () => {
                   type="text"
                   value={editingProvider.base_url}
                   onChange={(e) => setEditingProvider({ ...editingProvider, base_url: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -342,7 +331,7 @@ export const Settings = () => {
                   value={editingProvider.api_key}
                   onChange={(e) => setEditingProvider({ ...editingProvider, api_key: e.target.value })}
                   placeholder={editingProvider.id ? '留空表示不修改' : ''}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -351,7 +340,7 @@ export const Settings = () => {
                   type="text"
                   value={editingProvider.model}
                   onChange={(e) => setEditingProvider({ ...editingProvider, model: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -359,7 +348,7 @@ export const Settings = () => {
                 <select
                   value={editingProvider.capability}
                   onChange={(e) => setEditingProvider({ ...editingProvider, capability: e.target.value as LLMProvider['capability'] })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 >
                   <option value="chat">Chat</option>
                   <option value="embed">Embed</option>
@@ -372,7 +361,7 @@ export const Settings = () => {
                   type="number"
                   value={editingProvider.priority}
                   onChange={(e) => setEditingProvider({ ...editingProvider, priority: parseInt(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -381,7 +370,7 @@ export const Settings = () => {
                   type="number"
                   value={editingProvider.max_tokens}
                   onChange={(e) => setEditingProvider({ ...editingProvider, max_tokens: parseInt(e.target.value) || 4096 })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -391,7 +380,7 @@ export const Settings = () => {
                   step="0.1"
                   value={editingProvider.temperature}
                   onChange={(e) => setEditingProvider({ ...editingProvider, temperature: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -400,7 +389,7 @@ export const Settings = () => {
                   type="number"
                   value={editingProvider.timeout_seconds}
                   onChange={(e) => setEditingProvider({ ...editingProvider, timeout_seconds: parseInt(e.target.value) || 60 })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -410,7 +399,7 @@ export const Settings = () => {
                   step="0.000001"
                   value={editingProvider.cost_per_1k_input}
                   onChange={(e) => setEditingProvider({ ...editingProvider, cost_per_1k_input: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -420,7 +409,7 @@ export const Settings = () => {
                   step="0.000001"
                   value={editingProvider.cost_per_1k_output}
                   onChange={(e) => setEditingProvider({ ...editingProvider, cost_per_1k_output: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div className="flex items-center gap-3">
@@ -429,7 +418,7 @@ export const Settings = () => {
                   type="checkbox"
                   checked={editingProvider.enabled}
                   onChange={(e) => setEditingProvider({ ...editingProvider, enabled: e.target.checked })}
-                  className="w-4 h-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                  className="w-4 h-4 rounded border-2 border-[#2D2D2D] accent-[#ff3d8a]"
                 />
                 <label htmlFor="enabled" className="text-sm text-slate-700 dark:text-slate-300">启用</label>
               </div>
@@ -441,7 +430,7 @@ export const Settings = () => {
                   value={editingProvider.extra_headers}
                   onChange={(e) => setEditingProvider({ ...editingProvider, extra_headers: e.target.value })}
                   rows={3}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm font-mono"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm font-mono focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
               <div>
@@ -450,14 +439,14 @@ export const Settings = () => {
                   value={editingProvider.extra_body}
                   onChange={(e) => setEditingProvider({ ...editingProvider, extra_body: e.target.value })}
                   rows={3}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm font-mono"
+                  className="w-full px-3 py-2 rounded-lg border-2 border-[#2D2D2D] bg-white text-[#2D2D2D] text-sm font-mono focus:outline-none focus:border-[#2ad4ff] focus:shadow-[2px_2px_0_#2ad4ff] transition-all"
                 />
               </div>
             </div>
             <div className="flex gap-3">
               <button
                 onClick={handleSaveProvider}
-                className="flex items-center gap-2 px-4 py-2 bg-violet-500 hover:bg-violet-600 text-white rounded-lg text-sm font-medium"
+                className="flex items-center gap-2 px-4 py-2 bg-[#2ad4ff] hover:bg-[#4adee0] text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] rounded-lg text-sm font-bold"
               >
                 <Save className="w-4 h-4" />
                 保存
@@ -487,7 +476,7 @@ export const Settings = () => {
             {providers.map((p) => (
               <div
                 key={p.id}
-                className="flex items-center justify-between p-4 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-violet-200 dark:hover:border-violet-800 transition-colors"
+                className="flex items-center justify-between p-4 rounded-xl border-2 border-[#2D2D2D] shadow-[2px_2px_0_#2D2D2D] hover:translate-y-[-2px] hover:shadow-[4px_4px_0_#2D2D2D] transition-all"
               >
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
@@ -558,18 +547,18 @@ export const Settings = () => {
       </section>
 
       {/* Global LLM Settings */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-amber-100 dark:bg-amber-900/30 rounded-lg">
-              <Server className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+            <div className="p-2 bg-[#2ad4ff] rounded-lg border-2 border-[#2D2D2D] shadow-[2px_2px_0_#2D2D2D]">
+              <Server className="w-5 h-5 text-[#2D2D2D]" />
             </div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">LLM 功能开关</h2>
+            <h2 className="text-lg font-black text-[#2D2D2D]">LLM 功能开关</h2>
           </div>
           <button
             onClick={saveLlmSettings}
             disabled={savingSettings}
-            className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-300 text-white rounded-lg text-sm font-medium"
+            className="flex items-center gap-2 px-4 py-2 bg-[#6effb0] hover:bg-[#8dffc5] disabled:bg-slate-300 text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] rounded-lg text-sm font-bold"
           >
             {savingSettings ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             保存开关
@@ -577,7 +566,7 @@ export const Settings = () => {
         </div>
         {llmSettings ? (
           <div className="space-y-4">
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div>
                 <div className="text-sm font-medium text-slate-900 dark:text-white">索引中文语义增强</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">为代码片段生成中文摘要、关键词和同义词</div>
@@ -586,10 +575,10 @@ export const Settings = () => {
                 type="checkbox"
                 checked={llmSettings.enable_index_chinese_enrich}
                 onChange={(e) => setLlmSettings({ ...llmSettings, enable_index_chinese_enrich: e.target.checked })}
-                className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                className="w-5 h-5 rounded border-2 border-[#2D2D2D] accent-[#ff3d8a]"
               />
             </div>
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div>
                 <div className="text-sm font-medium text-slate-900 dark:text-white">查询 LLM 扩展</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">本地同义词未命中时请求 LLM 生成扩展词</div>
@@ -598,10 +587,10 @@ export const Settings = () => {
                 type="checkbox"
                 checked={llmSettings.enable_query_llm_expand}
                 onChange={(e) => setLlmSettings({ ...llmSettings, enable_query_llm_expand: e.target.checked })}
-                className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                className="w-5 h-5 rounded border-2 border-[#2D2D2D] accent-[#ff3d8a]"
               />
             </div>
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div>
                 <div className="text-sm font-medium text-slate-900 dark:text-white">Flow Label 生成</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">为符号生成层、模块、中文名等流程标签</div>
@@ -610,10 +599,10 @@ export const Settings = () => {
                 type="checkbox"
                 checked={llmSettings.enable_flow_label}
                 onChange={(e) => setLlmSettings({ ...llmSettings, enable_flow_label: e.target.checked })}
-                className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                className="w-5 h-5 rounded border-2 border-[#2D2D2D] accent-[#ff3d8a]"
               />
             </div>
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div>
                 <div className="text-sm font-medium text-slate-900 dark:text-white">默认 Provider</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">未指定时使用的 LLM Provider</div>
@@ -636,13 +625,13 @@ export const Settings = () => {
       </section>
 
       {/* Cost Dashboard */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
               <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
             </div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">LLM 成本估算</h2>
+            <h2 className="text-lg font-black text-[#2D2D2D]">LLM 成本估算</h2>
           </div>
           <select
             value={costPeriod}
@@ -662,19 +651,19 @@ export const Settings = () => {
         {cost ? (
           <div className="space-y-6">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
                 <div className="text-xs text-slate-500 dark:text-slate-400">预估总成本</div>
                 <div className="text-xl font-semibold text-slate-900 dark:text-white">${cost.total_cost.toFixed(6)}</div>
               </div>
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
                 <div className="text-xs text-slate-500 dark:text-slate-400">输入 Tokens</div>
                 <div className="text-xl font-semibold text-slate-900 dark:text-white">{formatNumber(cost.total_input_tokens)}</div>
               </div>
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
                 <div className="text-xs text-slate-500 dark:text-slate-400">输出 Tokens</div>
                 <div className="text-xl font-semibold text-slate-900 dark:text-white">{formatNumber(cost.total_output_tokens)}</div>
               </div>
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
                 <div className="text-xs text-slate-500 dark:text-slate-400">调用次数</div>
                 <div className="text-xl font-semibold text-slate-900 dark:text-white">
                   {formatNumber(Object.values(cost.provider_breakdown).reduce((sum, p) => sum + p.call_count, 0))}
@@ -718,32 +707,32 @@ export const Settings = () => {
       </section>
 
       {/* Usage Dashboard */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
             <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">LLM 用量监控（最近 1 小时）</h2>
+          <h2 className="text-lg font-black text-[#2D2D2D]">LLM 用量监控（最近 1 小时）</h2>
         </div>
         {usage ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div className="text-xs text-slate-500 dark:text-slate-400">总调用</div>
               <div className="text-xl font-semibold text-slate-900 dark:text-white">{usage.total_calls}</div>
             </div>
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div className="text-xs text-slate-500 dark:text-slate-400">成功 / 失败</div>
               <div className="text-xl font-semibold text-slate-900 dark:text-white">
                 {usage.success_calls} / {usage.error_calls}
               </div>
             </div>
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div className="text-xs text-slate-500 dark:text-slate-400">输入 / 输出 Tokens</div>
               <div className="text-xl font-semibold text-slate-900 dark:text-white">
                 {formatNumber(usage.input_tokens)} / {formatNumber(usage.output_tokens)}
               </div>
             </div>
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50">
+            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
               <div className="text-xs text-slate-500 dark:text-slate-400">总延迟</div>
               <div className="text-xl font-semibold text-slate-900 dark:text-white">{usage.latency_ms}ms</div>
             </div>
@@ -754,12 +743,12 @@ export const Settings = () => {
       </section>
 
       {/* Embedding Provider */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
             <Brain className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Embedding 提供商</h2>
+          <h2 className="text-lg font-black text-[#2D2D2D]">Embedding 提供商</h2>
         </div>
         <div className="grid grid-cols-2 gap-4">
           <button
@@ -785,46 +774,6 @@ export const Settings = () => {
           >
             <h3 className="font-semibold text-slate-900 dark:text-white mb-1">本地模型</h3>
             <p className="text-sm text-slate-500 dark:text-slate-400">使用本地部署的 embedding 模型</p>
-          </button>
-        </div>
-      </section>
-
-      {/* Theme Toggle */}
-      <section className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-2 bg-amber-100 dark:bg-amber-900/30 rounded-lg">
-            {theme === 'dark' ? (
-              <Moon className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-            ) : (
-              <Sun className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-            )}
-          </div>
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">主题设置</h2>
-        </div>
-        <div className="flex gap-4">
-          <button
-            onClick={() => handleThemeChange('light')}
-            className={clsx(
-              'flex-1 p-4 rounded-xl border-2 transition-all duration-200 flex flex-col items-center gap-2',
-              theme === 'light'
-                ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'
-                : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
-            )}
-          >
-            <Sun className="w-6 h-6 text-amber-500" />
-            <span className="font-medium text-slate-900 dark:text-white">浅色</span>
-          </button>
-          <button
-            onClick={() => handleThemeChange('dark')}
-            className={clsx(
-              'flex-1 p-4 rounded-xl border-2 transition-all duration-200 flex flex-col items-center gap-2',
-              theme === 'dark'
-                ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'
-                : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
-            )}
-          >
-            <Moon className="w-6 h-6 text-indigo-500" />
-            <span className="font-medium text-slate-900 dark:text-white">深色</span>
           </button>
         </div>
       </section>

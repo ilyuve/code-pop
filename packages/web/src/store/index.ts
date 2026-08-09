@@ -104,7 +104,8 @@ export const useStore = create<AppStore>()(
       // Settings State
       settings: {
         embeddingProvider: 'openai',
-        theme: 'dark',
+        // 固定浅色主题（波普设计），不再提供深浅切换
+        theme: 'light',
       },
       updateSettings: (newSettings) =>
         set((state) => ({

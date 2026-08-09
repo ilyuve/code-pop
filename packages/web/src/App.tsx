@@ -112,7 +112,7 @@ function App() {
   return (
     <Router>
       <GlobalSocketBridge />
-      <div className={clsx('min-h-screen bg-slate-50 dark:bg-slate-900 transition-colors')}>
+      <div className={clsx('min-h-screen bg-[var(--bg)] dark:bg-[var(--bg)] transition-colors')}>
         <Sidebar />
         <div
           className={clsx(

@@ -1,8 +1,8 @@
 export const Footer = () => {
   return (
-    <footer className="bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800">
-      <div className="px-6 py-4 text-center text-sm text-slate-500 dark:text-slate-400">
-        © 2024 CodePop. 代码搜索与索引平台.
+    <footer className="bg-white border-t-2 border-[#2D2D2D]">
+      <div className="px-6 py-4 text-center text-sm text-[#666] font-medium">
+        Code:Pop · 代码波普 · 2026
       </div>
     </footer>
   );

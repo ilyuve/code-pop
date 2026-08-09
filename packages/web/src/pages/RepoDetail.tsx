@@ -295,21 +295,21 @@ export const RepoDetail = () => {
       {/* Back Button */}
       <button
         onClick={() => navigate('/repos')}
-        className="flex items-center gap-2 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+        className="flex items-center gap-2 text-[#2D2D2D] font-bold hover:text-[#ff3d8a] transition-colors"
       >
         <ArrowLeft className="w-5 h-5" />
         返回仓库列表
       </button>
 
       {saveNotice && (
-        <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl px-4 py-3">
+        <div className="flex items-center gap-2 text-sm text-[#2D2D2D] bg-[#e8fff4] border-2 border-[#2D2D2D] rounded-xl px-4 py-3 font-medium">
           <Info className="w-4 h-4 shrink-0" />
           {saveNotice}
         </div>
       )}
 
       {/* Header */}
-      <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+      <div className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D] p-6">
         <div className="flex items-start justify-between mb-6">
           <div className="flex items-center gap-4">
             <RepoProviderIcon
@@ -318,20 +318,20 @@ export const RepoDetail = () => {
               className="w-8 h-8"
             />
             <div>
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
+              <h1 className="text-2xl font-black text-[#2D2D2D]">
                 {repo.name}
               </h1>
               {repo.description && (
-                <p className="text-slate-500 dark:text-slate-400 mt-1 max-w-lg">
+                <p className="text-sm text-[#666] mt-1 max-w-lg">
                   {repo.description}
                 </p>
               )}
-              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+              <p className="text-xs text-[#999] mt-1 font-mono">
                 {repo.path}
               </p>
               {/* 已索引分支（与列表卡片一致） */}
               <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800" title="默认分支">
+                <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border-2 border-[#2D2D2D] bg-[#2ad4ff] text-[#2D2D2D] font-bold" title="默认分支">
                   <GitBranch className="w-3 h-3" />
                   {repo.defaultBranch}
                 </span>
@@ -341,7 +341,7 @@ export const RepoDetail = () => {
                   .map((branch) => (
                     <span
                       key={branch}
-                      className="text-xs px-2 py-0.5 rounded-full border bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600"
+                      className="text-xs px-2 py-0.5 rounded-full border-2 border-[#2D2D2D] bg-[#fff34d] text-[#2D2D2D] font-bold"
                       title="业务分支"
                     >
                       {branch}
@@ -356,34 +356,34 @@ export const RepoDetail = () => {
         {/* Stats Grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-slate-100 dark:bg-slate-700 rounded-lg">
-              <FileText className="w-5 h-5 text-slate-500" />
+            <div className="p-2 bg-[#fff34d] border-2 border-[#2D2D2D] rounded-lg shadow-[2px_2px_0_#2D2D2D]">
+              <FileText className="w-5 h-5 text-[#2D2D2D]" />
             </div>
             <div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">索引文件</p>
-              <p className="font-semibold text-slate-900 dark:text-white">
+              <p className="text-xs text-[#999] font-medium">索引文件</p>
+              <p className="font-black text-[#2D2D2D]">
                 {repo.indexedFiles} / {repo.totalFiles}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-slate-100 dark:bg-slate-700 rounded-lg">
-              <Clock className="w-5 h-5 text-slate-500" />
+            <div className="p-2 bg-[#2ad4ff] border-2 border-[#2D2D2D] rounded-lg shadow-[2px_2px_0_#2D2D2D]">
+              <Clock className="w-5 h-5 text-[#2D2D2D]" />
             </div>
             <div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">创建时间</p>
-              <p className="font-semibold text-slate-900 dark:text-white">
+              <p className="text-xs text-[#999] font-medium">创建时间</p>
+              <p className="font-black text-[#2D2D2D]">
                 {new Date(repo.createdAt).toLocaleDateString()}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-slate-100 dark:bg-slate-700 rounded-lg">
-              <RefreshCw className="w-5 h-5 text-slate-500" />
+            <div className="p-2 bg-[#b88dff] border-2 border-[#2D2D2D] rounded-lg shadow-[2px_2px_0_#2D2D2D]">
+              <RefreshCw className="w-5 h-5 text-white" />
             </div>
             <div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">最后索引</p>
-              <p className="font-semibold text-slate-900 dark:text-white">
+              <p className="text-xs text-[#999] font-medium">最后索引</p>
+              <p className="font-black text-[#2D2D2D]">
                 {repo.lastIndexedAt
                   ? new Date(repo.lastIndexedAt).toLocaleDateString()
                   : '-'}
@@ -393,8 +393,8 @@ export const RepoDetail = () => {
           <div>
             {repo.gitUrl && (
               <div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Git URL</p>
-                <p className="font-semibold text-slate-900 dark:text-white truncate">
+                <p className="text-xs text-[#999] font-medium">Git URL</p>
+                <p className="font-black text-[#2D2D2D] truncate">
                   {repo.gitUrl}
                 </p>
               </div>
@@ -405,27 +405,27 @@ export const RepoDetail = () => {
 
       {/* Indexing Progress */}
       {(isIndexing || repo.status === 'indexing') && progress && (
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-4">
+        <div className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D] p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
+              <h3 className="text-lg font-black text-[#2D2D2D]">
                 索引进度
               </h3>
-              <span className="flex items-center gap-1 text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-full">
-                <div className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse" />
+              <span className="flex items-center gap-1 text-xs px-2 py-1 bg-[#fff34d] border-2 border-[#2D2D2D] text-[#2D2D2D] font-bold rounded-full">
+                <div className="w-2 h-2 bg-[#ff3d8a] rounded-full animate-pulse" />
                 进行中
               </span>
             </div>
             <div className="flex items-center gap-3">
               {currentStageLabel && (
-                <span className="text-sm font-medium px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400">
+                <span className="text-sm font-bold px-3 py-1 rounded-full bg-[#2ad4ff] border-2 border-[#2D2D2D] text-[#2D2D2D]">
                   {currentStageLabel}
                 </span>
               )}
               <button
                 onClick={handleCancel}
                 disabled={isCanceling}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#ff3d8a] font-bold hover:bg-[#ffe3ef] border-2 border-transparent hover:border-[#ff3d8a] rounded-lg transition-colors"
               >
                 {isCanceling ? <LoadingSpinner size="sm" /> : <LogOut className="w-4 h-4" />}
                 取消索引
@@ -436,26 +436,26 @@ export const RepoDetail = () => {
           {/* Overall progress */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-sm font-medium text-slate-700 dark:text-slate-300">总进度</span>
+              <span className="text-sm font-bold text-[#2D2D2D]">总进度</span>
               <div className="flex items-center gap-3 text-xs">
                 {timing && (
                   <>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      已用时 <span className="font-medium text-slate-700 dark:text-slate-300">{formatDuration(timing.elapsedSeconds)}</span>
+                    <span className="text-[#666] font-medium">
+                      已用时 <span className="font-bold text-[#2D2D2D]">{formatDuration(timing.elapsedSeconds)}</span>
                     </span>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      预计剩余 <span className="font-medium text-slate-700 dark:text-slate-300">{formatDuration(timing.estimatedRemainingSeconds)}</span>
+                    <span className="text-[#666] font-medium">
+                      预计剩余 <span className="font-bold text-[#2D2D2D]">{formatDuration(timing.estimatedRemainingSeconds)}</span>
                     </span>
                   </>
                 )}
-                <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                <span className="font-black text-[#ff3d8a]">
                   {progress.percentage}%
                 </span>
               </div>
             </div>
-            <div className="h-3 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div className="h-3 bg-[#F5F5F0] border-2 border-[#2D2D2D] rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-500"
+                className="h-full bg-gradient-to-r from-[#ff3d8a] to-[#2ad4ff] rounded-full transition-all duration-500"
                 style={{ width: `${progress.percentage}%` }}
               />
             </div>
@@ -471,18 +471,18 @@ export const RepoDetail = () => {
                   <div key={stage} className="flex items-center gap-2">
                     <span
                       className={clsx(
-                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors',
+                        'px-2.5 py-1 rounded-full text-xs font-bold border-2 border-[#2D2D2D] transition-colors',
                         isCurrent
-                          ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400'
+                          ? 'bg-[#fff34d] text-[#2D2D2D]'
                           : isPast
-                            ? 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400'
-                            : 'text-slate-400 dark:text-slate-500'
+                            ? 'bg-[#6effb0] text-[#2D2D2D]'
+                            : 'bg-[#F5F5F0] text-[#999]'
                       )}
                     >
                       {STAGE_LABELS[stage] ?? stage}
                     </span>
                     {idx < STAGE_ORDER.length - 1 && (
-                      <ChevronRight className="w-3 h-3 text-slate-300 dark:text-slate-600" />
+                      <ChevronRight className="w-3 h-3 text-[#2D2D2D]" />
                     )}
                   </div>
                 );
@@ -491,7 +491,7 @@ export const RepoDetail = () => {
           )}
 
           {indexingError && (
-            <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg">
+            <div className="flex items-start gap-2 text-sm text-white bg-[#ff3d8a] border-2 border-[#2D2D2D] p-3 rounded-lg font-medium">
               <AlertCircle className="w-5 h-5 shrink-0" />
               <span>{indexingError}</span>
             </div>
@@ -515,16 +515,16 @@ export const RepoDetail = () => {
             {showLogs && (
               <div
                 ref={logsContainerRef}
-                className="mt-3 h-48 overflow-y-auto bg-slate-50 dark:bg-slate-900 rounded-lg p-4 font-mono text-xs space-y-2"
+                className="mt-3 h-48 overflow-y-auto bg-[#1A1A2E] rounded-lg border-2 border-[#2D2D2D] p-4 font-mono text-xs space-y-2"
               >
                 {logs.length === 0 ? (
-                  <p className="text-slate-500 dark:text-slate-400">暂无日志信息</p>
+                  <p className="text-slate-400">暂无日志信息</p>
                 ) : (
                   logs.map((log, idx) => (
                     <div key={idx} className="flex items-start gap-2">
                       {getLogIcon(log.level)}
                       <div className="flex-1">
-                        <span className="text-slate-400 mr-2">
+                        <span className="text-slate-500 mr-2">
                           {new Date(log.timestamp).toLocaleTimeString()}
                         </span>
                         <span className={getLogLevelColor(log.level)}>
@@ -542,25 +542,25 @@ export const RepoDetail = () => {
 
       {/* Error Message */}
       {repo.status === 'error' && repo.errorMessage && (
-        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6">
+        <div className="bg-[#ffe3ef] border-2 border-[#ff3d8a] rounded-xl p-6">
           <div className="flex items-start gap-4">
-            <div className="p-2 bg-red-100 dark:bg-red-800 rounded-lg">
-              <AlertCircle className="w-6 h-6 text-red-600 dark:text-red-400" />
+            <div className="p-2 bg-[#ff3d8a] border-2 border-[#2D2D2D] rounded-lg">
+              <AlertCircle className="w-6 h-6 text-white" />
             </div>
             <div className="flex-1">
-              <h3 className="text-lg font-semibold text-red-800 dark:text-red-300 mb-2">
+              <h3 className="text-lg font-black text-[#2D2D2D] mb-2">
                 索引失败
               </h3>
-              <p className="text-sm text-red-700 dark:text-red-400 leading-relaxed mb-4">
+              <p className="text-sm text-[#2D2D2D] font-medium leading-relaxed mb-4">
                 {repo.errorMessage}
               </p>
 
-              <div className="bg-white/50 dark:bg-slate-800/50 rounded-lg p-4 mb-4">
-                <h4 className="text-sm font-semibold text-red-800 dark:text-red-300 mb-2 flex items-center gap-2">
+              <div className="bg-white border-2 border-[#2D2D2D] rounded-lg p-4 mb-4">
+                <h4 className="text-sm font-black text-[#2D2D2D] mb-2 flex items-center gap-2">
                   <Info className="w-4 h-4" />
                   可能的解决方案
                 </h4>
-                <ul className="text-xs text-red-600 dark:text-red-400 space-y-1.5">
+                <ul className="text-xs text-[#2D2D2D] font-medium space-y-1.5">
                   {repo.errorMessage?.includes('git') && (
                     <li className="flex items-start gap-2">
                       <span className="text-red-500">•</span>
@@ -647,10 +647,10 @@ export const RepoDetail = () => {
           onClick={handleReindex}
           disabled={isReindexing || repo.status === 'indexing'}
           className={clsx(
-            'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors',
+            'flex items-center gap-2 px-6 py-3 rounded-xl font-bold border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] transition-all duration-200',
             isReindexing || repo.status === 'indexing'
-              ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
-              : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+              ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none'
+              : 'bg-[#ff3d8a] hover:bg-[#ff5c9d] text-white hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]'
           )}
         >
           <RefreshCw className={clsx('w-5 h-5', isReindexing && 'animate-spin')} />
@@ -661,10 +661,10 @@ export const RepoDetail = () => {
           disabled={isReindexing || repo.status === 'indexing'}
           title="仅同步有变更的分支增量数据，服务停机后点击此按钮可补齐遗漏的增量更新"
           className={clsx(
-            'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors border border-indigo-200 dark:border-indigo-700',
+            'flex items-center gap-2 px-6 py-3 rounded-xl font-bold border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] transition-all duration-200',
             isReindexing || repo.status === 'indexing'
-              ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
-              : 'bg-white dark:bg-slate-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400'
+              ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none'
+              : 'bg-[#2ad4ff] hover:bg-[#4adee0] text-[#2D2D2D] hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]'
           )}
         >
           <GitBranch className="w-5 h-5" />
@@ -673,7 +673,7 @@ export const RepoDetail = () => {
         <button
           onClick={handleOpenBranchModal}
           disabled={isUpdating}
-          className="flex items-center gap-2 px-6 py-3 bg-white dark:bg-slate-700 hover:bg-slate-50 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 rounded-xl font-medium transition-colors"
+          className="flex items-center gap-2 px-6 py-3 bg-[#fff34d] hover:bg-[#ffed00] text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
         >
           <Settings className="w-5 h-5" />
           配置业务分支
@@ -681,7 +681,7 @@ export const RepoDetail = () => {
         <button
           onClick={handleDelete}
           disabled={isDeleting}
-          className="flex items-center gap-2 px-6 py-3 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 rounded-xl font-medium transition-colors"
+          className="flex items-center gap-2 px-6 py-3 bg-[#ffe3ef] hover:bg-[#ffd3e4] text-[#ff3d8a] border-2 border-[#ff3d8a] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[4px_4px_0_#ff3d8a]"
         >
           <Trash2 className="w-5 h-5" />
           删除仓库

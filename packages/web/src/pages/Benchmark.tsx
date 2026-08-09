@@ -191,7 +191,7 @@ export const Benchmark = () => {
           <Search className="w-6 h-6 text-white" />
         </div>
         <div>
-          <h1 className="text-2xl font-black text-[#2D2D2D]">检索测试中心</h1>
+          <h1 className="text-2xl font-black text-[#2D2D2D]">评测中心 (Benchmark)</h1>
           <p className="text-[#666]">可视化调试中文/英文自然语言查询的实际召回质量</p>
         </div>
       </div>

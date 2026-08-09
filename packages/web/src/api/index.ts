@@ -35,7 +35,7 @@ const mapRepo = (data: any): Repo => ({
   totalFiles: data.total_files || 0,
   indexedFiles: data.indexed_files || 0,
   fileCount: data.total_files || 0,
-  symbolCount: 0,
+  symbolCount: data.symbol_count || 0,
   defaultBranch: data.default_branch || 'main',
   activeBranches: data.active_branches || [],
   syncMode: data.sync_mode || 'auto',

@@ -17,7 +17,7 @@ class RepoNotFoundException(CodePopException):
 
 class RepoAlreadyExistsException(CodePopException):
     def __init__(self, git_url: str):
-        super().__init__(f"Repository with git_url {git_url} already exists", 409)
+        super().__init__(f"该仓库地址已添加过，请勿重复索引（{git_url}）", 409)
 
 
 class ValidationException(CodePopException):

@@ -97,9 +97,9 @@ export const ServiceStatus = () => {
 
   const getStatusBg = (status: Service['status']) => {
     switch (status) {
-      case 'online': return 'bg-green-50 dark:bg-green-900/20';
-      case 'offline': return 'bg-red-50 dark:bg-red-900/20';
-      case 'loading': return 'bg-yellow-50 dark:bg-yellow-900/20';
+      case 'online': return 'bg-[#e8fff4]';
+      case 'offline': return 'bg-[#ffe3ef]';
+      case 'loading': return 'bg-[#fffbdd]';
     }
   };
 
@@ -112,15 +112,15 @@ export const ServiceStatus = () => {
   };
 
   return (
-    <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-      <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-4">服务状态监控</h3>
+    <div className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D] p-6">
+      <h3 className="text-lg font-black text-[#2D2D2D] mb-4">服务状态监控</h3>
       <div className="grid grid-cols-2 gap-4">
         {services.map(service => (
-          <div 
+          <div
             key={service.name}
-            className={`flex items-center gap-3 p-4 rounded-lg ${getStatusBg(service.status)}`}
+            className={`flex items-center gap-3 p-4 rounded-lg border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] ${getStatusBg(service.status)} ${getStatusColor(service.status)}`}
           >
-            <div className={`${getStatusColor(service.status)}`}>
+            <div>
               {service.status === 'loading' ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
               ) : service.status === 'online' ? (
@@ -131,10 +131,10 @@ export const ServiceStatus = () => {
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <span className={getStatusColor(service.status)}>{service.icon}</span>
-                <span className="font-medium text-slate-900 dark:text-white">{service.name}</span>
+                <span>{service.icon}</span>
+                <span className="font-bold text-[#2D2D2D]">{service.name}</span>
               </div>
-              <div className="text-sm text-slate-500 dark:text-slate-400">
+              <div className="text-sm text-[#2D2D2D] font-medium">
                 {getStatusText(service.status)}
               </div>
             </div>

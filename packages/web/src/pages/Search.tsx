@@ -55,11 +55,11 @@ export const Search = () => {
   return (
     <div className="space-y-6 animate-fadeIn">
       {/* Search Header */}
-      <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-        <h2 className="text-lg font-semibold text-slate-900 dark:text-white mb-4">
+      <div className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D] p-6">
+        <h2 className="text-lg font-black text-[#2D2D2D] mb-4">
           代码智能搜索
         </h2>
-        <p className="text-sm text-slate-500 dark:text-slate-400 -mt-2 mb-4">
+        <p className="text-sm text-[#666] font-medium -mt-2 mb-4">
           用自然语言描述需求，检索代码中的实现入口、调用链与相关文件
         </p>
         <div className="flex flex-col md:flex-row gap-4 mb-4">
@@ -74,11 +74,11 @@ export const Search = () => {
             />
           </div>
           <div className="flex items-center gap-2">
-            <FolderGit2 className="w-5 h-5 text-slate-400" />
+            <FolderGit2 className="w-5 h-5 text-[#666]" />
             <select
               value={selectedRepoId}
               onChange={(e) => handleRepoFilter(e.target.value)}
-              className="px-4 py-2.5 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[180px]"
+              className="px-4 py-2.5 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] font-bold focus:outline-none focus:border-[#2ad4ff] shadow-[3px_3px_0_#2D2D2D] min-w-[180px]"
             >
               <option value="">所有仓库</option>
               {repos.map((repo) => (
@@ -93,14 +93,14 @@ export const Search = () => {
 
       {/* Search Results */}
       {showEmptyState ? (
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-8">
+        <div className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D] p-8">
           <div className="flex items-center gap-3 mb-6">
-            <Code2 className="w-8 h-8 text-indigo-500" />
+            <Code2 className="w-8 h-8 text-[#b88dff]" />
             <div>
-              <h3 className="text-lg font-medium text-slate-900 dark:text-white">
+              <h3 className="text-lg font-black text-[#2D2D2D]">
                 试试这些检索问题
               </h3>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
+              <p className="text-sm text-[#666] font-medium">
                 选择下面的示例，或输入你自己的问题
               </p>
             </div>
@@ -110,23 +110,23 @@ export const Search = () => {
               <button
                 key={sample}
                 onClick={() => handleSampleQuery(sample)}
-                className="flex items-center gap-2 px-4 py-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg border border-slate-200 dark:border-slate-600 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-sm transition-all text-left"
+                className="flex items-center gap-2 px-4 py-3 bg-[#F5F5F0] hover:bg-[#fff34d] rounded-lg border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] hover:translate-y-[-2px] hover:shadow-[5px_5px_0_#2D2D2D] transition-all text-left font-medium"
               >
                 <Sparkles className="w-4 h-4 text-[#ff3d8a] shrink-0" />
-                <span className="text-sm text-slate-700 dark:text-slate-300">{sample}</span>
+                <span className="text-sm text-[#2D2D2D]">{sample}</span>
               </button>
             ))}
           </div>
         </div>
       ) : showLoading ? (
-        <div className="text-center py-12 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500 mx-auto mb-4"></div>
-          <p className="text-slate-500 dark:text-slate-400">智能分析中...</p>
+        <div className="text-center py-12 bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D]">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#ff3d8a] mx-auto mb-4"></div>
+          <p className="text-[#666] font-medium">智能分析中...</p>
         </div>
       ) : showError ? (
-        <div className="text-center py-12 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
-          <Code2 className="w-16 h-16 text-red-300 mx-auto mb-4" />
-          <p className="text-slate-500 dark:text-slate-400">
+        <div className="text-center py-12 bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D]">
+          <Code2 className="w-16 h-16 text-[#ff3d8a] mx-auto mb-4" />
+          <p className="text-[#666] font-medium">
             检索失败，请稍后重试或更换关键词
           </p>
         </div>
