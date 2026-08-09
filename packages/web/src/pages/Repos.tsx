@@ -2,10 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import { Plus, X, FolderGit2, GitBranch, Loader2, CheckCircle2, AlertTriangle, Github, Code2 } from 'lucide-react';
 import { useRepos } from '../hooks/useRepos';
 import { RepoCard } from '../components/RepoCard';
+import { ConfirmModal } from '../components/ConfirmModal';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
 import { useStore } from '../store';
 import { previewRepoBranches } from '../api';
 import type { BranchPreview } from '../api';
+import type { Repo } from '../types';
 
 interface IndexingProgress {
   progress: number;
@@ -39,6 +41,8 @@ export const Repos = () => {
   const [gitUrlInput, setGitUrlInput] = useState('');
   const [activeBranchesInput, setActiveBranchesInput] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  // 待删除的仓库（列表页删除前需高危确认）
+  const [deleteTarget, setDeleteTarget] = useState<Repo | null>(null);
 
   // Remote branch preview for the create-repo form (manually triggered).
   const [preview, setPreview] = useState<BranchPreview | null>(null);
@@ -218,7 +222,10 @@ export const Repos = () => {
               <RepoCard
                 key={repo.id}
                 repo={repo}
-                onDelete={deleteRepo}
+                onDelete={(id) => {
+                  const target = repos.find((r) => r.id === id);
+                  setDeleteTarget(target || null);
+                }}
                 onReindex={reindex}
                 isDeleting={isDeleting}
                 isReindexing={isReindexing}
@@ -387,7 +394,7 @@ export const Repos = () => {
               <button
                 onClick={handleAdd}
                 disabled={isAdding || !gitUrlInput.trim()}
-                className="flex-1 px-4 py-3 bg-[#6effb0] hover:bg-[#8dffc5] disabled:bg-slate-200 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D] flex items-center justify-center gap-2"
+                className="flex-1 px-4 py-3 bg-[#2ad4ff] hover:bg-[#4adee0] disabled:bg-slate-200 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D] flex items-center justify-center gap-2"
               >
                 {isAdding ? <LoadingSpinner size="sm" /> : '添加'}
               </button>
@@ -395,6 +402,37 @@ export const Repos = () => {
           </div>
         </div>
       )}
+
+      {/* 删除仓库高危确认 */}
+      <ConfirmModal
+        open={!!deleteTarget}
+        title="删除仓库"
+        danger
+        confirmText={isDeleting ? '删除中...' : '确认删除'}
+        loading={isDeleting}
+        description={
+          <div className="space-y-2">
+            <p className="font-bold text-[#ff3d8a]">
+              删除后不可恢复，请谨慎操作！
+            </p>
+            <p>
+              将删除仓库 <span className="font-black text-[#2D2D2D]">{deleteTarget?.name || ''}</span> 的：
+            </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li>全部索引数据（代码向量、符号、检索记录）</li>
+              <li>本地克隆的代码（含所有分支）</li>
+              <li>该仓库的 Webhook 绑定与自动增量配置</li>
+            </ul>
+            <p className="pt-1">此操作不会影响远程仓库本身。</p>
+          </div>
+        }
+        onConfirm={() => {
+          if (deleteTarget) {
+            deleteRepo(deleteTarget.id);
+          }
+        }}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 };

@@ -29,6 +29,7 @@ import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
 import { RepoProviderIcon } from '../components/RepoProviderIcon';
+import { ConfirmModal } from '../components/ConfirmModal';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
 import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing, previewRepoBranches, getRepoWebhook, generateRepoWebhookToken } from '../api';
 import type { BranchPreview, RepoWebhookInfo } from '../api';
@@ -61,6 +62,7 @@ export const RepoDetail = () => {
   const [showAutoSyncModal, setShowAutoSyncModal] = useState(false);
   const [autoSyncDraftEnabled, setAutoSyncDraftEnabled] = useState(false);
   const [autoSyncDraftInterval, setAutoSyncDraftInterval] = useState(5);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   const logsContainerRef = useRef<HTMLDivElement>(null);
 
   // 判断当前访问地址是否为本地/内网，用于提示 Webhook 回调地址是否可达
@@ -144,10 +146,7 @@ export const RepoDetail = () => {
   });
 
   const handleDelete = () => {
-    if (window.confirm('确定要删除这个仓库吗？')) {
-      deleteRepo(id!);
-      navigate('/repos');
-    }
+    setShowDeleteModal(true);
   };
 
   const openWebhookModal = async () => {
@@ -889,6 +888,36 @@ export const RepoDetail = () => {
           </div>
         </div>
       )}
+
+      {/* 删除仓库高危确认 */}
+      <ConfirmModal
+        open={showDeleteModal}
+        title="删除仓库"
+        danger
+        confirmText={isDeleting ? '删除中...' : '确认删除'}
+        loading={isDeleting}
+        description={
+          <div className="space-y-2">
+            <p className="font-bold text-[#ff3d8a]">
+              删除后不可恢复，请谨慎操作！
+            </p>
+            <p>
+              将删除仓库 <span className="font-black text-[#2D2D2D]">{repo.name}</span> 的：
+            </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li>全部索引数据（代码向量、符号、检索记录）</li>
+              <li>本地克隆的代码（含所有分支）</li>
+              <li>该仓库的 Webhook 绑定与自动增量配置</li>
+            </ul>
+            <p className="pt-1">此操作不会影响远程仓库本身。</p>
+          </div>
+        }
+        onConfirm={() => {
+          deleteRepo(id!);
+          navigate('/repos');
+        }}
+        onCancel={() => setShowDeleteModal(false)}
+      />
 
       {/* Auto Sync Config Modal */}
       {showAutoSyncModal && (
