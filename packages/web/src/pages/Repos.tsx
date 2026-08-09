@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, X, FolderGit2, GitBranch, Loader2, CheckCircle2, AlertTriangle, Github, Code2 } from 'lucide-react';
+import { Plus, X, Check, FolderGit2, GitBranch, Loader2, CheckCircle2, AlertTriangle, Github, Code2 } from 'lucide-react';
 import { useRepos } from '../hooks/useRepos';
 import { RepoCard } from '../components/RepoCard';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -240,7 +240,7 @@ export const Repos = () => {
 
       {/* Add Repository Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl w-full max-w-md p-6 animate-scaleIn border-4 border-[#2D2D2D] shadow-[8px_8px_0_rgba(45,45,45,0.5)]">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-black text-[#2D2D2D]">
@@ -387,16 +387,18 @@ export const Repos = () => {
             <div className="flex gap-3">
               <button
                 onClick={() => setShowAddModal(false)}
-                className="flex-1 px-4 py-3 bg-[#F5F5F0] hover:bg-[#e8e8e0] text-[#2D2D2D] border-2 border-[#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[3px_3px_0_#2D2D2D]"
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[#F5F5F0] hover:bg-[#e8e8e0] text-[#2D2D2D] border-2 border-[#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[3px_3px_0_#2D2D2D]"
               >
+                <X className="w-5 h-5" strokeWidth={3} />
                 取消
               </button>
               <button
                 onClick={handleAdd}
                 disabled={isAdding || !gitUrlInput.trim()}
-                className="flex-1 px-4 py-3 bg-[#2ad4ff] hover:bg-[#4adee0] disabled:bg-slate-200 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D] flex items-center justify-center gap-2"
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[#3b82f6] hover:bg-[#2563eb] disabled:bg-[#3b82f6]/40 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed text-white border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-lg transition-all font-bold hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
               >
-                {isAdding ? <LoadingSpinner size="sm" /> : '添加'}
+                {isAdding ? <LoadingSpinner size="sm" /> : <Check className="w-5 h-5" strokeWidth={3} />}
+                添加
               </button>
             </div>
           </div>

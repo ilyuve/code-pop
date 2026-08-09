@@ -30,7 +30,7 @@ export const ConfirmModal = ({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
       <div className="bg-white rounded-2xl w-full max-w-sm p-6 border-4 border-[#2D2D2D] shadow-[8px_8px_0_rgba(45,45,45,0.4)]">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-black text-[#2D2D2D] flex items-center gap-2">
