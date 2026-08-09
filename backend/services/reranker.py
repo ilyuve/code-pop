@@ -87,13 +87,14 @@ ROLE_WEIGHTS = {
     "handler": 1.15,
     "repository": 1.05,
     "dao": 1.05,
-    "model": 0.8,
-    "entity": 0.8,
-    "dto": 0.75,
-    "adapter": 0.75,
+    "model": 0.7,
+    "entity": 0.7,
+    "dto": 0.6,
+    "adapter": 0.6,
     "web": 0.8,
+    "static": 0.2,
     "config": 0.7,
-    "test": 0.5,
+    "test": 0.3,
     "utility": 1.0,
     "middleware": 1.0,
     "other": 1.0,
@@ -174,6 +175,21 @@ class CodeReranker:
 
     # Shallow definitions that should not receive the full definition bonus.
     _SHALLOW_DEF_NAMES = frozenset({"__init__", "__new__", "__repr__", "__str__"})
+
+    # A single "line" longer than this (without leading indentation) is treated
+    # as minified/compressed output, common in built JS/CSS bundles.
+    _MINIFIED_LINE_LEN = 1200
+
+    def _is_minified_snippet(self, content: str) -> bool:
+        """True for minified/compressed bundles: very long single lines without
+        normal indentation, typical of built JS/CSS vendor files."""
+        if not content:
+            return False
+        lines = content.splitlines()
+        for line in lines[:8]:
+            if len(line) > self._MINIFIED_LINE_LEN and not line.startswith((" ", "\t")):
+                return True
+        return False
 
     def _is_shallow_snippet(self, content: str) -> bool:
         """True for snippets that are constructors, trivial getters, or very short."""

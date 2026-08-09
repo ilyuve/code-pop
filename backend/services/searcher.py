@@ -56,6 +56,7 @@ class _Hit:
     rrf_score: float = 0.0
     score: float = 0.0
     is_override: bool = False
+    branch: Optional[str] = None
 
 
 @dataclass
@@ -272,6 +273,7 @@ def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
                 sources={"symbol"},
                 symbol_id=symbol.id,
                 symbol_name=symbol.name,
+                branch=symbol.branch,
             )
     return _Hit(
         result_id=symbol.id,
@@ -286,6 +288,7 @@ def _symbol_to_hit(symbol: Symbol, embeddings: List[Embedding]) -> _Hit:
         sources={"symbol"},
         symbol_id=symbol.id,
         symbol_name=symbol.name,
+        branch=symbol.branch,
     )
 
 
@@ -305,7 +308,9 @@ class Searcher:
         Returns (actual_branch, branch_fallback).
         """
         if not repo_id:
-            return branch, False
+            # 全局搜索跨仓库，各仓库 default_branch 可能不同，分支过滤无意义；
+            # 返回 None 表示所有检索路径不做分支过滤。
+            return None, False
         repo = self.db.query(Repository).filter(Repository.id == repo_id).first()
         if not repo:
             return branch, False
@@ -563,11 +568,10 @@ class Searcher:
                 sym = self.db.query(Symbol).filter(Symbol.id == UUID(ep.id)).first()
                 if not sym or not sym.file:
                     continue
-                embeddings = (
-                    self.db.query(Embedding)
-                    .filter(Embedding.file_id == sym.file_id, Embedding.branch == branch)
-                    .all()
-                )
+                embeddings = self.db.query(Embedding).filter(Embedding.file_id == sym.file_id)
+                if branch:
+                    embeddings = embeddings.filter(Embedding.branch == branch)
+                embeddings = embeddings.all()
                 hit = _symbol_to_hit(sym, embeddings)
                 # Skip placeholder entries that have no embedding coverage.
                 if hit.content == f"{sym.type} {sym.name}":
@@ -588,7 +592,7 @@ class Searcher:
                             "symbol": round(hit.symbol_score, 4),
                         },
                         file_role=self._infer_file_role(hit.file_path),
-                        branch=branch,
+                        branch=branch or sym.branch or "main",
                         is_override=False,
                     )
                 )
@@ -906,6 +910,14 @@ class Searcher:
             if name.endswith((".tsx", ".jsx", ".vue", ".ts", ".js")):
                 return "web"
 
+        # 2b. Static assets / third-party bundles. Generic rule based on
+        # common frontend build conventions: any web file under a static
+        # resource directory is a built bundle or vendor lib, not source
+        # logic, so it carries almost no retrieval value for code search.
+        if name.endswith((".js", ".css", ".html", ".map", ".scss", ".less")):
+            if any(seg in parts for seg in ("static", "assets", "dist", "public", "build")):
+                return "static"
+
         # 3. Directory-based role inference.
         dir_roles = {
             "api": "controller",
@@ -933,6 +945,7 @@ class Searcher:
             "entity": "model",
             "domain": "model",
             "dto": "model",
+            "vo": "model",
             "config": "config",
             "configs": "config",
             "settings": "config",
@@ -1219,15 +1232,17 @@ class Searcher:
         )
 
         m3_reranker = get_m3_reranker()
-        # For implementation / how_it_works queries the original query is often
-        # Chinese mixed with English. The cross-encoder was trained primarily on
-        # English text, so feed it the expanded English terms for better code
-        # matching while preserving the original for other intents.
+        # bge-reranker-base 主要训练于英文文本：中文问句 + 英文代码的
+        # 交叉编码分数会整体坍缩失真（中英 token 在嵌入空间未对齐），
+        # 导致 getter/setter、VO 等短片段反超真正的实现代码。
+        # 纯英文替换又会丢失中文语义约束（扩展词不精准时误导打分），
+        # 因此混合：保留原始中文 + 拼接语义扩展出的英文代码词，
+        # 让 M3 在中英双语义空间打分。扩展不出英文词时回落到原始 query。
         m3_query = query
-        if intent_type == "how_it_works" and search_terms:
+        if search_terms and re.search(r"[\u4e00-\u9fff]", query):
             english_terms = [t for t in search_terms if re.match(r"^[a-zA-Z0-9_]+$", t)]
             if english_terms:
-                m3_query = " ".join(english_terms[:8])
+                m3_query = query + " " + " ".join(english_terms[:6])
         final_schemas = m3_reranker.rerank(m3_query, reranked[:limit * 2], top_k=limit)
 
         # M3 reranker recomputes scores from scratch and discards the role
@@ -1242,6 +1257,8 @@ class Searcher:
                 weight *= intent_boost.get(role, 1.0)
                 if code_reranker._is_shallow_snippet(schema.content):
                     weight *= 0.7
+                if code_reranker._is_minified_snippet(schema.content):
+                    weight *= 0.3
                 schema.score *= weight
             final_schemas.sort(key=lambda x: -x.score)
 
@@ -1383,6 +1400,7 @@ class Searcher:
                     line=row["start_line"],
                     vector_score=score,
                     sources={"vector"},
+                    branch=row["branch"],
                 )
             )
         return hits
@@ -1532,6 +1550,7 @@ class Searcher:
             SELECT e.id AS embedding_id,
                    e.file_id,
                    e.repo_id,
+                   e.branch,
                    r.name AS repo_name,
                    e.content,
                    e.start_line,
@@ -1553,7 +1572,7 @@ class Searcher:
             JOIN repositories r ON r.id = e.repo_id
             LEFT JOIN embedding_enrichments ee ON ee.embedding_id = e.id
             WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
-              AND e.branch = :branch
+              AND (:branch IS NULL OR e.branch = :branch)
               AND (
                   to_tsvector('english', e.content) @@ to_tsquery('english', :query_or)
                   OR to_tsvector('simple', e.content) @@ to_tsquery('simple', :query_or)
@@ -1591,6 +1610,7 @@ class Searcher:
                     line=row.start_line,
                     bm25_score=normalized_rank,
                     sources={"bm25"},
+                    branch=row.branch,
                 )
             )
         return hits
@@ -1657,9 +1677,10 @@ class Searcher:
             Embedding.id == SparseEmbedding.embedding_id,
         ).filter(
             SparseEmbedding.token_id.in_(query_tokens),
-            Embedding.branch == branch,
         )
 
+        if branch:
+            rows = rows.filter(Embedding.branch == branch)
         if repo_id:
             rows = rows.filter(Embedding.repo_id == repo_id)
 
@@ -1696,6 +1717,7 @@ class Searcher:
                 line=emb.start_line,
                 sparse_score=score,
                 sources={"sparse"},
+                branch=emb.branch,
             ))
         return hits
 
@@ -1731,7 +1753,7 @@ class Searcher:
                 "final": round(final_score, 4),
             },
             file_role=self._infer_file_role(hit.file_path),
-            branch=branch,
+            branch=branch or hit.branch or "main",
             is_override=hit.is_override,
         )
 
