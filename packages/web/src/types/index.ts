@@ -14,6 +14,8 @@ export interface Repo {
   defaultBranch: string;
   activeBranches: string[];
   syncMode: string;
+  autoSync: boolean;
+  autoSyncInterval: number;
   createdAt: string;
   lastIndexedAt: string;
 }
@@ -158,6 +160,8 @@ export interface AddRepoForm {
   gitUrl?: string;
   activeBranches?: string[];
   syncMode?: string;
+  autoSync?: boolean;
+  autoSyncInterval?: number;
 }
 
 // CodeContext types

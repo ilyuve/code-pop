@@ -21,6 +21,8 @@ class RepoCreate(BaseModel):
     path: Optional[str] = None
     active_branches: Optional[List[str]] = Field(default=None, description="业务分支列表，最多 2 个；为空时只索引 default_branch")
     sync_mode: str = "auto"
+    auto_sync: bool = False
+    auto_sync_interval: int = 5
 
 
 class RepoResponse(BaseModel):
@@ -35,6 +37,8 @@ class RepoResponse(BaseModel):
     default_branch: str = "main"
     active_branches: Optional[List[str]] = None
     sync_mode: str = "auto"
+    auto_sync: bool = False
+    auto_sync_interval: int = 5
     created_at: datetime
     updated_at: datetime
     total_files: int = 0
@@ -59,6 +63,8 @@ class RepoResponse(BaseModel):
 class RepoUpdate(BaseModel):
     active_branches: Optional[List[str]] = Field(default=None, description="业务分支列表，最多 2 个；传空列表可清空业务分支")
     sync_mode: Optional[str] = None
+    auto_sync: Optional[bool] = None
+    auto_sync_interval: Optional[int] = Field(default=None, description="定时轮询间隔（分钟），仅支持 5 / 15 / 30 / 60")
 
 
 class SearchQuery(BaseModel):

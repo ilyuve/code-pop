@@ -39,6 +39,8 @@ const mapRepo = (data: any): Repo => ({
   defaultBranch: data.default_branch || 'main',
   activeBranches: data.active_branches || [],
   syncMode: data.sync_mode || 'auto',
+  autoSync: !!data.auto_sync,
+  autoSyncInterval: data.auto_sync_interval || 5,
   createdAt: data.created_at || data.createdAt,
   lastIndexedAt: data.last_indexed_at || data.lastIndexedAt,
 });
@@ -110,13 +112,19 @@ export const addRepo = async (data: AddRepoForm): Promise<Repo> => {
 };
 
 export const updateRepo = async (id: string, data: Partial<AddRepoForm>): Promise<Repo> => {
-  // Backend schema expects snake_case field names (active_branches / sync_mode).
+  // Backend schema expects snake_case field names (active_branches / sync_mode / auto_sync).
   const payload: Record<string, unknown> = {};
   if (data.activeBranches !== undefined) {
     payload.active_branches = data.activeBranches;
   }
   if (data.syncMode !== undefined) {
     payload.sync_mode = data.syncMode;
+  }
+  if (data.autoSync !== undefined) {
+    payload.auto_sync = data.autoSync;
+  }
+  if (data.autoSyncInterval !== undefined) {
+    payload.auto_sync_interval = data.autoSyncInterval;
   }
   const response = await apiClient.patch(`/repos/${id}`, payload);
   return mapRepo(response.data);

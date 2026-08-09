@@ -118,7 +118,7 @@ async def github_webhook(
         logger.info("Ignoring push to branch %s (not main/master, not configured active branch)", branch)
         return {"status": "ignored", "reason": f"branch {branch} not main/master or active"}
 
-    background_tasks.add_task(_sync_repo_branches, repo.id)
+    background_tasks.add_task(_sync_repo_branches, repo.id, "webhook")
     logger.info("Webhook triggered branch sync for repo %s (branch %s)", repo.id, branch)
     return {"status": "accepted", "repo_id": str(repo.id)}
 
@@ -186,6 +186,6 @@ async def repo_webhook_by_id(
     if not is_main_branch and not is_active_branch:
         return {"status": "ignored", "reason": f"branch {branch} not main/master or active"}
 
-    background_tasks.add_task(_sync_repo_branches, repo.id)
+    background_tasks.add_task(_sync_repo_branches, repo.id, "webhook")
     logger.info("Webhook triggered branch sync for repo %s (branch %s)", repo.id, branch)
     return {"status": "accepted", "repo_id": str(repo_id)}

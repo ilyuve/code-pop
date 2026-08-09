@@ -23,6 +23,7 @@ import {
   Copy,
   Check,
   X,
+  Timer,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
@@ -57,7 +58,19 @@ export const RepoDetail = () => {
   const [webhookInfo, setWebhookInfo] = useState<RepoWebhookInfo | null>(null);
   const [webhookLoading, setWebhookLoading] = useState(false);
   const [copiedField, setCopiedField] = useState<'url' | 'token' | null>(null);
+  const [showAutoSyncModal, setShowAutoSyncModal] = useState(false);
+  const [autoSyncDraftEnabled, setAutoSyncDraftEnabled] = useState(false);
+  const [autoSyncDraftInterval, setAutoSyncDraftInterval] = useState(5);
   const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  // 判断当前访问地址是否为本地/内网，用于提示 Webhook 回调地址是否可达
+  const hostname = window.location.hostname;
+  const isLocalOrPrivateHost =
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '0.0.0.0' ||
+    hostname.endsWith('.local') ||
+    /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname);
 
   const showTemporaryNotice = (text: string) => {
     setSaveNotice(text);
@@ -176,6 +189,28 @@ export const RepoDetail = () => {
   const handleReindex = () => {
     reindex(id!);
     showTemporaryNotice('已触发增量同步，请查看下方日志确认执行结果');
+  };
+
+  const handleOpenAutoSyncModal = () => {
+    setAutoSyncDraftEnabled(repo.autoSync);
+    setAutoSyncDraftInterval(repo.autoSyncInterval);
+    setShowAutoSyncModal(true);
+  };
+
+  const handleSaveAutoSync = () => {
+    updateRepo(
+      { id: id!, data: { autoSync: autoSyncDraftEnabled, autoSyncInterval: autoSyncDraftInterval } },
+      {
+        onSuccess: () => {
+          setShowAutoSyncModal(false);
+          showTemporaryNotice(
+            autoSyncDraftEnabled
+              ? `已开启自动增量：每 ${autoSyncDraftInterval} 分钟自动检查主分支与业务分支的更新并同步`
+              : '已关闭自动增量'
+          );
+        },
+      }
+    );
   };
 
   const handleOpenBranchModal = () => {
@@ -685,58 +720,81 @@ export const RepoDetail = () => {
         </div>
       )}
 
-      {/* Actions */}
-      <div className="flex flex-wrap gap-3">
-        <button
-          onClick={handleReindex}
-          disabled={isReindexing || repo.status === 'indexing'}
-          className={clsx(
-            'flex items-center gap-2 px-6 py-3 rounded-xl font-bold border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] transition-all duration-200',
-            isReindexing || repo.status === 'indexing'
-              ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none'
-              : 'bg-[#ff3d8a] hover:bg-[#ff5c9d] text-white hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]'
-          )}
-        >
-          <RefreshCw className={clsx('w-5 h-5', isReindexing && 'animate-spin')} />
-          {repo.status === 'indexing' ? '强制重新索引' : '重新索引'}
-        </button>
-        <button
-          onClick={handleReindex}
-          disabled={isReindexing || repo.status === 'indexing'}
-          title="仅同步有变更的分支增量数据，服务停机后点击此按钮可补齐遗漏的增量更新"
-          className={clsx(
-            'flex items-center gap-2 px-6 py-3 rounded-xl font-bold border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] transition-all duration-200',
-            isReindexing || repo.status === 'indexing'
-              ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none'
-              : 'bg-[#2ad4ff] hover:bg-[#4adee0] text-[#2D2D2D] hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]'
-          )}
-        >
-          <GitBranch className="w-5 h-5" />
-          增量同步
-        </button>
-        <button
-          onClick={handleOpenBranchModal}
-          disabled={isUpdating}
-          className="flex items-center gap-2 px-6 py-3 bg-[#fff34d] hover:bg-[#ffed00] text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
-        >
-          <Settings className="w-5 h-5" />
-          配置业务分支
-        </button>
-        <button
-          onClick={openWebhookModal}
-          className="flex items-center gap-2 px-6 py-3 bg-[#b88dff] hover:bg-[#cba7ff] text-white border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
-        >
-          <Webhook className="w-5 h-5" />
-          绑定 Webhook
-        </button>
-        <button
-          onClick={handleDelete}
-          disabled={isDeleting}
-          className="flex items-center gap-2 px-6 py-3 bg-[#ffe3ef] hover:bg-[#ffd3e4] text-[#ff3d8a] border-2 border-[#ff3d8a] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[4px_4px_0_#ff3d8a]"
-        >
-          <Trash2 className="w-5 h-5" />
-          删除仓库
-        </button>
+      {/* Actions：左侧为增量同步相关，右侧为仓库管理操作 */}
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={handleOpenAutoSyncModal}
+            disabled={isUpdating}
+            title="点击配置自动增量：开启后按设置间隔自动检查远程仓库主分支与业务分支的更新并增量同步"
+            className={clsx(
+              'flex items-center gap-2 px-6 py-3 border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D] disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-[4px_4px_0_#2D2D2D]',
+              repo.autoSync
+                ? 'bg-[#6effb0] text-[#2D2D2D]'
+                : 'bg-[#F5F5F0] text-[#999]'
+            )}
+          >
+            {repo.autoSync ? (
+              <div className="w-2 h-2 rounded-full bg-[#2D2D2D] animate-pulse" />
+            ) : (
+              <Timer className="w-5 h-5" />
+            )}
+            自动增量{repo.autoSync ? `（${repo.autoSyncInterval} 分钟 / 开）` : '（关）'}
+          </button>
+          <button
+            onClick={handleReindex}
+            disabled={isReindexing || repo.status === 'indexing'}
+            title="手动执行一次：仅同步有变更的分支增量数据，服务停机后点击此按钮可补齐遗漏的增量更新"
+            className={clsx(
+              'flex items-center gap-2 px-6 py-3 rounded-xl font-bold border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] transition-all duration-200',
+              isReindexing || repo.status === 'indexing'
+                ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none'
+                : 'bg-[#2ad4ff] hover:bg-[#4adee0] text-[#2D2D2D] hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]'
+            )}
+          >
+            <GitBranch className="w-5 h-5" />
+            手动增量同步
+          </button>
+          <button
+            onClick={openWebhookModal}
+            className="flex items-center gap-2 px-6 py-3 bg-[#b88dff] hover:bg-[#cba7ff] text-white border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
+          >
+            <Webhook className="w-5 h-5" />
+            Push 自动同步
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={handleReindex}
+            disabled={isReindexing || repo.status === 'indexing'}
+            className={clsx(
+              'flex items-center gap-2 px-6 py-3 rounded-xl font-bold border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] transition-all duration-200',
+              isReindexing || repo.status === 'indexing'
+                ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none'
+                : 'bg-[#ff3d8a] hover:bg-[#ff5c9d] text-white hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]'
+            )}
+          >
+            <RefreshCw className={clsx('w-5 h-5', isReindexing && 'animate-spin')} />
+            {repo.status === 'indexing' ? '强制重新索引' : '重新索引'}
+          </button>
+          <button
+            onClick={handleOpenBranchModal}
+            disabled={isUpdating}
+            className="flex items-center gap-2 px-6 py-3 bg-[#fff34d] hover:bg-[#ffed00] text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
+          >
+            <Settings className="w-5 h-5" />
+            配置业务分支
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={isDeleting}
+            className="flex items-center gap-2 px-6 py-3 bg-[#ffe3ef] hover:bg-[#ffd3e4] text-[#ff3d8a] border-2 border-[#ff3d8a] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[4px_4px_0_#ff3d8a]"
+          >
+            <Trash2 className="w-5 h-5" />
+            删除仓库
+          </button>
+        </div>
       </div>
 
       {/* Branch Config Modal */}
@@ -832,6 +890,95 @@ export const RepoDetail = () => {
         </div>
       )}
 
+      {/* Auto Sync Config Modal */}
+      {showAutoSyncModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 border-4 border-[#2D2D2D] shadow-[8px_8px_0_rgba(45,45,45,0.4)]">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-xl font-black text-[#2D2D2D] flex items-center gap-2">
+                <Timer className="w-5 h-5" style={{ color: '#0a8f5c' }} />
+                自动增量
+              </h2>
+              <button
+                onClick={() => setShowAutoSyncModal(false)}
+                className="p-1.5 rounded-lg border-2 border-transparent hover:border-[#2D2D2D] hover:bg-[#F5F5F0] transition-colors"
+              >
+                <X className="w-5 h-5 text-[#2D2D2D]" />
+              </button>
+            </div>
+
+            <p className="text-sm text-[#666] mb-5">
+              开启后 CodePop 按设定间隔自动检查远程仓库主分支与配置的业务分支，有更新即增量同步，无需配置 Webhook。
+            </p>
+
+            <div className="mb-5">
+              <p className="text-sm font-bold text-[#2D2D2D] mb-2">开关</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setAutoSyncDraftEnabled(true)}
+                  className={clsx(
+                    'px-4 py-2 rounded-lg border-2 font-bold transition-colors',
+                    autoSyncDraftEnabled
+                      ? 'bg-[#6effb0] border-[#2D2D2D] text-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D]'
+                      : 'bg-[#F5F5F0] border-transparent text-[#999] hover:text-[#2D2D2D]'
+                  )}
+                >
+                  开启
+                </button>
+                <button
+                  onClick={() => setAutoSyncDraftEnabled(false)}
+                  className={clsx(
+                    'px-4 py-2 rounded-lg border-2 font-bold transition-colors',
+                    !autoSyncDraftEnabled
+                      ? 'bg-[#F5F5F0] border-[#2D2D2D] text-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D]'
+                      : 'bg-white border-transparent text-[#999] hover:text-[#2D2D2D]'
+                  )}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className={clsx('mb-6', !autoSyncDraftEnabled && 'opacity-40')}>
+              <p className="text-sm font-bold text-[#2D2D2D] mb-2">检查间隔</p>
+              <div className="flex gap-2">
+                {[5, 15, 30, 60].map((minutes) => (
+                  <button
+                    key={minutes}
+                    onClick={() => setAutoSyncDraftInterval(minutes)}
+                    disabled={!autoSyncDraftEnabled}
+                    className={clsx(
+                      'px-3 py-2 rounded-lg border-2 font-bold transition-colors disabled:cursor-not-allowed',
+                      autoSyncDraftEnabled && autoSyncDraftInterval === minutes
+                        ? 'bg-[#2ad4ff] border-[#2D2D2D] text-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D]'
+                        : 'bg-[#F5F5F0] border-transparent text-[#999] hover:text-[#2D2D2D]'
+                    )}
+                  >
+                    {minutes} 分钟
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowAutoSyncModal(false)}
+                className="px-4 py-2 text-[#666] hover:bg-[#F5F5F0] rounded-lg font-bold transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSaveAutoSync}
+                disabled={isUpdating}
+                className="px-5 py-2 bg-[#0a8f5c] hover:bg-[#0ba86b] text-white rounded-lg font-bold transition-colors disabled:opacity-50"
+              >
+                {isUpdating ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Webhook Bind Modal */}
       {showWebhookModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -839,7 +986,7 @@ export const RepoDetail = () => {
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-xl font-black text-[#2D2D2D] flex items-center gap-2">
                 <Webhook className="w-5 h-5" style={{ color: '#b88dff' }} />
-                绑定 Webhook
+                Push 自动同步
               </h2>
               <button
                 onClick={() => setShowWebhookModal(false)}
@@ -873,6 +1020,23 @@ export const RepoDetail = () => {
                       {copiedField === 'url' ? <Check className="w-4 h-4 text-[#2D2D2D]" /> : <Copy className="w-4 h-4 text-[#2D2D2D]" />}
                     </button>
                   </div>
+                  {isLocalOrPrivateHost ? (
+                    <div className="mt-2 bg-[#fff8e1] border-2 border-[#ff8a3d] rounded-lg p-3 text-xs text-[#2D2D2D] space-y-1.5">
+                      <p className="font-black flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" style={{ color: '#ff8a3d' }} />
+                        当前为本地/内网地址，GitHub / Gitee 服务器无法访问
+                      </p>
+                      <p>· 云服务器部署：用公网地址（如 http://IP:13000）打开 CodePop，此处会自动变为公网回调地址，直接填入远程仓库即可</p>
+                      <p>· 本地调试：先用内网穿透（cpolar / ngrok / frp）把 13000 端口暴露到公网，再把「穿透地址 + {webhookInfo ? webhookInfo.webhook_url : ''}」填入远程仓库</p>
+                    </div>
+                  ) : (
+                    <div className="mt-2 bg-[#e8fff4] border-2 border-[#0a8f5c] rounded-lg p-3 text-xs text-[#2D2D2D]">
+                      <p className="font-black flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5 shrink-0" style={{ color: '#0a8f5c' }} />
+                        当前为公网地址，可直接填入远程仓库配置
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div>

@@ -349,12 +349,20 @@ def _get_sync_lock(repo_id: str) -> asyncio.Lock:
     return _sync_locks[repo_id]
 
 
-def _log_sync(db, repo_id, message: str, stage: str = "sync") -> None:
+# 同步触发来源 → 索引日志显示的中文标签，便于区分手动 / Hook / 定时
+SYNC_SOURCE_LABELS = {
+    "manual": "手动增量",
+    "webhook": "Hook 增量",
+    "auto": "定时增量",
+}
+
+
+def _log_sync(db, repo_id, message: str, stage: str = "sync", level: str = "info") -> None:
     """Write a sync-related message into indexing_logs so the UI can show it."""
     from models import IndexingLog
 
     try:
-        db.add(IndexingLog(repo_id=repo_id, level="info", stage=stage, message=message))
+        db.add(IndexingLog(repo_id=repo_id, level=level, stage=stage, message=message))
         db.commit()
     except Exception as exc:
         logger.warning("Failed to write sync log for %s: %s", repo_id, exc)
@@ -444,7 +452,7 @@ def _cleanup_branch_index(db, repo, branch: str) -> None:
         logger.warning("Failed to remove local clone for branch %s: %s", branch, exc)
 
 
-async def _sync_repo_branches(repo_id: UUID) -> dict:
+async def _sync_repo_branches(repo_id: UUID, source: str = "manual") -> dict:
     """Orchestrate syncing default branch and active business branches.
 
     - Acquires a repo-level advisory lock to dedupe concurrent syncs.
@@ -452,12 +460,16 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
     - Then diffs each active business branch whenever its HEAD changed or the
       default branch baseline moved forward.
     - Updates ``branch_commits`` and notifies via WebSocket.
+
+    ``source`` 标记本次同步的触发来源（manual/webhook/auto），
+    写入索引日志便于区分手动、Hook 与定时触发的增量同步。
     """
     from database import SessionLocal
     from models import Repository
     from services.notifier import notifier
     from services.indexer import index_repo
 
+    source_label = SYNC_SOURCE_LABELS.get(source, "手动增量")
     repo_id_str = str(repo_id)
     process_lock = _get_sync_lock(repo_id_str)
     if process_lock.locked():
@@ -493,7 +505,7 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             branch_commits = json.loads(repo.branch_commits or "{}")
             updated_branches: List[dict] = []
             default_branch = repo.default_branch
-            _log_sync(db, repo_id, "开始增量同步，检查远程仓库是否有更新", stage="sync")
+            _log_sync(db, repo_id, f"开始增量同步（{source_label}），检查远程仓库是否有更新", stage="sync")
 
             # 1. Sync default branch (main/master)
             main_path = get_repo_local_path(repo, default_branch)
@@ -547,11 +559,11 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             if updated_branches:
                 _log_sync(
                     db, repo_id,
-                    f"增量同步完成，更新分支：{', '.join(u['branch'] for u in updated_branches)}",
+                    f"增量同步完成（{source_label}）：更新分支 {', '.join(u['branch'] for u in updated_branches)}",
                     stage="sync",
                 )
             else:
-                _log_sync(db, repo_id, "无分支变更，跳过增量同步", stage="sync")
+                _log_sync(db, repo_id, f"无分支变更（{source_label}），跳过增量同步", stage="sync")
 
             result = {
                 "status": "done",
@@ -569,6 +581,7 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             return result
         except Exception as exc:
             logger.exception("Failed to sync repo %s: %s", repo_id, exc)
+            _log_sync(db, repo_id, f"增量同步失败（{source_label}）：{exc}", stage="sync", level="error")
             await notifier.send_repo_update(
                 str(repo_id),
                 status="error",

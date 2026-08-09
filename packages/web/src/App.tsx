@@ -72,6 +72,11 @@ function GlobalSocketBridge() {
               : r
           );
         });
+        // 同步完成（成功 synced / 失败 error）后刷新该仓库的索引日志，
+        // 让「无分支变更 / 更新分支 / 失败原因」自动展示，无需手动刷新页面。
+        if (msg.status === 'synced' || msg.status === 'error') {
+          queryClient.invalidateQueries({ queryKey: ['indexingLogs', msg.repoId] });
+        }
       }
 
       if (msg.progress !== undefined) {
