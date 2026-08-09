@@ -63,10 +63,21 @@ class QueryIntentAnalyzer:
         ],
     }
 
+    # ------------------------------------------------------------------
+    # 兜底层（FALLBACK）说明：
+    # 本文件是查询意图分析与术语扩展。主路径是「在线 LLM」——见
+    # `_expand_with_llm()`（analyze 中 enable_llm_expand=True 时调用）。
+    # 下方这些本地硬编码映射（SEMANTIC_MAP / GENERIC_EXPAND）与
+    # domain_synonyms / jieba 分词一样，仅作为**兜底**：当在线 LLM
+    # 不可用、未配置或未启用时，仍能保证中文查询具备基础扩展能力。
+    # 项目并非纯模板实现，请勿在未保留在线 LLM 路径的情况下依赖此处。
+    # ------------------------------------------------------------------
+
     # Slimmed hard-coded Chinese-English mappings. These are high-frequency,
     # cross-lingual terms that are expensive to learn from scratch for every
     # repository. Niche or project-specific terms should come from
     # ``domain_synonyms`` (generated during indexing) or from LLM expansion.
+    # NOTE: This is the offline fallback layer, NOT the primary path.
     SEMANTIC_MAP: Dict[str, List[str]] = {
         "登录": ["login", "authenticate", "auth", "sign_in", "signin", "session", "token"],
         "认证": ["authenticate", "auth", "verify", "validation", "check"],
@@ -125,6 +136,8 @@ class QueryIntentAnalyzer:
         enable_llm_expand: bool = True,
         llm_router: Optional[LLMRouter] = None,
     ) -> QueryIntent:
+        # 主路径：在线 LLM（enable_llm_expand=True 时追加 _expand_with_llm 结果）；
+        # 模板层（SEMANTIC_MAP/领域同义词/GENERIC_EXPAND）始终执行作为兜底。
         is_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
         intent_type = self._detect_intent(query)
         concepts = self._extract_concepts(query, is_chinese)
@@ -319,7 +332,8 @@ class QueryIntentAnalyzer:
         if domain_synonyms:
             domain_hits.extend(expand_query_with_synonyms(query, domain_synonyms))
 
-        # LLM online expansion for Chinese queries.
+        # 在线 LLM 查询扩展（主路径，仅中文查询且开启时）：
+        # 失败/超时会被 try/except 兜住，自动回落到上面的模板层结果。
         if enable_llm_expand and llm_router and is_chinese:
             try:
                 llm_terms = self._expand_with_llm(query, concepts, llm_router)
@@ -347,7 +361,13 @@ class QueryIntentAnalyzer:
     def _expand_with_llm(
         self, query: str, concepts: List[str], llm_router: LLMRouter
     ) -> Set[str]:
-        """Ask LLM for synonyms and English code keywords for the given query."""
+        """在线 LLM 术语扩展主入口：向远程 LLM 请求同义词与英文代码词。
+
+        本函数是「在线增强」的真正实现，仅在 enable_llm_expand=True 且
+        已配置 LLM provider 时由 analyze 调用。任何异常（网络/超时/
+        JSON 解析）都应由调用方 try/except 兜住，并回落到本文件的
+        SEMANTIC_MAP / domain_synonyms 等离线模板层。
+        """
         prompt = (
             "You are a code search assistant. Given a Chinese user query about code, "
             "return a JSON object with:\n"

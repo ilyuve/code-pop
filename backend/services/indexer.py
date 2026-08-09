@@ -769,7 +769,11 @@ async def _enrich_chunks_for_indexing_async(
     loop: asyncio.AbstractEventLoop,
     branch: str = "main",
 ) -> Tuple[Optional[UUID], str, Dict[str, EnrichmentResult]]:
-    """Enrich chunks via LLM before embedding. Returns (provider_id, model_name, chunk_hash->result)."""
+    """Enrich chunks via LLM before embedding. Returns (provider_id, model_name, chunk_hash->result).
+
+    在线 LLM 主入口：调用 LLMRouter 走远程 chat provider 生成中文语义增强。
+    未配置 provider 时整体跳过（降级），单条失败返回空，均不影响索引主链路。
+    """
     import hashlib
 
     router = LLMRouter(db)
@@ -871,7 +875,11 @@ async def _enrich_repository_async(
     file_contents: Optional[Dict[UUID, str]] = None,
     branch: str = "main",
 ) -> None:
-    """Aggregate domain synonyms and generate symbol flow labels via LLM."""
+    """Aggregate domain synonyms and generate symbol flow labels via LLM.
+
+    在线 LLM 主入口：聚合 LLM 生成的领域同义词，并为符号生成流程标签。
+    未配置 provider 时跳过对应阶段（降级为空），索引主链路不受影响。
+    """
     router = LLMRouter(db)
     providers = router._get_enabled_providers("chat")
     if not providers:

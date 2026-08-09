@@ -338,6 +338,9 @@ class Searcher:
         from schemas import CallChain, CodeContext, FileSummary, SearchMeta, SymbolEntry
 
         llm_settings = get_effective_settings(self.db, repo_id)
+        # 在线 LLM 查询扩展主开关（默认开启）：开启后 query 扩展会追加
+        # LLM 生成的中文同义词/英文代码词；关闭或 LLM 不可用时自动回落到
+        # QueryIntentAnalyzer 的本地模板层（SEMANTIC_MAP/领域同义词）兜底。
         enable_query_llm_expand = llm_settings.get("enable_query_llm_expand", True)
         llm_router = LLMRouter(self.db) if enable_query_llm_expand else None
 
