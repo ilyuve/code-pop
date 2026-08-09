@@ -13,13 +13,15 @@ from sqlalchemy.orm import Session
 from config import settings
 from database import get_db
 from models import Repository
+from api.repos import _normalize_git_url
 from services.repo_sync import _sync_repo_branches
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["webhook"])
 
 
-def _verify_signature(payload: bytes, signature: Optional[str]) -> bool:
+def _verify_github_signature(payload: bytes, signature: Optional[str]) -> bool:
+    """校验 GitHub X-Hub-Signature-256（HMAC-SHA256）。未配置 secret 时免校验。"""
     secret = settings.github_webhook_secret
     if not secret:
         return True
@@ -29,8 +31,27 @@ def _verify_signature(payload: bytes, signature: Optional[str]) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def _verify_gitee_token(x_gitee_token: Optional[str]) -> bool:
+    """校验 Gitee X-Gitee-Token（WebHooks 配置里设置的密码）。未配置 token 时免校验。"""
+    token = settings.gitee_webhook_token
+    if not token:
+        return True
+    if not x_gitee_token:
+        return False
+    return hmac.compare_digest(token, x_gitee_token)
+
+
 def _find_repo(db: Session, clone_url: str) -> Optional[Repository]:
-    return db.query(Repository).filter(Repository.git_url == clone_url).first()
+    """按归一化 git 地址匹配仓库（容忍 .git 后缀/大小写差异）。
+
+    GitHub/Gitee webhook 的 clone_url 通常带 .git，而仓库入库时可能不带，
+    直接用精确相等会漏匹配，因此统一走归一化比较。
+    """
+    normalized = _normalize_git_url(clone_url)
+    for repo in db.query(Repository).all():
+        if repo.git_url and _normalize_git_url(repo.git_url) == normalized:
+            return repo
+    return None
 
 
 @router.post("/webhook/github", status_code=status.HTTP_202_ACCEPTED)
@@ -39,19 +60,29 @@ async def github_webhook(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     x_hub_signature_256: Optional[str] = Header(None),
+    x_gitee_token: Optional[str] = Header(None),
+    x_gitee_event: Optional[str] = Header(None),
 ) -> dict:
     payload = await request.body()
-    if not _verify_signature(payload, x_hub_signature_256):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+
+    # GitHub 走 HMAC 签名校验；Gitee 走 X-Gitee-Token 校验（同一端点复用）。
+    is_gitee = bool(x_gitee_token) or bool(x_gitee_event)
+    if is_gitee:
+        if not _verify_gitee_token(x_gitee_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
+        event_type = (x_gitee_event or "push").lower()
+    else:
+        if not _verify_github_signature(payload, x_hub_signature_256):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+        event_type = (request.headers.get("x-github-event") or "push").lower()
+
+    if event_type != "push":
+        return {"status": "ignored", "event": event_type}
 
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
-
-    event_type = request.headers.get("x-github-event", "push")
-    if event_type != "push":
-        return {"status": "ignored", "event": event_type}
 
     # 只处理 main 和 master 分支的 push
     ref = data.get("ref", "")
@@ -81,10 +112,15 @@ async def github_webhook_by_repo_id(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     x_hub_signature_256: Optional[str] = Header(None),
+    x_gitee_token: Optional[str] = Header(None),
 ) -> dict:
     """Alternative webhook URL that triggers indexing for a known repo_id."""
     payload = await request.body()
-    if not _verify_signature(payload, x_hub_signature_256):
+
+    if x_gitee_token:
+        if not _verify_gitee_token(x_gitee_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
+    elif not _verify_github_signature(payload, x_hub_signature_256):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
     repo = db.query(Repository).filter(Repository.id == repo_id).first()

@@ -43,6 +43,8 @@ class Settings(BaseSettings):
 
     # GitHub webhook
     github_webhook_secret: str = ""
+    # Gitee webhook token（在 Gitee WebHooks 配置中设置的密码，回调时以 X-Gitee-Token 请求头回传）
+    gitee_webhook_token: str = ""
 
     # Logging
     log_level: str = "INFO"

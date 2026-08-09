@@ -40,7 +40,7 @@ export const RepoDetail = () => {
   const { isIndexing, progress, stageProgress, currentStageLabel, timing, error: indexingError, logs } = useIndexing(id!, repo);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-  const [showLogs, setShowLogs] = useState(false);
+  const [showLogs, setShowLogs] = useState(true);
   const [isCanceling, setIsCanceling] = useState(false);
   const [showBranchModal, setShowBranchModal] = useState(false);
   const [activeBranchesInput, setActiveBranchesInput] = useState('');
@@ -496,49 +496,49 @@ export const RepoDetail = () => {
               <span>{indexingError}</span>
             </div>
           )}
-
-          {/* Logs Section */}
-          <div className="border-t border-slate-200 dark:border-slate-700 pt-4">
-            <button
-              onClick={() => setShowLogs(!showLogs)}
-              className="flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
-            >
-              <Terminal className="w-4 h-4" />
-              索引日志
-              {logs.length > 0 && (
-                <span className="px-2 py-0.5 text-xs bg-slate-100 dark:bg-slate-700 rounded-full">
-                  {logs.length}
-                </span>
-              )}
-              {showLogs ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
-            {showLogs && (
-              <div
-                ref={logsContainerRef}
-                className="mt-3 h-48 overflow-y-auto bg-[#1A1A2E] rounded-lg border-2 border-[#2D2D2D] p-4 font-mono text-xs space-y-2"
-              >
-                {logs.length === 0 ? (
-                  <p className="text-slate-400">暂无日志信息</p>
-                ) : (
-                  logs.map((log, idx) => (
-                    <div key={idx} className="flex items-start gap-2">
-                      {getLogIcon(log.level)}
-                      <div className="flex-1">
-                        <span className="text-slate-500 mr-2">
-                          {new Date(log.timestamp).toLocaleTimeString()}
-                        </span>
-                        <span className={getLogLevelColor(log.level)}>
-                          {log.message}
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
         </div>
       )}
+
+      {/* Logs Section（索引中与索引完成均显示，默认展开） */}
+      <div className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D] p-6">
+        <button
+          onClick={() => setShowLogs(!showLogs)}
+          className="flex items-center gap-2 text-sm font-bold text-[#2D2D2D] hover:text-[#ff3d8a] transition-colors"
+        >
+          <Terminal className="w-4 h-4" />
+          索引日志
+          {logs.length > 0 && (
+            <span className="px-2 py-0.5 text-xs bg-[#2ad4ff] border-2 border-[#2D2D2D] rounded-full font-bold">
+              {logs.length}
+            </span>
+          )}
+          {showLogs ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+        </button>
+        {showLogs && (
+          <div
+            ref={logsContainerRef}
+            className="mt-3 h-48 overflow-y-auto bg-[#e8f4ff] rounded-lg border-2 border-[#2D2D2D] p-4 font-mono text-xs space-y-2"
+          >
+            {logs.length === 0 ? (
+              <p className="text-[#999]">暂无日志信息</p>
+            ) : (
+              logs.map((log, idx) => (
+                <div key={idx} className="flex items-start gap-2">
+                  {getLogIcon(log.level)}
+                  <div className="flex-1">
+                    <span className="text-[#999] mr-2">
+                      {new Date(log.timestamp).toLocaleTimeString()}
+                    </span>
+                    <span className={getLogLevelColor(log.level)}>
+                      {log.message}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Error Message */}
       {repo.status === 'error' && repo.errorMessage && (
@@ -616,16 +616,16 @@ export const RepoDetail = () => {
             <div className="mt-4 border-t border-red-200 dark:border-red-800 pt-4">
               <div
                 ref={logsContainerRef}
-                className="h-48 overflow-y-auto bg-slate-50 dark:bg-slate-900 rounded-lg p-4 font-mono text-xs space-y-2"
+                className="h-48 overflow-y-auto bg-[#e8f4ff] rounded-lg p-4 font-mono text-xs space-y-2"
               >
                 {logs.length === 0 ? (
-                  <p className="text-slate-500 dark:text-slate-400">暂无日志信息</p>
+                  <p className="text-[#999]">暂无日志信息</p>
                 ) : (
                   logs.map((log, idx) => (
                     <div key={idx} className="flex items-start gap-2">
                       {getLogIcon(log.level)}
                       <div className="flex-1">
-                        <span className="text-slate-400 mr-2">
+                        <span className="text-[#999] mr-2">
                           {new Date(log.timestamp).toLocaleTimeString()}
                         </span>
                         <span className={getLogLevelColor(log.level)}>
