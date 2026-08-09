@@ -41,6 +41,7 @@ class Repository(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     git_url = Column(String(512), nullable=True)
+    description = Column(String(512), nullable=True)  # 仓库简介（从远程 API 拉取，失败为空）
     local_path = Column(String(512), nullable=False)
     status = Column(String(32), default=RepoStatus.pending.value, nullable=False)
     error_message = Column(Text, nullable=True)

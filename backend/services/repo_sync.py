@@ -349,6 +349,21 @@ def _get_sync_lock(repo_id: str) -> asyncio.Lock:
     return _sync_locks[repo_id]
 
 
+def _log_sync(db, repo_id, message: str, stage: str = "sync") -> None:
+    """Write a sync-related message into indexing_logs so the UI can show it."""
+    from models import IndexingLog
+
+    try:
+        db.add(IndexingLog(repo_id=repo_id, level="info", stage=stage, message=message))
+        db.commit()
+    except Exception as exc:
+        logger.warning("Failed to write sync log for %s: %s", repo_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _cleanup_branch_index(db, repo, branch: str) -> None:
     """Delete all indexed data and the local clone for a business branch.
 
@@ -413,6 +428,7 @@ def _cleanup_branch_index(db, repo, branch: str) -> None:
         setattr(repo, field, json.dumps(value))
 
     db.commit()
+    _log_sync(db, repo.id, f"删除业务分支 {branch} 的索引数据（含本地代码副本）", stage="branch")
     logger.info("Cleaned up index data for deactivated branch %s of repo %s", branch, repo.id)
 
     # Remove the local shallow clone for the branch (guarded against path
@@ -463,10 +479,21 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             if not repo:
                 return {"status": "error", "repo_id": repo_id_str, "message": "repo not found"}
 
+            # 存量仓库简介回填：description 为空时尝试从远程 API 拉取（失败降级为空）。
+            if not repo.description and repo.git_url:
+                try:
+                    from api.repos import _fetch_repo_description
+                    repo.description = _fetch_repo_description(repo.git_url) or None
+                    db.commit()
+                except Exception as exc:
+                    logger.warning("Failed to backfill description for %s: %s", repo_id, exc)
+                    db.rollback()
+
             active_branches = json.loads(repo.active_branches or "[]") or [repo.default_branch]
             branch_commits = json.loads(repo.branch_commits or "{}")
             updated_branches: List[dict] = []
             default_branch = repo.default_branch
+            _log_sync(db, repo_id, "开始增量同步，检查远程仓库是否有更新", stage="sync")
 
             # 1. Sync default branch (main/master)
             main_path = get_repo_local_path(repo, default_branch)
@@ -480,6 +507,7 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
 
             if main_changed:
                 from_commit = branch_commits.get(default_branch)
+                _log_sync(db, repo_id, f"检测到 {default_branch} 分支有更新，开始增量索引", stage="sync")
                 logger.info("[SYNC TRACE] indexing default branch %s", default_branch)
                 await index_repo(repo_id, branch=default_branch)
                 branch_commits[default_branch] = main_commit
@@ -500,6 +528,7 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
                 current_commit = await asyncio.to_thread(_get_current_commit, local_path)
                 if branch_commits.get(branch) != current_commit or main_changed:
                     from_commit = branch_commits.get(branch)
+                    _log_sync(db, repo_id, f"业务分支 {branch} 有更新，开始 diff 增量索引", stage="sync")
                     await index_repo(repo_id, branch=branch)
                     branch_commits[branch] = current_commit
                     repo.branch_commits = json.dumps(branch_commits)
@@ -514,6 +543,15 @@ async def _sync_repo_branches(repo_id: UUID) -> dict:
             repo.error_message = None
             repo.last_indexed_at = datetime.utcnow()
             db.commit()
+
+            if updated_branches:
+                _log_sync(
+                    db, repo_id,
+                    f"增量同步完成，更新分支：{', '.join(u['branch'] for u in updated_branches)}",
+                    stage="sync",
+                )
+            else:
+                _log_sync(db, repo_id, "无分支变更，跳过增量同步", stage="sync")
 
             result = {
                 "status": "done",

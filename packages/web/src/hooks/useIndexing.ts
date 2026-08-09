@@ -62,7 +62,9 @@ export const useIndexing = (repoId: string, repo: RepoData | undefined) => {
   const { data: logs } = useQuery({
     queryKey: ['indexingLogs', repoId],
     queryFn: () => fetchIndexingLogs(repoId),
-    enabled: !!repoId && (isIndexing || repo?.status === 'error'),
+    // 仓库存在即查询，便于分支配置/增量同步后 invalidate 立即拉取新日志
+    //（索引中仍每 2s 自动轮询）。
+    enabled: !!repoId,
     refetchInterval: isIndexing ? 2000 : false,
   });
 

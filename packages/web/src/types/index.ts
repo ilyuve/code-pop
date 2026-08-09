@@ -4,6 +4,7 @@ export interface Repo {
   name: string;
   path: string;
   gitUrl?: string;
+  description?: string;
   status: 'indexing' | 'indexed' | 'completed' | 'error';
   errorMessage?: string;
   totalFiles: number;

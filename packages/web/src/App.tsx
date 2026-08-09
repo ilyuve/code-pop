@@ -76,14 +76,26 @@ function GlobalSocketBridge() {
 
       if (msg.progress !== undefined) {
         // Keep the detail-page progress query in sync with the push so both
-        // the card and the detail view show identical numbers.
+        // the card and the detail view show identical numbers. WS messages
+        // carry a single stage's stage_progress; merge it into the dict keyed
+        // by stage name (matching GET /api/repos/{id}/progress shape) so
+        // useIndexing can resolve stage_progress[current_stage].
         queryClient.setQueryData(['indexingProgress', msg.repoId], (old: unknown) => {
           const base = old && typeof old === 'object' ? (old as Record<string, unknown>) : {};
+          const rawSp = base.stage_progress;
+          const sp =
+            rawSp && typeof rawSp === 'object' && !Array.isArray(rawSp)
+              ? { ...(rawSp as Record<string, unknown>) }
+              : {};
+          const mergedSp =
+            msg.stage && msg.stage_progress
+              ? { ...sp, [msg.stage]: msg.stage_progress }
+              : sp;
           return {
             ...base,
             overall_progress: msg.progress,
             current_stage: msg.stage ?? base.current_stage ?? null,
-            stage_progress: msg.stage_progress ?? base.stage_progress ?? {},
+            stage_progress: mergedSp,
           };
         });
       }

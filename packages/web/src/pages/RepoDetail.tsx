@@ -2,7 +2,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
-  FolderGit2,
   RefreshCw,
   Trash2,
   Clock,
@@ -24,15 +23,18 @@ import {
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
+import { RepoProviderIcon } from '../components/RepoProviderIcon';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
 import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing, previewRepoBranches } from '../api';
 import type { BranchPreview } from '../api';
 import { clsx } from 'clsx';
 import { useState, useRef, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 
 export const RepoDetail = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { deleteRepo, reindex, updateRepo, isDeleting, isReindexing, isUpdating } = useRepos();
   const { data: repo, isLoading, error } = useRepo(id!);
   const { isIndexing, progress, stageProgress, currentStageLabel, timing, error: indexingError, logs } = useIndexing(id!, repo);
@@ -46,7 +48,16 @@ export const RepoDetail = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
+  const [saveNotice, setSaveNotice] = useState('');
   const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  const showTemporaryNotice = (text: string) => {
+    setSaveNotice(text);
+    // 刷新仓库信息与索引日志（即使仓库处于 indexed 也会重新拉取）
+    queryClient.invalidateQueries({ queryKey: ['repo', id] });
+    queryClient.invalidateQueries({ queryKey: ['indexingLogs', id] });
+    window.setTimeout(() => setSaveNotice(''), 6000);
+  };
 
   useEffect(() => {
     if (showLogs && logsContainerRef.current) {
@@ -120,6 +131,7 @@ export const RepoDetail = () => {
 
   const handleReindex = () => {
     reindex(id!);
+    showTemporaryNotice('已触发增量同步，请查看下方日志确认执行结果');
   };
 
   const handleOpenBranchModal = () => {
@@ -176,6 +188,9 @@ export const RepoDetail = () => {
       {
         onSuccess: () => {
           setShowBranchModal(false);
+          showTemporaryNotice(
+            '业务分支配置已保存，已触发增量同步（删除/重建分支索引），请查看下方日志'
+          );
         },
       }
     );
@@ -286,20 +301,53 @@ export const RepoDetail = () => {
         返回仓库列表
       </button>
 
+      {saveNotice && (
+        <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl px-4 py-3">
+          <Info className="w-4 h-4 shrink-0" />
+          {saveNotice}
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
         <div className="flex items-start justify-between mb-6">
           <div className="flex items-center gap-4">
-            <div className="p-3 bg-indigo-100 dark:bg-indigo-900/30 rounded-xl">
-              <FolderGit2 className="w-8 h-8 text-indigo-600 dark:text-indigo-400" />
-            </div>
+            <RepoProviderIcon
+              gitUrl={repo.gitUrl}
+              containerClassName="p-3 rounded-xl"
+              className="w-8 h-8"
+            />
             <div>
               <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
                 {repo.name}
               </h1>
-              <p className="text-slate-500 dark:text-slate-400 mt-1">
+              {repo.description && (
+                <p className="text-slate-500 dark:text-slate-400 mt-1 max-w-lg">
+                  {repo.description}
+                </p>
+              )}
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
                 {repo.path}
               </p>
+              {/* 已索引分支（与列表卡片一致） */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800" title="默认分支">
+                  <GitBranch className="w-3 h-3" />
+                  {repo.defaultBranch}
+                </span>
+                {repo.activeBranches
+                  .filter((b) => b !== repo.defaultBranch)
+                  .slice(0, 2)
+                  .map((branch) => (
+                    <span
+                      key={branch}
+                      className="text-xs px-2 py-0.5 rounded-full border bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600"
+                      title="业务分支"
+                    >
+                      {branch}
+                    </span>
+                  ))}
+              </div>
             </div>
           </div>
           <StatusBadge status={repo.status} />

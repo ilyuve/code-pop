@@ -27,6 +27,7 @@ class RepoResponse(BaseModel):
     id: UUID
     name: str
     git_url: str
+    description: Optional[str] = None
     local_path: str
     status: str
     error_message: Optional[str] = None

@@ -27,6 +27,38 @@ from services.repo_sync import (
 logger = logging.getLogger(__name__)
 
 
+def _fetch_repo_description(git_url: str) -> str:
+    """从 GitHub/Gitee API 拉取仓库简介，失败或非公开仓库时降级为空串。"""
+    import urllib.parse
+    import urllib.request
+
+    try:
+        parsed = urllib.parse.urlparse(git_url)
+        host = (parsed.netloc or "").lower().replace("www.", "")
+        path = parsed.path.strip("/").removesuffix(".git").rstrip("/")
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2:
+            return ""
+        owner, repo_name = parts[0], parts[1]
+        if host == "github.com":
+            api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+        elif host == "gitee.com":
+            api_url = f"https://gitee.com/api/v5/repos/{owner}/{repo_name}"
+        else:
+            return ""
+        req = urllib.request.Request(
+            api_url,
+            headers={"User-Agent": "CodePop/1.0", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        desc = (data.get("description") or "").strip()
+        return desc[:500]
+    except Exception as exc:
+        logger.warning("Failed to fetch repo description for %s: %s", git_url, exc)
+        return ""
+
+
 def _format_dt(dt: Optional[datetime]) -> Optional[str]:
     """Format a naive UTC datetime as ISO 8601 with explicit +00:00 offset."""
     if dt is None:
@@ -89,6 +121,7 @@ async def create_repo(
     repo = Repository(
         name=payload.name,
         git_url=payload.git_url or "",
+        description=_fetch_repo_description(payload.git_url) if payload.git_url else None,
         local_path=local_path,
         status=RepoStatus.pending.value,
         default_branch=default_branch,

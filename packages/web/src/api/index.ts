@@ -29,6 +29,7 @@ const mapRepo = (data: any): Repo => ({
   name: data.name,
   path: data.local_path || data.path || '',
   gitUrl: data.git_url || data.gitUrl,
+  description: data.description || '',
   status: mapStatus(data.status),
   errorMessage: data.error_message || data.errorMessage,
   totalFiles: data.total_files || 0,
