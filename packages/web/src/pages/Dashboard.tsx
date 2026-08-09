@@ -30,7 +30,7 @@ export const Dashboard = () => {
 
   const totalFiles = repos.reduce((acc, r) => acc + (r.fileCount || 0), 0);
   const totalSymbols = repos.reduce((acc, r) => acc + (r.symbolCount || 0), 0);
-  const indexedRepos = repos.filter(r => r.status === 'indexed').length;
+  const indexedRepos = repos.filter(r => r.status === 'completed').length;
 
   const stats = [
     {
@@ -281,11 +281,11 @@ export const Dashboard = () => {
                       <span
                         className="px-2 py-1 rounded-lg text-xs font-bold"
                         style={{
-                          background: repo.status === 'indexed' ? '#6effb020' : '#fff34d20',
-                          color: repo.status === 'indexed' ? '#2D2D2D' : '#2D2D2D',
+                          background: repo.status === 'completed' ? '#6effb020' : '#fff34d20',
+                          color: repo.status === 'completed' ? '#2D2D2D' : '#2D2D2D',
                         }}
                       >
-                        {repo.status === 'indexed' ? '已索引' : '索引中'}
+                        {repo.status === 'completed' ? '已索引' : '索引中'}
                       </span>
                     </div>
                   </div>

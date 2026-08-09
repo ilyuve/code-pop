@@ -1,5 +1,3 @@
-version: '3.8'
-
 # 评委演示专用：使用 GHCR 预构建镜像，无需本地构建，无需访问 Docker Hub。
 # 配套文档见 DEMO_DEPLOY.md
 
@@ -23,11 +21,26 @@ services:
     networks:
       - codepop-network
 
+  redis:
+    image: redis:7-alpine
+    container_name: codepop-redis
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - codepop-network
+
   backend:
-    image: ghcr.io/ilyuve/codepop-backend:demo
+    image: ghcr.io/ilyuve/codepop-backend:latest
     container_name: codepop-backend
     environment:
       DATABASE_URL: postgresql://postgres:codepop123@postgres:5432/codepop
+      REDIS_URL: redis://redis:6379/0
       REPOS_DIR: /app/repos
       API_HOST: 0.0.0.0
       API_PORT: 8080
@@ -48,7 +61,7 @@ services:
       - codepop-network
 
   web:
-    image: ghcr.io/ilyuve/codepop-web:demo
+    image: ghcr.io/ilyuve/codepop-web:latest
     container_name: codepop-web
     ports:
       - "3000:3000"

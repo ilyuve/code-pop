@@ -39,6 +39,7 @@ class RepoResponse(BaseModel):
     updated_at: datetime
     total_files: int = 0
     indexed_files: int = 0
+    symbol_count: int = 0
 
     @field_validator("active_branches", mode="before")
     @classmethod

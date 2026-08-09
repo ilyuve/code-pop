@@ -47,7 +47,7 @@ export const Sidebar = () => {
         </div>
         {sidebarOpen && (
           <div className="flex flex-col">
-            <span className="font-black text-lg tracking-tight">CodePop</span>
+            <span className="font-black text-lg tracking-tight">Code:Pop</span>
             <span className="text-xs text-[#666] font-medium">代码波普</span>
           </div>
         )}

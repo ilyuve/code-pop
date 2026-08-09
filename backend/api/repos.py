@@ -75,6 +75,13 @@ def _attach_counts(db: Session, repo: Repository) -> Repository:
     """Attach transient count attributes for Pydantic serialization."""
     repo.total_files = db.query(CodeFile).filter(CodeFile.repo_id == repo.id).count()
     repo.indexed_files = repo.total_files
+    # 符号数按主分支统计，避免业务分支 diff 索引重复计入
+    default_branch = repo.default_branch or "main"
+    repo.symbol_count = (
+        db.query(Symbol)
+        .filter(Symbol.repo_id == repo.id, Symbol.branch == default_branch)
+        .count()
+    )
     return repo
 
 

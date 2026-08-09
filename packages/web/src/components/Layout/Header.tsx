@@ -13,7 +13,7 @@ const routeTitles: Record<string, string> = {
 export const Header = () => {
   const location = useLocation();
   const { sidebarOpen, toggleSidebar, wsStatus } = useStore();
-  const title = routeTitles[location.pathname] || 'CodePop';
+  const title = routeTitles[location.pathname] || 'Code:Pop';
 
   const statusConfig: Record<string, {
     icon: typeof Wifi;
@@ -25,41 +25,41 @@ export const Header = () => {
   }> = {
     connected: {
       icon: Wifi,
-      color: 'text-green-500',
-      bgColor: 'bg-green-500/10',
+      color: 'text-[#2D2D2D]',
+      bgColor: 'bg-[#6effb0] border-2 border-[#2D2D2D]',
       label: '已连接',
-      dotColor: 'bg-green-500',
+      dotColor: 'bg-[#2D2D2D]',
     },
     connecting: {
       icon: Loader2,
-      color: 'text-yellow-500',
-      bgColor: 'bg-yellow-500/10',
+      color: 'text-[#2D2D2D]',
+      bgColor: 'bg-[#fff34d] border-2 border-[#2D2D2D]',
       label: '连接中',
-      dotColor: 'bg-yellow-500',
+      dotColor: 'bg-[#2D2D2D]',
       animate: true,
     },
     disconnected: {
       icon: WifiOff,
-      color: 'text-red-500',
-      bgColor: 'bg-red-500/10',
+      color: 'text-white',
+      bgColor: 'bg-[#ff3d8a] border-2 border-[#2D2D2D]',
       label: '未连接',
-      dotColor: 'bg-red-500',
+      dotColor: 'bg-white',
     },
   };
 
   const config = statusConfig[wsStatus];
 
   return (
-    <header className="sticky top-0 z-30 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
+    <header className="sticky top-0 z-30 bg-white border-b-2 border-[#2D2D2D]">
       <div className="flex items-center justify-between px-6 py-4">
         <div className="flex items-center gap-4">
           <button
             onClick={toggleSidebar}
-            className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 lg:hidden"
+            className="p-2 rounded-lg hover:bg-[#F5F5F0] border-2 border-transparent hover:border-[#2D2D2D] lg:hidden"
           >
             <Menu className="w-5 h-5" />
           </button>
-          <h1 className="text-xl font-semibold text-slate-900 dark:text-white">
+          <h1 className="text-xl font-black text-[#2D2D2D]">
             {title}
           </h1>
         </div>
@@ -68,7 +68,7 @@ export const Header = () => {
           {/* WebSocket Status Indicator */}
           <div
             className={clsx(
-              'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all',
+              'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold transition-all',
               config.bgColor,
               config.color
             )}
@@ -92,7 +92,7 @@ export const Header = () => {
 
           <Link
             to="/search"
-            className="px-4 py-2 text-sm bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors"
+            className="px-4 py-2 text-sm bg-[#2ad4ff] hover:bg-[#4adee0] text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] rounded-lg transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[5px_5px_0_#2D2D2D] font-bold"
           >
             快速搜索
           </Link>

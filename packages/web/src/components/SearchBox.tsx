@@ -56,7 +56,7 @@ export const SearchBox = ({
           <Search
             className={clsx(
               'absolute left-4 w-5 h-5 transition-colors z-10',
-              isFocused ? 'text-indigo-500' : 'text-slate-400'
+              isFocused ? 'text-[#ff3d8a]' : 'text-[#999]'
             )}
           />
           <input
@@ -67,31 +67,31 @@ export const SearchBox = ({
             onBlur={() => setIsFocused(false)}
             placeholder={placeholder}
             className={clsx(
-              'flex-1 pl-12 pr-20 py-3 bg-white dark:bg-slate-800 border-2 rounded-l-xl',
-              'text-slate-900 dark:text-white placeholder-slate-400',
+              'flex-1 pl-12 pr-20 py-3 bg-white border-2 rounded-l-xl',
+              'text-[#2D2D2D] placeholder-[#999] font-medium',
               'transition-all duration-200',
               isFocused
-                ? 'border-indigo-500 shadow-lg shadow-indigo-500/20'
-                : 'border-slate-200 dark:border-slate-700'
+                ? 'border-[#2ad4ff] shadow-[4px_4px_0_#2ad4ff]'
+                : 'border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D]'
             )}
           />
           {value && (
             <button
               type="button"
               onClick={handleClear}
-              className="absolute right-18 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"
+              className="absolute right-18 p-1 hover:bg-[#F5F5F0] rounded-full transition-colors"
             >
-              <X className="w-4 h-4 text-slate-400" />
+              <X className="w-4 h-4 text-[#666]" />
             </button>
           )}
           <button
             type="submit"
             disabled={isSearching || !value.trim()}
             className={clsx(
-              'px-6 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400',
-              'text-white font-medium rounded-r-xl transition-colors',
-              'border-2 border-indigo-600 border-l-0',
-              isFocused && !isSearching && value.trim() && 'shadow-lg shadow-indigo-500/20'
+              'px-6 py-3 bg-[#ff3d8a] hover:bg-[#ff5c9d] disabled:bg-slate-200',
+              'text-white font-bold rounded-r-xl transition-all duration-200',
+              'border-2 border-[#2D2D2D] border-l-0',
+              !isSearching && value.trim() && 'shadow-[4px_4px_0_#2D2D2D] hover:translate-y-[-2px]'
             )}
           >
             {isSearching ? (
@@ -104,15 +104,15 @@ export const SearchBox = ({
       </form>
 
       {isFocused && recentSearches.length > 0 && !value && (
-        <div className="absolute top-full left-0 right-0 mt-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl overflow-hidden z-50">
-          <div className="px-4 py-2 text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">
+        <div className="absolute top-full left-0 right-0 mt-2 bg-white border-2 border-[#2D2D2D] rounded-xl shadow-[6px_6px_0_rgba(45,45,45,0.3)] overflow-hidden z-50">
+          <div className="px-4 py-2 text-xs font-bold text-[#666] uppercase border-b-2 border-[#2D2D2D] bg-[#F5F5F0]">
             最近搜索
           </div>
           {recentSearches.slice(0, 5).map((term, index) => (
             <button
               key={index}
               onClick={() => handleQuickSearch(term)}
-              className="w-full px-4 py-2.5 text-left hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-700 dark:text-slate-200 transition-colors"
+              className="w-full px-4 py-2.5 text-left hover:bg-[#fff34d] text-[#2D2D2D] transition-colors font-medium"
             >
               {term}
             </button>
@@ -121,7 +121,7 @@ export const SearchBox = ({
       )}
 
       {isSearching && (
-        <div className="absolute top-full left-0 right-0 mt-2 px-4 py-3 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 text-sm rounded-lg">
+        <div className="absolute top-full left-0 right-0 mt-2 px-4 py-3 bg-[#2ad4ff] text-[#2D2D2D] text-sm rounded-lg border-2 border-[#2D2D2D] font-bold">
           搜索中...
         </div>
       )}
