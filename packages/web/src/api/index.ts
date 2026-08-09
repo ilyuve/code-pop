@@ -159,6 +159,23 @@ export const cancelIndexing = async (id: string): Promise<void> => {
   await apiClient.post(`/repos/${id}/cancel`);
 };
 
+// Webhook 绑定（仓库级密钥）
+export interface RepoWebhookInfo {
+  repo_id: string;
+  webhook_token: string;
+  webhook_url: string;
+}
+
+export const getRepoWebhook = async (id: string): Promise<RepoWebhookInfo> => {
+  const response = await apiClient.get(`/repos/${id}/webhook`);
+  return response.data;
+};
+
+export const generateRepoWebhookToken = async (id: string): Promise<RepoWebhookInfo> => {
+  const response = await apiClient.post(`/repos/${id}/webhook/token`);
+  return response.data;
+};
+
 // Search APIs
 export interface SearchCodeResponse {
   results: SearchResult[];

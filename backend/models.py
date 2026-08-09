@@ -55,6 +55,8 @@ class Repository(Base):
     branch_commits = Column(Text, default="{}", nullable=False)  # JSON: {"main": "abc...", "feature-A": "def..."}
     branch_deleted_files = Column(Text, default="{}", nullable=False)  # JSON: {"feature-A": ["src/x.py"]}
     sync_mode = Column(String(32), default="auto", nullable=False)  # auto / manual
+    # 仓库级 webhook 密钥（每仓库独立，优先于全局 GITHUB_WEBHOOK_SECRET / GITEE_WEBHOOK_TOKEN）
+    webhook_token = Column(String(128), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

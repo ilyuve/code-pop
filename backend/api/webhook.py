@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["webhook"])
 
 
-def _verify_github_signature(payload: bytes, signature: Optional[str]) -> bool:
-    """校验 GitHub X-Hub-Signature-256（HMAC-SHA256）。未配置 secret 时免校验。"""
-    secret = settings.github_webhook_secret
+def _verify_github_signature(payload: bytes, signature: Optional[str], secret: Optional[str] = None) -> bool:
+    """校验 GitHub X-Hub-Signature-256（HMAC-SHA256）。secret 缺省时用全局配置，未配置则免校验。"""
+    secret = secret or settings.github_webhook_secret
     if not secret:
         return True
     if not signature:
@@ -31,9 +31,9 @@ def _verify_github_signature(payload: bytes, signature: Optional[str]) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def _verify_gitee_token(x_gitee_token: Optional[str]) -> bool:
-    """校验 Gitee X-Gitee-Token（WebHooks 配置里设置的密码）。未配置 token 时免校验。"""
-    token = settings.gitee_webhook_token
+def _verify_gitee_token(x_gitee_token: Optional[str], token: Optional[str] = None) -> bool:
+    """校验 Gitee X-Gitee-Token。token 缺省时用全局配置，未配置则免校验。"""
+    token = token or settings.gitee_webhook_token
     if not token:
         return True
     if not x_gitee_token:
@@ -65,26 +65,11 @@ async def github_webhook(
 ) -> dict:
     payload = await request.body()
 
-    # GitHub 走 HMAC 签名校验；Gitee 走 X-Gitee-Token 校验（同一端点复用）。
-    is_gitee = bool(x_gitee_token) or bool(x_gitee_event)
-    if is_gitee:
-        if not _verify_gitee_token(x_gitee_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
-        event_type = (x_gitee_event or "push").lower()
-    else:
-        if not _verify_github_signature(payload, x_hub_signature_256):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
-        event_type = (request.headers.get("x-github-event") or "push").lower()
-
-    if event_type != "push":
-        return {"status": "ignored", "event": event_type}
-
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
-    # 只处理 main / master 或该仓库已配置业务分支（active_branches）的 push
     ref = data.get("ref", "")
     branch = ref.removeprefix("refs/heads/")
     if not branch:
@@ -100,6 +85,31 @@ async def github_webhook(
     if not repo:
         logger.warning("Webhook received for unknown repository: %s", clone_url)
         return {"status": "ignored", "reason": "repository not registered"}
+
+    # 验签：仓库级 webhook_token 优先；未配置则回退全局密钥
+    repo_token = getattr(repo, "webhook_token", None)
+    if repo_token:
+        if x_gitee_token:
+            if not _verify_gitee_token(x_gitee_token, repo_token):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
+            event_type = (x_gitee_event or "push").lower()
+        else:
+            if not _verify_github_signature(payload, x_hub_signature_256, repo_token):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+            event_type = (request.headers.get("x-github-event") or "push").lower()
+    else:
+        is_gitee = bool(x_gitee_token) or bool(x_gitee_event)
+        if is_gitee:
+            if not _verify_gitee_token(x_gitee_token):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
+            event_type = (x_gitee_event or "push").lower()
+        else:
+            if not _verify_github_signature(payload, x_hub_signature_256):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+            event_type = (request.headers.get("x-github-event") or "push").lower()
+
+    if event_type != "push":
+        return {"status": "ignored", "event": event_type}
 
     active_branches = json.loads(repo.active_branches or "[]") or []
     is_main_branch = branch in ("main", "master")
@@ -123,17 +133,19 @@ async def github_webhook_by_repo_id(
     x_gitee_token: Optional[str] = Header(None),
 ) -> dict:
     """Alternative webhook URL that triggers indexing for a known repo_id."""
-    payload = await request.body()
-
-    if x_gitee_token:
-        if not _verify_gitee_token(x_gitee_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
-    elif not _verify_github_signature(payload, x_hub_signature_256):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
-
     repo = db.query(Repository).filter(Repository.id == repo_id).first()
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
+
+    payload = await request.body()
+
+    # 验签：仓库级 webhook_token 优先；未配置则回退全局密钥
+    repo_token = getattr(repo, "webhook_token", None)
+    if x_gitee_token:
+        if not _verify_gitee_token(x_gitee_token, repo_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
+    elif not _verify_github_signature(payload, x_hub_signature_256, repo_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
     background_tasks.add_task(_sync_repo_branches, repo.id)
     return {"status": "accepted", "repo_id": str(repo_id)}
