@@ -14,12 +14,14 @@ RUN (sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g; s|http://secur
 # a small runtime dependency never forces a full torch re-download/re-install.
 # The Docker Desktop HTTP proxy (http.docker.internal:3128) cannot reach external
 # package indexes, so clear the proxy for the direct (working) NAT network path.
+# torch comes from the Aliyun pytorch-wheels mirror (flat wheel directory) to
+# avoid the slow/blocked download.pytorch.org on restricted networks.
 # Note: no --mount=type=cache here so the file also builds with the legacy
 # builder (DOCKER_BUILDKIT=0) when the BuildKit sandbox network is broken.
 RUN http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
     pip install --upgrade pip && \
     http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
+    pip install torch --find-links https://mirrors.aliyun.com/pytorch-wheels/cpu/ --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY requirements.txt .
 
@@ -30,8 +32,10 @@ RUN http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
 
 # Install model downloader tools. These are not strictly required at runtime
 # but make it easy to fetch BGE-M3 inside the container for offline use.
+# Use the Tsinghua mirror (same as requirements) instead of pypi.org so the
+# layer builds reliably on restricted networks.
 RUN http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
-    pip install --index-url https://pypi.org/simple uv modelscope
+    pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple uv modelscope
 
 # Patch FlagEmbedding: AutoModel.from_pretrained expects `torch_dtype`, not
 # `dtype`, with transformers 4.50. FlagEmbedding 1.2/1.3 writes `dtype=dtype`
