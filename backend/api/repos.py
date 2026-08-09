@@ -103,6 +103,35 @@ def _get_repo(db: Session, repo_id: UUID) -> Repository:
     return repo
 
 
+@router.get("/{repo_id}/webhook", response_model=dict)
+def get_repo_webhook(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """查看仓库的 webhook 配置（URL 为相对路径，前端拼接当前站点地址）。"""
+    repo = _get_repo(db, repo_id)
+    return {
+        "repo_id": str(repo.id),
+        "webhook_token": repo.webhook_token or "",
+        "webhook_url": f"/webhook/github/{repo.id}",
+    }
+
+
+@router.post("/{repo_id}/webhook/token", response_model=dict)
+def generate_repo_webhook_token(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """生成（或重置）该仓库独立的 webhook 密钥。
+
+    仓库级密钥优先于全局 GITHUB_WEBHOOK_SECRET / GITEE_WEBHOOK_TOKEN，
+    在远程平台配置 webhook 时使用同一地址 + 该密钥即可完成绑定。
+    """
+    import secrets
+    repo = _get_repo(db, repo_id)
+    repo.webhook_token = secrets.token_hex(16)
+    db.commit()
+    return {
+        "repo_id": str(repo.id),
+        "webhook_token": repo.webhook_token,
+        "webhook_url": f"/webhook/github/{repo.id}",
+    }
+
+
 @router.post("", response_model=RepoResponse, status_code=status.HTTP_201_CREATED)
 async def create_repo(
     payload: RepoCreate,

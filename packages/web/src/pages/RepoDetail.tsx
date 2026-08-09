@@ -19,14 +19,18 @@ import {
   ChevronUp,
   Settings,
   GitBranch,
+  Webhook,
+  Copy,
+  Check,
+  X,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
 import { RepoProviderIcon } from '../components/RepoProviderIcon';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
-import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing, previewRepoBranches } from '../api';
-import type { BranchPreview } from '../api';
+import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing, previewRepoBranches, getRepoWebhook, generateRepoWebhookToken } from '../api';
+import type { BranchPreview, RepoWebhookInfo } from '../api';
 import { clsx } from 'clsx';
 import { useState, useRef, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -49,6 +53,10 @@ export const RepoDetail = () => {
   const [previewError, setPreviewError] = useState('');
   const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
   const [saveNotice, setSaveNotice] = useState('');
+  const [showWebhookModal, setShowWebhookModal] = useState(false);
+  const [webhookInfo, setWebhookInfo] = useState<RepoWebhookInfo | null>(null);
+  const [webhookLoading, setWebhookLoading] = useState(false);
+  const [copiedField, setCopiedField] = useState<'url' | 'token' | null>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
 
   const showTemporaryNotice = (text: string) => {
@@ -126,6 +134,42 @@ export const RepoDetail = () => {
     if (window.confirm('确定要删除这个仓库吗？')) {
       deleteRepo(id!);
       navigate('/repos');
+    }
+  };
+
+  const openWebhookModal = async () => {
+    setShowWebhookModal(true);
+    setCopiedField(null);
+    setWebhookLoading(true);
+    try {
+      const info = await getRepoWebhook(id!);
+      setWebhookInfo(info);
+    } catch (err) {
+      console.error('Failed to load webhook info:', err);
+    } finally {
+      setWebhookLoading(false);
+    }
+  };
+
+  const handleGenerateToken = async () => {
+    setWebhookLoading(true);
+    try {
+      const info = await generateRepoWebhookToken(id!);
+      setWebhookInfo(info);
+    } catch (err) {
+      console.error('Failed to generate webhook token:', err);
+    } finally {
+      setWebhookLoading(false);
+    }
+  };
+
+  const copyText = async (field: 'url' | 'token', text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(field);
+      window.setTimeout(() => setCopiedField(null), 1500);
+    } catch (err) {
+      console.error('Copy failed:', err);
     }
   };
 
@@ -679,6 +723,13 @@ export const RepoDetail = () => {
           配置业务分支
         </button>
         <button
+          onClick={openWebhookModal}
+          className="flex items-center gap-2 px-6 py-3 bg-[#b88dff] hover:bg-[#cba7ff] text-white border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[6px_6px_0_#2D2D2D]"
+        >
+          <Webhook className="w-5 h-5" />
+          绑定 Webhook
+        </button>
+        <button
           onClick={handleDelete}
           disabled={isDeleting}
           className="flex items-center gap-2 px-6 py-3 bg-[#ffe3ef] hover:bg-[#ffd3e4] text-[#ff3d8a] border-2 border-[#ff3d8a] rounded-xl font-bold transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[4px_4px_0_#ff3d8a]"
@@ -777,6 +828,89 @@ export const RepoDetail = () => {
                 {isUpdating ? '保存中...' : '保存并同步'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Webhook Bind Modal */}
+      {showWebhookModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 border-4 border-[#2D2D2D] shadow-[8px_8px_0_rgba(45,45,45,0.4)]">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-xl font-black text-[#2D2D2D] flex items-center gap-2">
+                <Webhook className="w-5 h-5" style={{ color: '#b88dff' }} />
+                绑定 Webhook
+              </h2>
+              <button
+                onClick={() => setShowWebhookModal(false)}
+                className="p-1.5 rounded-lg border-2 border-transparent hover:border-[#2D2D2D] hover:bg-[#F5F5F0] transition-colors"
+              >
+                <X className="w-5 h-5 text-[#2D2D2D]" />
+              </button>
+            </div>
+
+            {webhookLoading && !webhookInfo ? (
+              <div className="flex justify-center py-10">
+                <LoadingSpinner />
+              </div>
+            ) : (
+              <div className="space-y-5">
+                <p className="text-sm text-[#666]">
+                  在 GitHub / Gitee 仓库配置 Webhook 后，代码 push 到主分支或已配置的业务分支会自动增量同步。将下面两项填入远程仓库的 Webhook 配置即可完成绑定。
+                </p>
+
+                <div>
+                  <p className="text-sm font-bold text-[#2D2D2D] mb-1">Webhook 地址</p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 px-3 py-2 bg-[#F5F5F0] border-2 border-[#2D2D2D] rounded-lg text-xs break-all">
+                      {webhookInfo ? `${window.location.origin}${webhookInfo.webhook_url}` : '...'}
+                    </code>
+                    <button
+                      onClick={() => webhookInfo && copyText('url', `${window.location.origin}${webhookInfo.webhook_url}`)}
+                      className="p-2 bg-[#2ad4ff] border-2 border-[#2D2D2D] rounded-lg hover:bg-[#4adee0] transition-colors"
+                      title="复制地址"
+                    >
+                      {copiedField === 'url' ? <Check className="w-4 h-4 text-[#2D2D2D]" /> : <Copy className="w-4 h-4 text-[#2D2D2D]" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-sm font-bold text-[#2D2D2D]">仓库密钥</p>
+                    <button
+                      onClick={handleGenerateToken}
+                      disabled={webhookLoading}
+                      className="text-xs font-bold text-[#b88dff] hover:underline disabled:opacity-50"
+                    >
+                      {webhookInfo?.webhook_token ? '重置密钥' : '生成密钥'}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 px-3 py-2 bg-[#F5F5F0] border-2 border-[#2D2D2D] rounded-lg text-xs font-mono break-all">
+                      {webhookInfo?.webhook_token || '（未生成，点击右上「生成密钥」）'}
+                    </code>
+                    {webhookInfo?.webhook_token && (
+                      <button
+                        onClick={() => copyText('token', webhookInfo.webhook_token)}
+                        className="p-2 bg-[#b88dff] border-2 border-[#2D2D2D] rounded-lg hover:bg-[#cba7ff] transition-colors"
+                        title="复制密钥"
+                      >
+                        {copiedField === 'token' ? <Check className="w-4 h-4 text-white" /> : <Copy className="w-4 h-4 text-white" />}
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-xs text-[#999] mt-1">密钥由系统生成，仅对该仓库生效，请妥善保管；重置后旧密钥立即失效。</p>
+                </div>
+
+                <div className="bg-[#e8f4ff] border-2 border-[#2D2D2D] rounded-xl p-4 space-y-1.5 text-sm text-[#2D2D2D]">
+                  <p className="font-black mb-1">配置步骤</p>
+                  <p>1. GitHub：仓库 Settings → Webhooks → Add webhook，粘贴地址，Secret 填密钥，事件选 push</p>
+                  <p>2. Gitee：仓库管理 → WebHooks，粘贴地址，密码填密钥，事件选 Push</p>
+                  <p>3. 完成后 push 到主分支或已配置的业务分支，将自动增量同步</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
