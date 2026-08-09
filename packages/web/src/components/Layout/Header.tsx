@@ -92,7 +92,7 @@ export const Header = () => {
 
           <Link
             to="/search"
-            className="px-4 py-2 text-sm bg-[#2ad4ff] hover:bg-[#4adee0] text-[#2D2D2D] border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] rounded-lg transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[5px_5px_0_#2D2D2D] font-bold"
+            className="px-4 py-2 text-sm bg-[#3b82f6] hover:bg-[#2563eb] text-white border-2 border-[#2D2D2D] shadow-[3px_3px_0_#2D2D2D] rounded-lg transition-all duration-200 hover:translate-y-[-2px] hover:shadow-[5px_5px_0_#2D2D2D] font-bold"
           >
             快速搜索
           </Link>

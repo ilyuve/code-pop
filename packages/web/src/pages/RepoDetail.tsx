@@ -921,7 +921,7 @@ export const RepoDetail = () => {
 
       {/* Auto Sync Config Modal */}
       {showAutoSyncModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-2xl w-full max-w-md p-6 border-4 border-[#2D2D2D] shadow-[8px_8px_0_rgba(45,45,45,0.4)]">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-xl font-black text-[#2D2D2D] flex items-center gap-2">
@@ -1010,7 +1010,7 @@ export const RepoDetail = () => {
 
       {/* Webhook Bind Modal */}
       {showWebhookModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-2xl w-full max-w-md p-6 border-4 border-[#2D2D2D] shadow-[8px_8px_0_rgba(45,45,45,0.4)]">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-xl font-black text-[#2D2D2D] flex items-center gap-2">
