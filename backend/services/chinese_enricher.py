@@ -1,8 +1,16 @@
-"""Chinese semantic enrichment for code chunks and symbols using online LLMs."""
+"""Chinese semantic enrichment for code chunks and symbols using online LLMs.
+
+主路径说明：索引阶段的中文语义增强（摘要/关键词/分层/同义词、函数流程标签）
+一律走**在线 LLM**（LLMRouter，支持多 provider 故障切换）。模板/规则仅存在于
+查询侧（QueryIntentAnalyzer 的 SEMANTIC_MAP 等）作为兜底，索引侧不做模板替代：
+单条 LLM 调用失败（网络/超时/JSON 解析错误）时该条增强被跳过（返回 None），
+不影响检索主链路（向量/BM25/符号均不依赖 LLM）。
+"""
 
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -110,7 +118,11 @@ async def enrich_chunk(
     language: str,
     repo_id: Optional[str] = None,
 ) -> Optional[EnrichmentResult]:
-    """Generate Chinese enrichment for a single code chunk."""
+    """在线 LLM 主入口：为单个代码块生成中文摘要/关键词/分层/同义词。
+
+    失败（网络/超时/JSON 解析）时返回 None，即该条不做增强、直接跳过；
+    这是「降级为空」而非模板替代，检索仍可正常进行。
+    """
     messages = [
         {"role": "system", "content": "你是一个代码语义分析助手，输出合法 JSON。"},
         {"role": "user", "content": _ENRICHMENT_PROMPT.format(content=content[:4000], language=language)},
@@ -145,7 +157,10 @@ async def enrich_symbol_flow(
     content: str,
     repo_id: Optional[str] = None,
 ) -> Optional[FlowLabelResult]:
-    """Generate flow label for a single symbol."""
+    """在线 LLM 主入口：为函数符号生成流程标签（分层/模块/中文名/IO 描述）。
+
+    失败时返回 None，跳过该符号的流程标签（降级为空），不影响主检索链路。
+    """
     messages = [
         {"role": "system", "content": "你是一个代码语义分析助手，输出合法 JSON。"},
         {
@@ -274,13 +289,22 @@ def save_symbol_flow_label(
     result: FlowLabelResult,
     provider_id: Optional[UUID] = None,
 ) -> None:
-    """Persist flow label for a symbol."""
-    label = SymbolFlowLabel(
-        symbol_id=symbol_id,
-        provider_id=provider_id,
-        layer=result.layer,
-        module=result.module,
-        chinese_name=result.chinese_name,
-        io_description=result.io_description,
-    )
-    db.add(label)
+    """Persist flow label for a symbol, updating existing label if present."""
+    existing = db.query(SymbolFlowLabel).filter(SymbolFlowLabel.symbol_id == symbol_id).first()
+    if existing:
+        existing.provider_id = provider_id
+        existing.layer = result.layer
+        existing.module = result.module
+        existing.chinese_name = result.chinese_name
+        existing.io_description = result.io_description
+        existing.updated_at = datetime.utcnow()
+    else:
+        label = SymbolFlowLabel(
+            symbol_id=symbol_id,
+            provider_id=provider_id,
+            layer=result.layer,
+            module=result.module,
+            chinese_name=result.chinese_name,
+            io_description=result.io_description,
+        )
+        db.add(label)

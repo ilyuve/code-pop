@@ -97,7 +97,11 @@ class BenchmarkService:
                     relevant += 1
         else:
             try:
-                search_results = self.searcher.hybrid_search(payload.query, payload.repo_id, 20)
+                # 传入评测目标分支（如业务分支 feature/xxx），否则 hybrid_search 默认搜 main，
+                # 会导致评测中心无法验证业务分支增量索引的效果
+                search_results = self.searcher.hybrid_search(
+                    payload.query, payload.repo_id, payload.branch, 20
+                )
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 results = search_results
                 token_consumed = self._estimate_output_tokens(search_results)
@@ -131,6 +135,7 @@ class BenchmarkService:
         run = BenchmarkRun(
             query=payload.query,
             repo_id=payload.repo_id,
+            branch=payload.branch,
             mode=payload.mode,
             latency_ms=latency_ms,
             results_count=len(results),

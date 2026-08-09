@@ -1,8 +1,11 @@
 import { Link } from 'react-router-dom';
-import { FolderGit2, RefreshCw, Trash2, Clock, GitBranch, Search, Hash, Layers, Network } from 'lucide-react';
+import { RefreshCw, Trash2, Clock, GitBranch, Search, Hash, Layers, Network } from 'lucide-react';
 import type { Repo } from '../types';
 import { StatusBadge } from './StatusBadge';
+import { RepoProviderIcon } from './RepoProviderIcon';
 import { clsx } from 'clsx';
+
+const MAX_ACTIVE_BRANCHES = 2;
 
 interface RepoCardProps {
   repo: Repo;
@@ -55,9 +58,7 @@ export const RepoCard = ({
     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 hover:shadow-lg transition-all duration-200 hover:border-indigo-200 dark:hover:border-indigo-700">
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg">
-            <FolderGit2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-          </div>
+          <RepoProviderIcon gitUrl={repo.gitUrl} />
           <div>
             <Link
               to={`/repos/${repo.id}`}
@@ -65,9 +66,38 @@ export const RepoCard = ({
             >
               {repo.name}
             </Link>
-            <p className="text-sm text-slate-500 dark:text-slate-400 truncate max-w-xs">
+            {repo.description && (
+              <p className="text-sm text-slate-500 dark:text-slate-400 truncate max-w-xs">
+                {repo.description}
+              </p>
+            )}
+            <p className="text-xs text-slate-400 dark:text-slate-500 truncate max-w-xs">
               {repo.path}
             </p>
+            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+              <span
+                className={clsx(
+                  'inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border',
+                  'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800'
+                )}
+                title="默认分支"
+              >
+                <GitBranch className="w-3 h-3" />
+                {repo.defaultBranch}
+              </span>
+              {repo.activeBranches && repo.activeBranches.length > 0 && repo.activeBranches
+                .filter((b) => b !== repo.defaultBranch)
+                .slice(0, MAX_ACTIVE_BRANCHES)
+                .map((branch) => (
+                  <span
+                    key={branch}
+                    className="text-xs px-2 py-0.5 rounded-full border bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600"
+                    title="业务分支"
+                  >
+                    {branch}
+                  </span>
+                ))}
+            </div>
           </div>
         </div>
         <StatusBadge status={repo.status} />

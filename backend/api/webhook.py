@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from database import get_db
 from models import Repository
-from services.indexer import index_repo
+from services.repo_sync import _sync_repo_branches
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["webhook"])
@@ -69,8 +69,8 @@ async def github_webhook(
         logger.warning("Webhook received for unknown repository: %s", clone_url)
         return {"status": "ignored", "reason": "repository not registered"}
 
-    background_tasks.add_task(index_repo, repo.id)
-    logger.info("Webhook triggered re-index for repo %s", repo.id)
+    background_tasks.add_task(_sync_repo_branches, repo.id)
+    logger.info("Webhook triggered branch sync for repo %s", repo.id)
     return {"status": "accepted", "repo_id": str(repo.id)}
 
 
@@ -91,5 +91,5 @@ async def github_webhook_by_repo_id(
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
 
-    background_tasks.add_task(index_repo, repo.id)
+    background_tasks.add_task(_sync_repo_branches, repo.id)
     return {"status": "accepted", "repo_id": str(repo_id)}

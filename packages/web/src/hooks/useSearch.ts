@@ -5,13 +5,21 @@ import { useStore } from '../store';
 
 export const useSearch = () => {
   const [query, setQuery] = useState('');
-  const { searchResults, setSearchResults, recentSearches, addRecentSearch } = useStore();
+  const {
+    searchResults,
+    setSearchResults,
+    searchMeta,
+    setSearchMeta,
+    recentSearches,
+    addRecentSearch,
+  } = useStore();
 
   const searchMutation = useMutation({
-    mutationFn: ({ query, repoId }: { query: string; repoId?: string }) =>
-      searchCode(query, repoId),
-    onSuccess: (results) => {
-      setSearchResults(results);
+    mutationFn: ({ query, repoId, branch }: { query: string; repoId?: string; branch?: string }) =>
+      searchCode(query, repoId, branch),
+    onSuccess: (response) => {
+      setSearchResults(response.results);
+      setSearchMeta(response.meta || null);
       if (query.trim()) {
         addRecentSearch(query);
       }
@@ -19,22 +27,24 @@ export const useSearch = () => {
   });
 
   const search = useCallback(
-    (searchQuery: string, repoId?: string) => {
+    (searchQuery: string, repoId?: string, branch?: string) => {
       setQuery(searchQuery);
-      searchMutation.mutate({ query: searchQuery, repoId });
+      searchMutation.mutate({ query: searchQuery, repoId, branch });
     },
     [searchMutation]
   );
 
   const clearResults = useCallback(() => {
     setSearchResults([]);
+    setSearchMeta(null);
     setQuery('');
-  }, [setSearchResults]);
+  }, [setSearchResults, setSearchMeta]);
 
   return {
     query,
     setQuery,
     results: searchResults,
+    meta: searchMeta,
     isSearching: searchMutation.isPending,
     error: searchMutation.error,
     search,

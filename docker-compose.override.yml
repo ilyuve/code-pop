@@ -1,13 +1,23 @@
 # Local development override: build images from source instead of pulling
 # pre-built images from GHCR. This file is automatically picked up by
 # `docker compose up` when present in the same directory as docker-compose.yml.
+#
+# Source code is volume-mounted so backend / frontend changes take effect on
+# container restart WITHOUT rebuilding images (avoids re-downloading
+# torch/transformers/model weights on restricted networks). Frontend still
+# needs `pnpm --filter @codepop/web build` on the host to refresh dist/.
 services:
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    volumes:
+      - ./backend:/app
 
   web:
     build:
       context: .
       dockerfile: packages/web/Dockerfile
+    volumes:
+      - ./packages/web/dist:/usr/share/nginx/html
+      - ./packages/web/nginx.conf:/etc/nginx/conf.d/default.conf

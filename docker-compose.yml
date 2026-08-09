@@ -19,6 +19,20 @@ services:
     networks:
       - codepop-network
 
+  redis:
+    image: redis:7-alpine
+    container_name: codepop-redis
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb"]
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - codepop-network
+
   backend:
     # Build from local source by default. The image tag is kept so the local
     # build can still be referenced as ghcr.io/ilyuve/codepop-backend:latest.
@@ -29,6 +43,7 @@ services:
     container_name: codepop-backend
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-codepop123}@postgres:5432/codepop
+      REDIS_URL: redis://redis:6379/0
       REPOS_DIR: /app/repos
       API_HOST: 0.0.0.0
       API_PORT: 8080
@@ -45,6 +60,8 @@ services:
       - "18080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - codepop-network

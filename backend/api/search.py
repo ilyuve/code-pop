@@ -24,7 +24,9 @@ from schemas import (
     SearchHistoryRecentItem,
     SearchHistoryResponse,
     SearchHistoryStats,
+    SearchMeta,
     SearchQuery,
+    SearchResponse,
     SearchResultItem,
     SymbolSearchQuery,
 )
@@ -66,18 +68,27 @@ def _record_history(
     db.commit()
 
 
-@router.post("", response_model=List[SearchResultItem])
-def search(query: SearchQuery, db: Session = Depends(get_db)) -> List[SearchResultItem]:
+@router.post("", response_model=SearchResponse)
+def search(query: SearchQuery, db: Session = Depends(get_db)) -> SearchResponse:
     if query.limit > settings.search_max_limit:
         raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
 
     start = time.perf_counter()
     searcher = Searcher(db)
-    results = searcher.hybrid_search(query.query, query.repo_id, query.limit)
+    results = searcher.hybrid_search(query.query, query.repo_id, query.branch, query.limit)
     latency_ms = int((time.perf_counter() - start) * 1000)
 
     _record_history(db, query.query, query.repo_id, query.mode, len(results), latency_ms, results)
-    return results
+    actual_branch = results[0].branch if results else query.branch
+    return SearchResponse(
+        results=results,
+        meta=SearchMeta(
+            requested_branch=query.branch,
+            actual_branch=actual_branch,
+            # 请求分支与返回结果分支不一致时，说明发生了分支回落
+            branch_fallback=bool(query.branch and actual_branch and query.branch != actual_branch),
+        ),
+    )
 
 
 @router.post("/debug", response_model=DebugSearchResponse)
@@ -107,6 +118,7 @@ def debug_search(
     context, trace = searcher.debug_search(
         query=request.query,
         repo_id=request.repo_id,
+        branch=request.branch,
         limit=request.limit,
         path_overrides=path_overrides,
         enable_llm_expand=request.enable_llm_expand,
@@ -142,7 +154,7 @@ def symbol_search(
 
     start = time.perf_counter()
     searcher = Searcher(db)
-    results = searcher.symbol_search(query.query, query.repo_id, query.limit)
+    results = searcher.symbol_search(query.query, query.repo_id, query.branch, query.limit)
     latency_ms = int((time.perf_counter() - start) * 1000)
 
     _record_history(db, query.query, query.repo_id, "symbol", len(results), latency_ms, results)
@@ -158,12 +170,16 @@ def search_context(
         raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
 
     try:
+        start = time.perf_counter()
         searcher = Searcher(db)
         context = searcher.search_with_context(
             query=query.query,
             repo_id=query.repo_id,
+            branch=query.branch,
             limit=query.limit,
         )
+        # REST 入口也补充检索耗时，与 MCP search_code 保持一致
+        context.search_latency_ms = int((time.perf_counter() - start) * 1000)
         return CodeContextResponse(context=context, success=True)
     except Exception as exc:
         return CodeContextResponse(
@@ -313,7 +329,10 @@ def search_routes(request: RouteSearchRequest, db: Session = Depends(get_db)):
     """搜索框架路由。"""
     from models import FrameworkRoute
 
-    query = db.query(FrameworkRoute).filter(FrameworkRoute.repo_id == request.repo_id)
+    query = db.query(FrameworkRoute).filter(
+        FrameworkRoute.repo_id == request.repo_id,
+        FrameworkRoute.branch == request.branch,
+    )
 
     if request.path_pattern:
         query = query.filter(FrameworkRoute.path.like(request.path_pattern.replace('*', '%')))
@@ -346,7 +365,7 @@ def analyze_impact(
 
     analyzer = ImpactAnalyzer(db)
     repo_id = UUID(request.repo_id) if request.repo_id else None
-    result = analyzer.analyze(request.symbol_name, repo_id)
+    result = analyzer.analyze(request.symbol_name, repo_id, request.branch)
     return ImpactResponse(
         symbol=result.symbol,
         file_path=result.file_path,

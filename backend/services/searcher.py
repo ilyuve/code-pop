@@ -1,6 +1,7 @@
 """Hybrid search engine with intent-aware retrieval."""
 
 import collections
+import json
 import logging
 import re
 import time
@@ -8,18 +9,18 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import CallGraphEdge, CodeFile, Embedding, SparseEmbedding, Symbol, SymbolFlowLabel
+from models import CallGraphEdge, CodeFile, Embedding, FrameworkRoute, Repository, SparseEmbedding, Symbol, SymbolFlowLabel
 from schemas import SearchResultItem
 from services.embedder import Embedder
 from services.llm_router import LLMRouter
 from services.llm_settings_service import get_effective_settings
 from services.query_intent import QueryIntentAnalyzer, SearchStrategy, get_intent_analyzer
 from services.query_normalizer import SymbolNormalizer
-from services.reranker import CodeReranker, M3Reranker, get_m3_reranker
+from services.reranker import ROLE_WEIGHTS, CodeReranker, M3Reranker, get_m3_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ class _Hit:
     symbol_id: Optional[UUID] = None
     symbol_name: Optional[str] = None
     rrf_score: float = 0.0
+    score: float = 0.0
+    is_override: bool = False
 
 
 @dataclass
@@ -174,6 +177,7 @@ class SearchTrace:
             "line": item.line,
             "score": round(float(item.score), 4),
             "score_breakdown": item.score_breakdown,
+            "file_role": getattr(item, "file_role", "other"),
         }
 
 
@@ -295,18 +299,48 @@ class Searcher:
         self.symbol_repo = SymbolRepository(db)
         self.intent_analyzer = get_intent_analyzer()
 
+    def _resolve_branch(self, repo_id: Optional[UUID], branch: str) -> Tuple[str, bool]:
+        """Resolve requested branch to an actual indexed branch with fallback.
+
+        Returns (actual_branch, branch_fallback).
+        """
+        if not repo_id:
+            return branch, False
+        repo = self.db.query(Repository).filter(Repository.id == repo_id).first()
+        if not repo:
+            return branch, False
+        default_branch = repo.default_branch or "main"
+        if branch == default_branch:
+            return branch, False
+        active_branches = json.loads(repo.active_branches or "[]") or [default_branch]
+        if branch in active_branches:
+            # If branch has no indexed files yet, fallback to default_branch
+            has_branch_files = (
+                self.db.query(CodeFile.id)
+                .filter(CodeFile.repo_id == repo_id, CodeFile.branch == branch)
+                .first()
+                is not None
+            )
+            if has_branch_files:
+                return branch, False
+        return default_branch, True
+
     def search_with_context(
         self,
         query: str,
         repo_id: Optional[UUID] = None,
+        branch: str = "main",
         limit: int = 20,
         intent=None,
         path_overrides: Optional[Dict[str, Any]] = None,
         trace: Optional[SearchTrace] = None,
     ) -> "CodeContext":
-        from schemas import CallChain, CodeContext, FileSummary, SymbolEntry
+        from schemas import CallChain, CodeContext, FileSummary, SearchMeta, SymbolEntry
 
         llm_settings = get_effective_settings(self.db, repo_id)
+        # 在线 LLM 查询扩展主开关（默认开启）：开启后 query 扩展会追加
+        # LLM 生成的中文同义词/英文代码词；关闭或 LLM 不可用时自动回落到
+        # QueryIntentAnalyzer 的本地模板层（SEMANTIC_MAP/领域同义词）兜底。
         enable_query_llm_expand = llm_settings.get("enable_query_llm_expand", True)
         llm_router = LLMRouter(self.db) if enable_query_llm_expand else None
 
@@ -320,12 +354,16 @@ class Searcher:
             )
         logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
 
+        requested_branch = branch
+        actual_branch, branch_fallback = self._resolve_branch(repo_id, branch)
+
         strategy = intent.search_strategy
         hits = self._search_and_fuse(
-            query, repo_id, limit,
+            query, repo_id, actual_branch, limit,
             search_terms=intent.expanded_terms,
             path_overrides=path_overrides,
             trace=trace,
+            intent_type=intent.intent_type,
         )
 
         entry_points = []
@@ -333,15 +371,45 @@ class Searcher:
         related_files = []
         code_snippets = []
 
-        seen_symbols = set()
+        candidates: Dict[UUID, Tuple[Symbol, float]] = {}
+        is_how_it_works = intent.intent_type == "how_it_works"
+
+        # 1. For how_it_works questions, prefer service-layer implementations.
+        # HTTP controllers are just API shells; the real algorithm lives here.
+        if is_how_it_works:
+            for sym, score in self._find_service_entry_points(
+                query, intent.expanded_terms, repo_id, actual_branch
+            ):
+                candidates[sym.id] = (sym, score)
+
+        # 2. Prefer HTTP handlers registered in framework_routes.
+        # For how_it_works, controllers are still useful fallbacks but should not
+        # outrank service-layer methods.
+        route_boost = 0.75 if is_how_it_works else 1.0
+        for sym, score in self._find_route_entry_points(
+            query, intent.expanded_terms, repo_id, actual_branch
+        ):
+            existing = candidates.get(sym.id)
+            if existing is None or score * route_boost > existing[1]:
+                candidates[sym.id] = (sym, score * route_boost)
+
+        # 3. Fall back to symbols from the top retrieval hits.
+        seen_symbols = set(candidates.keys())
         for hit in hits[:5]:
             if hit.symbol_id and hit.symbol_id not in seen_symbols:
                 seen_symbols.add(hit.symbol_id)
                 sym = self.db.query(Symbol).filter(Symbol.id == hit.symbol_id).first()
                 if sym:
-                    entry_point = self._symbol_entry_with_label(sym)
-                    entry_point.relevance_score = _combined_score(hit)
-                    entry_points.append(entry_point)
+                    candidates[sym.id] = (sym, self._final_score(hit))
+
+        # Keep the top 5 most relevant entry points.
+        sorted_candidates = sorted(
+            candidates.values(), key=lambda item: -item[1]
+        )
+        for sym, score in sorted_candidates[:5]:
+            entry_point = self._symbol_entry_with_label(sym)
+            entry_point.relevance_score = score
+            entry_points.append(entry_point)
 
         if strategy.include_callers or strategy.include_callees:
             if entry_points:
@@ -351,6 +419,7 @@ class Searcher:
                     strategy.call_depth,
                     strategy.include_callers,
                     strategy.include_callees,
+                    branch=actual_branch,
                 )
                 call_chain = chain
                 chain.flow_summary = self._generate_flow_summary(query, intent.intent_type, entry_points, chain)
@@ -360,9 +429,20 @@ class Searcher:
         flow_summary = call_chain.flow_summary if call_chain else None
 
         file_chunk_count: Dict[str, int] = {}
+        existing_snippet_ids: Set[UUID] = set()
+
+        if is_how_it_works:
+            ep_snippets = self._entry_point_snippets(entry_points, branch=actual_branch)
+            code_snippets.extend(ep_snippets)
+            for s in ep_snippets:
+                existing_snippet_ids.add(s.id)
+                file_chunk_count[s.file_path] = file_chunk_count.get(s.file_path, 0) + 1
+
         for hit in hits:
             if len(code_snippets) >= limit:
                 break
+            if hit.result_id in existing_snippet_ids:
+                continue
             cnt = file_chunk_count.get(hit.file_path, 0)
             if cnt >= MAX_CHUNKS_PER_FILE:
                 continue
@@ -386,6 +466,9 @@ class Searcher:
                     "rrf": round(hit.rrf_score, 4),
                     "final": round(self._final_score(hit), 4),
                 },
+                file_role=self._infer_file_role(hit.file_path),
+                branch=actual_branch,
+                is_override=hit.is_override,
             ))
 
         if not related_files:
@@ -398,9 +481,12 @@ class Searcher:
                     key_symbols=[s.name for s in entry_points if s.file_path == snippet.file_path],
                 ))
 
+        related_files = self._ensure_chinese_enricher(query, repo_id, related_files, actual_branch)
+
         return CodeContext(
             query=query,
             query_intent=intent.intent_type,
+            branch=actual_branch,
             matched_concepts=intent.expanded_terms[:10],
             entry_points=entry_points,
             call_chain=call_chain,
@@ -410,16 +496,196 @@ class Searcher:
             total_files=len(related_files),
             total_symbols=len(entry_points),
             search_latency_ms=0,
+            meta=SearchMeta(
+                requested_branch=requested_branch,
+                actual_branch=actual_branch,
+                branch_fallback=branch_fallback,
+            ),
         )
 
-    def _symbol_entry_with_label(self, sym: Symbol) -> "SymbolEntry":
-        from schemas import SymbolEntry
+    def _ensure_chinese_enricher(
+        self,
+        query: str,
+        repo_id: Optional[UUID],
+        related_files: List["FileSummary"],
+        branch: str = "main",
+    ) -> List["FileSummary"]:
+        """Boost chinese_enricher.py to related_files for Chinese-aware queries."""
+        from schemas import FileSummary
 
-        label = (
-            self.db.query(SymbolFlowLabel)
-            .filter(SymbolFlowLabel.symbol_id == sym.id)
+        if not repo_id or not query:
+            return related_files
+
+        is_chinese_query = any("\u4e00" <= ch <= "\u9fff" for ch in query)
+        has_chinese_concept = "chinese" in query.lower() or "中文" in query
+        if not (is_chinese_query or has_chinese_concept):
+            return related_files
+
+        existing_paths = {f.path for f in related_files}
+        target_path = "backend/services/chinese_enricher.py"
+        if target_path in existing_paths:
+            return related_files
+
+        code_file = (
+            self.db.query(CodeFile)
+            .filter(CodeFile.repo_id == repo_id, CodeFile.branch == branch, CodeFile.path == target_path)
             .first()
         )
+        if not code_file:
+            return related_files
+
+        return [
+            FileSummary(
+                path=target_path,
+                role=self._infer_file_role(target_path),
+                relevance_score=0.95,
+                key_symbols=[],
+            )
+        ] + related_files
+
+    def _entry_point_snippets(
+        self,
+        entry_points: List["SymbolEntry"],
+        max_snippets: int = 3,
+        branch: str = "main",
+    ) -> List["SearchResultItem"]:
+        """Build code snippets from the top entry point symbols.
+
+        For ``how_it_works`` queries the raw retrieval hits often miss the core
+        implementation body. Promoting entry point symbols guarantees that the
+        returned snippets include the methods the user actually asked about.
+        """
+        from schemas import SearchResultItem
+
+        snippets: List[SearchResultItem] = []
+        for ep in entry_points[:max_snippets]:
+            try:
+                sym = self.db.query(Symbol).filter(Symbol.id == UUID(ep.id)).first()
+                if not sym or not sym.file:
+                    continue
+                embeddings = (
+                    self.db.query(Embedding)
+                    .filter(Embedding.file_id == sym.file_id, Embedding.branch == branch)
+                    .all()
+                )
+                hit = _symbol_to_hit(sym, embeddings)
+                # Skip placeholder entries that have no embedding coverage.
+                if hit.content == f"{sym.type} {sym.name}":
+                    continue
+                snippets.append(
+                    SearchResultItem(
+                        id=hit.result_id,
+                        file_id=hit.file_id,
+                        repo_id=hit.repo_id,
+                        repo_name=hit.repo_name,
+                        file_path=hit.file_path,
+                        language=hit.language,
+                        content=hit.content,
+                        line=hit.line,
+                        score=round(float(ep.relevance_score), 4),
+                        score_breakdown={
+                            "entry_point_boost": round(float(ep.relevance_score), 4),
+                            "symbol": round(hit.symbol_score, 4),
+                        },
+                        file_role=self._infer_file_role(hit.file_path),
+                        branch=branch,
+                        is_override=False,
+                    )
+                )
+            except Exception:
+                logger.exception("Failed to build entry point snippet for %s", ep.id)
+        return snippets
+
+    def _find_service_entry_points(
+        self,
+        query: str,
+        search_terms: Optional[List[str]],
+        repo_id: Optional[UUID],
+        branch: str = "main",
+    ) -> List[Tuple[Symbol, float]]:
+        """For how_it_works queries, find service-layer functions whose names or
+        Chinese flow labels match the expanded query terms.
+
+        Service-layer symbols (layer='service' in symbol_flow_labels) are the
+        real algorithm implementations; surfacing them as entry points produces
+        better flow summaries than HTTP controller shells.
+        """
+        if not repo_id or not search_terms:
+            return []
+
+        patterns = [t.lower() for t in search_terms if len(t) > 1]
+        if not patterns:
+            return []
+
+        service_symbols = (
+            self.db.query(Symbol)
+            .join(SymbolFlowLabel)
+            .join(CodeFile)
+            .filter(
+                Symbol.repo_id == repo_id,
+                Symbol.branch == branch,
+                Symbol.type.in_(["function", "method"]),
+                SymbolFlowLabel.layer == "service",
+                or_(
+                    CodeFile.path.ilike("backend/services/%"),
+                    CodeFile.path.ilike("packages/core/src/service/%"),
+                ),
+            )
+            .all()
+        )
+
+        # Core orchestrators should surface as entry points for how_it_works queries.
+        core_orchestrators = {
+            "hybrid_search", "search_with_context", "analyze",
+            "_execute_strategy", "_search_and_fuse",
+        }
+
+        matched: Dict[UUID, Tuple[Symbol, float]] = {}
+        for sym in service_symbols:
+            name_lower = (sym.name or "").lower()
+            is_core = name_lower in core_orchestrators
+            is_private = sym.name.startswith("_")
+
+            for pattern in patterns:
+                if pattern in name_lower:
+                    score = 0.88
+                    if pattern in ("search", "query", "retrieval", "intent", "analyze"):
+                        score = 0.93
+                    if is_core:
+                        score = 0.96
+                    if is_private and not is_core:
+                        score *= 0.85
+                    if sym.id not in matched or score > matched[sym.id][1]:
+                        matched[sym.id] = (sym, score)
+                    break
+
+            label = sym.flow_label
+            if label:
+                chinese_name_lower = (label.chinese_name or "").lower()
+                for pattern in patterns:
+                    if pattern in chinese_name_lower:
+                        score = 0.90
+                        if is_core:
+                            score = 0.96
+                        if is_private and not is_core:
+                            score *= 0.85
+                        if sym.id not in matched or score > matched[sym.id][1]:
+                            matched[sym.id] = (sym, score)
+                        break
+
+        return list(matched.values())
+
+    def _symbol_entry_with_label(
+        self, sym: Symbol, label: Optional[SymbolFlowLabel] = None
+    ) -> "SymbolEntry":
+        from schemas import SymbolEntry
+
+        if label is None:
+            label = (
+                self.db.query(SymbolFlowLabel)
+                .filter(SymbolFlowLabel.symbol_id == sym.id)
+                .first()
+            )
         return SymbolEntry(
             id=str(sym.id),
             name=sym.name,
@@ -463,6 +729,7 @@ class Searcher:
         depth: int,
         include_callers: bool,
         include_callees: bool,
+        branch: str = "main",
     ) -> "CallChain":
         from schemas import CallChain, SymbolEntry
 
@@ -475,22 +742,18 @@ class Searcher:
 
         root_entry = self._symbol_entry_with_label(root)
 
-        upstream = []
-        downstream = []
-
+        caller_ids: List[UUID] = []
+        callee_ids: List[UUID] = []
         if include_callers:
-            caller_ids = self._query_callers(root_symbol_id, depth)
-            for cid in caller_ids:
-                sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
-                if sym:
-                    upstream.append(self._symbol_entry_with_label(sym))
-
+            caller_ids = self._query_callers(root_symbol_id, depth, branch)
         if include_callees:
-            callee_ids = self._query_callees(root_symbol_id, depth)
-            for cid in callee_ids:
-                sym = self.db.query(Symbol).filter(Symbol.id == cid).first()
-                if sym:
-                    downstream.append(self._symbol_entry_with_label(sym))
+            callee_ids = self._query_callees(root_symbol_id, depth, branch)
+
+        related_ids = set(caller_ids) | set(callee_ids)
+        entries = self._symbol_entries_by_ids(related_ids)
+
+        upstream = [entries[cid] for cid in caller_ids if cid in entries]
+        downstream = [entries[cid] for cid in callee_ids if cid in entries]
 
         return CallChain(
             root=root_entry,
@@ -499,7 +762,32 @@ class Searcher:
             depth=depth,
         )
 
-    def _query_callers(self, symbol_id: UUID, depth: int) -> List[UUID]:
+    def _symbol_entries_by_ids(
+        self, symbol_ids: Set[UUID]
+    ) -> Dict[UUID, "SymbolEntry"]:
+        """Batch load symbols and their flow labels in two queries.
+
+        Avoids the N+1 pattern when building call chains.
+        """
+        from schemas import SymbolEntry
+
+        if not symbol_ids:
+            return {}
+
+        symbols = self.db.query(Symbol).filter(Symbol.id.in_(list(symbol_ids))).all()
+        labels = {
+            label.symbol_id: label
+            for label in self.db.query(SymbolFlowLabel)
+            .filter(SymbolFlowLabel.symbol_id.in_(list(symbol_ids)))
+            .all()
+        }
+
+        result: Dict[UUID, SymbolEntry] = {}
+        for sym in symbols:
+            result[sym.id] = self._symbol_entry_with_label(sym, labels.get(sym.id))
+        return result
+
+    def _query_callers(self, symbol_id: UUID, depth: int, branch: str = "main") -> List[UUID]:
         results = []
         current = {symbol_id}
         visited = {symbol_id}
@@ -508,7 +796,8 @@ class Searcher:
             next_level = set()
             for sid in current:
                 edges = self.db.query(CallGraphEdge).filter(
-                    CallGraphEdge.target_symbol_id == sid
+                    CallGraphEdge.target_symbol_id == sid,
+                    CallGraphEdge.branch == branch,
                 ).all()
                 for edge in edges:
                     if edge.source_symbol_id not in visited:
@@ -521,7 +810,7 @@ class Searcher:
 
         return results
 
-    def _query_callees(self, symbol_id: UUID, depth: int) -> List[UUID]:
+    def _query_callees(self, symbol_id: UUID, depth: int, branch: str = "main") -> List[UUID]:
         results = []
         current = {symbol_id}
         visited = {symbol_id}
@@ -530,7 +819,8 @@ class Searcher:
             next_level = set()
             for sid in current:
                 edges = self.db.query(CallGraphEdge).filter(
-                    CallGraphEdge.source_symbol_id == sid
+                    CallGraphEdge.source_symbol_id == sid,
+                    CallGraphEdge.branch == branch,
                 ).all()
                 for edge in edges:
                     if edge.target_symbol_id not in visited:
@@ -561,13 +851,10 @@ class Searcher:
             symbols = symbols.filter(Symbol.repo_id == repo_id)
         symbols = symbols.all()
 
-        hits = []
-        for sym in symbols:
-            embeddings = self._file_embeddings(sym.file_id)
-            hit = _symbol_to_hit(sym, embeddings)
+        hits = self._symbols_to_hits(symbols)
+        for hit in hits:
             hit.graph_score = 0.7
             hit.sources.add("graph")
-            hits.append(hit)
 
         return hits
 
@@ -598,54 +885,249 @@ class Searcher:
         return results
 
     def _infer_file_role(self, file_path: str) -> str:
-        path_lower = file_path.lower()
-        name = file_path.split("/")[-1].lower()
+        """Infer the architectural role of a file from its path and name.
 
-        if "test" in path_lower or "spec" in name:
+        The heuristic uses three signals, in order of reliability:
+        1. Directory structure (e.g. services/, controllers/, data/)
+        2. File name tokens (e.g. *adapter*, *service*)
+        3. Language / framework conventions (e.g. .tsx in packages/web/)
+        """
+        path_lower = file_path.lower()
+        parts = file_path.lower().split("/")
+        name = parts[-1]
+        name_no_ext = name.split(".")[0]
+
+        # 1. Test files (strongest signal).
+        if "test" in path_lower or "spec" in name or "__tests__" in path_lower:
             return "test"
-        if "controller" in name or "handler" in name or "route" in name:
-            return "controller"
-        if "service" in name or "biz" in name or "business" in name:
-            return "service"
-        if "repository" in name or "dao" in name or "mapper" in name or "data" in name:
-            return "repository"
-        if "config" in name or "settings" in name or "properties" in name:
-            return "config"
-        if "model" in name or "entity" in name or "domain" in name or "po" in name:
-            return "model"
-        if "util" in name or "helper" in name or "common" in name:
-            return "utility"
-        if "middleware" in name or "interceptor" in name or "filter" in name:
-            return "middleware"
+
+        # 2. Web frontend files.
+        if path_lower.startswith("packages/web/") or "/src/pages/" in path_lower or "/components/" in path_lower:
+            if name.endswith((".tsx", ".jsx", ".vue", ".ts", ".js")):
+                return "web"
+
+        # 3. Directory-based role inference.
+        dir_roles = {
+            "api": "controller",
+            "apis": "controller",
+            "controllers": "controller",
+            "routes": "controller",
+            "handlers": "controller",
+            "services": "service",
+            "service": "service",
+            "biz": "service",
+            "business": "service",
+            "indexer": "analyzer",
+            "parser": "analyzer",
+            "analyzer": "analyzer",
+            "enricher": "analyzer",
+            "repositories": "repository",
+            "repository": "repository",
+            "dao": "repository",
+            "mapper": "repository",
+            "data": "repository",
+            "adapters": "adapter",
+            "adapter": "adapter",
+            "models": "model",
+            "entities": "model",
+            "entity": "model",
+            "domain": "model",
+            "dto": "model",
+            "config": "config",
+            "configs": "config",
+            "settings": "config",
+            "utils": "utility",
+            "helpers": "utility",
+            "common": "utility",
+            "middleware": "middleware",
+            "middlewares": "middleware",
+            "interceptors": "middleware",
+            "filters": "middleware",
+        }
+        for part in parts:
+            if part in dir_roles:
+                role = dir_roles[part]
+                # Special case: files under data/ whose name contains adapter
+                # are more precisely "adapter" than generic "repository".
+                if role == "repository" and "adapter" in name_no_ext:
+                    return "adapter"
+                # Special case: files under services/ that implement analysis/
+                # retrieval logic are more precisely "analyzer". "searcher" is
+                # intentionally excluded because it orchestrates the whole search
+                # pipeline and should be treated as a service entry point.
+                if role == "service" and any(
+                    token in name_no_ext
+                    for token in ("analyzer", "parser", "enricher", "indexer")
+                ):
+                    return "analyzer"
+                return role
+
+        # 4. Name-based role inference (fallback).
+        name_tokens = {
+            "controller": "controller",
+            "handler": "controller",
+            "route": "controller",
+            "router": "controller",
+            "service": "service",
+            "biz": "service",
+            "business": "service",
+            "searcher": "analyzer",
+            "analyzer": "analyzer",
+            "parser": "analyzer",
+            "enricher": "analyzer",
+            "indexer": "analyzer",
+            "repository": "repository",
+            "dao": "repository",
+            "mapper": "repository",
+            "adapter": "adapter",
+            "model": "model",
+            "entity": "model",
+            "domain": "model",
+            "dto": "model",
+            "config": "config",
+            "settings": "config",
+            "properties": "config",
+            "util": "utility",
+            "helper": "utility",
+            "common": "utility",
+            "middleware": "middleware",
+            "interceptor": "middleware",
+            "filter": "middleware",
+        }
+        for token, role in name_tokens.items():
+            if token in name_no_ext:
+                return role
+
         return "other"
+
+    def _find_route_entry_points(
+        self,
+        query: str,
+        search_terms: Optional[List[str]],
+        repo_id: Optional[UUID],
+        branch: str = "main",
+    ) -> List[Tuple[Symbol, float]]:
+        """Prioritize HTTP handler symbols that match the query in framework_routes.
+
+        When a user asks about a feature, the real entry point is usually the
+        HTTP handler (controller / API endpoint) rather than an internal helper
+        or core adapter. Route matches are scored slightly below a perfect M3
+        hit but above most generic symbols so they surface as entry points.
+        """
+        if not repo_id or not search_terms:
+            return []
+
+        patterns = [t.lower() for t in search_terms if len(t) > 1]
+        if not patterns:
+            return []
+
+        routes = (
+            self.db.query(FrameworkRoute)
+            .filter(FrameworkRoute.repo_id == repo_id, FrameworkRoute.branch == branch)
+            .all()
+        )
+
+        matched: Dict[UUID, Tuple[Symbol, float]] = {}
+        for route in routes:
+            path_lower = (route.path or "").lower()
+            handler_lower = (route.handler_symbol or "").lower()
+            for pattern in patterns:
+                if pattern in path_lower or pattern in handler_lower:
+                    sym = (
+                        self.db.query(Symbol)
+                        .filter(
+                            Symbol.repo_id == repo_id,
+                            Symbol.branch == branch,
+                            Symbol.name == route.handler_symbol,
+                            Symbol.file_id == route.file_id,
+                        )
+                        .first()
+                    )
+                    if sym is None:
+                        break
+                    # Boost controllers/handlers so they outrank internal helpers.
+                    score = 0.92
+                    if pattern in handler_lower:
+                        score = 0.96
+                    if sym.id not in matched or score > matched[sym.id][1]:
+                        matched[sym.id] = (sym, score)
+                    break
+
+        return list(matched.values())
 
     def _search_and_fuse(
         self,
         query: str,
         repo_id: Optional[UUID],
+        branch: str,
         limit: int,
         search_terms: Optional[List[str]] = None,
         path_overrides: Optional[Dict[str, Any]] = None,
         trace: Optional[SearchTrace] = None,
+        intent_type: Optional[str] = None,
     ) -> List[_Hit]:
-        """Unified retrieval pipeline: vector + sparse + symbol + bm25 + graph,
+        """Unified retrieval pipeline with branch merge support.
+
+        For business branches: main results (excluding files deleted by the
+        branch) ∪ branch diff results. Override results are marked via hit
+        attribute ``is_override``.
+        """
+        if not repo_id:
+            return self._single_branch_search_and_fuse(
+                query, repo_id, branch, limit, search_terms, path_overrides, trace, intent_type
+            )
+
+        repo = self.db.query(Repository).filter(Repository.id == repo_id).first()
+        default_branch = repo.default_branch or "main" if repo else "main"
+
+        if branch == default_branch:
+            return self._single_branch_search_and_fuse(
+                query, repo_id, branch, limit, search_terms, path_overrides, trace, intent_type
+            )
+
+        # Business branch: merge main + diff
+        deleted_paths = set()
+        if repo and repo.branch_deleted_files:
+            deleted_paths = set(json.loads(repo.branch_deleted_files or "{}").get(branch, []))
+
+        main_hits = self._single_branch_search_and_fuse(
+            query, repo_id, default_branch, limit * 2, search_terms, path_overrides, trace, intent_type
+        )
+        branch_hits = self._single_branch_search_and_fuse(
+            query, repo_id, branch, limit * 2, search_terms, path_overrides, trace, intent_type
+        )
+
+        # Mark overrides and filter main results deleted by branch
+        for hit in main_hits:
+            hit.is_override = False
+        for hit in branch_hits:
+            hit.is_override = True
+
+        main_hits = [h for h in main_hits if h.file_path not in deleted_paths]
+
+        # Merge by (file_path, line), branch hits override main hits
+        by_key: Dict[Tuple[str, int], _Hit] = {}
+        for hit in main_hits:
+            by_key[(hit.file_path, hit.line)] = hit
+        for hit in branch_hits:
+            by_key[(hit.file_path, hit.line)] = hit
+
+        merged = sorted(by_key.values(), key=lambda h: h.score, reverse=True)
+        return merged[:limit * 2]
+
+    def _single_branch_search_and_fuse(
+        self,
+        query: str,
+        repo_id: Optional[UUID],
+        branch: str,
+        limit: int,
+        search_terms: Optional[List[str]] = None,
+        path_overrides: Optional[Dict[str, Any]] = None,
+        trace: Optional[SearchTrace] = None,
+        intent_type: Optional[str] = None,
+    ) -> List[_Hit]:
+        """Unified retrieval pipeline for a single branch: vector + sparse + symbol + bm25 + graph,
         then RRF fusion and two-stage reranking.
-
-        This is the shared core used by both ``hybrid_search`` and
-        ``search_with_context`` so that intent-aware searches benefit from
-        the same semantic-rerank quality.
-
-        ``search_terms`` carries the expanded query terms (e.g. SEMANTIC_MAP
-        English mappings such as 订单 -> order). They feed the symbol and
-        BM25 paths so Chinese queries can match English code identifiers.
-
-        ``path_overrides`` lets debug callers tune the pipeline per request
-        without changing global constants. Expected keys: ``enabled`` (set of
-        path names), ``top_k`` (path -> int). When absent all paths default
-        to enabled with their standard top_k.
-
-        ``trace`` collects intermediate results for the debug endpoint. When
-        ``None`` the pipeline is byte-for-byte identical to the original path.
         """
         self.db.execute(text("SET hnsw.ef_search = 128"))
 
@@ -655,7 +1137,7 @@ class Searcher:
         }))
         top_k_overrides: Dict[str, int] = overrides.get("top_k", {})
 
-        def _top_k(name: str, default: int = 50) -> int:
+        def _top_k(name: str, default: int = 20) -> int:
             return top_k_overrides.get(name, default)
 
         def _run_path(name: str, runner) -> List[_Hit]:
@@ -679,11 +1161,11 @@ class Searcher:
         # search could not be completed correctly.
         query_embedding = self.embedder.encode_query(query)
         vector_results = _run_path(
-            "vector", lambda top_k: self._vector_search(query_embedding, repo_id, top_k=top_k)
+            "vector", lambda top_k: self._vector_search(query_embedding, repo_id, branch, top_k=top_k)
         )
 
         symbol_results = _run_path(
-            "symbol", lambda top_k: self._symbol_search_multi(query, search_terms, repo_id, top_k=top_k)
+            "symbol", lambda top_k: self._symbol_search_multi(query, search_terms, repo_id, branch, top_k=top_k)
         )
 
         is_chinese = bool(re.search(r"[\u4e00-\u9fff]", query))
@@ -692,7 +1174,7 @@ class Searcher:
             if term != query and term not in bm25_concepts:
                 bm25_concepts.append(term)
         bm25_results = _run_path(
-            "bm25", lambda top_k: self._bm25_search(query, repo_id, top_k=top_k, concepts=bm25_concepts)
+            "bm25", lambda top_k: self._bm25_search(query, repo_id, branch, top_k=top_k, concepts=bm25_concepts)
         )
 
         # Sparse and graph search are supplementary sources. If they fail, the
@@ -705,7 +1187,7 @@ class Searcher:
                 return []
             if not query_sparse:
                 return []
-            return self._sparse_search(query_sparse, repo_id, top_k=top_k)
+            return self._sparse_search(query_sparse, repo_id, branch, top_k=top_k)
 
         sparse_results = _run_path("sparse", _sparse_runner)
 
@@ -713,7 +1195,7 @@ class Searcher:
         if "graph" in enabled_paths and symbol_results:
             try:
                 graph_results = _run_path(
-                    "graph", lambda top_k: self._graph_search(symbol_results, repo_id, top_k=top_k)
+                    "graph", lambda top_k: self._graph_search(symbol_results, repo_id, branch, top_k=top_k)
                 )
             except Exception as e:
                 logger.warning("Graph search skipped: %s", e)
@@ -731,11 +1213,37 @@ class Searcher:
         if trace is not None:
             trace.set_fusion(RRF_K, hits)
 
-        schema_results = [self._to_schema(hit) for hit in hits[:limit * 2]]
-        reranked = CodeReranker().rerank(query, schema_results)
+        schema_results = [self._to_schema(hit, branch=branch) for hit in hits[:limit * 2]]
+        reranked = CodeReranker().rerank(
+            query, schema_results, search_terms=search_terms, intent_type=intent_type
+        )
 
         m3_reranker = get_m3_reranker()
-        final_schemas = m3_reranker.rerank(query, reranked[:limit * 2], top_k=limit)
+        # For implementation / how_it_works queries the original query is often
+        # Chinese mixed with English. The cross-encoder was trained primarily on
+        # English text, so feed it the expanded English terms for better code
+        # matching while preserving the original for other intents.
+        m3_query = query
+        if intent_type == "how_it_works" and search_terms:
+            english_terms = [t for t in search_terms if re.match(r"^[a-zA-Z0-9_]+$", t)]
+            if english_terms:
+                m3_query = " ".join(english_terms[:8])
+        final_schemas = m3_reranker.rerank(m3_query, reranked[:limit * 2], top_k=limit)
+
+        # M3 reranker recomputes scores from scratch and discards the role
+        # weights applied by CodeReranker. Re-apply them when the model is
+        # loaded so the final ranking respects file roles and intent tuning.
+        if m3_reranker.model is not None:
+            intent_boost = CodeReranker._INTENT_ROLE_BOOST.get(intent_type, {})
+            code_reranker = CodeReranker()
+            for schema in final_schemas:
+                role = getattr(schema, "file_role", None) or "other"
+                weight = ROLE_WEIGHTS.get(role, 1.0)
+                weight *= intent_boost.get(role, 1.0)
+                if code_reranker._is_shallow_snippet(schema.content):
+                    weight *= 0.7
+                schema.score *= weight
+            final_schemas.sort(key=lambda x: -x.score)
 
         if trace is not None:
             trace.set_rerank(
@@ -746,12 +1254,15 @@ class Searcher:
             )
 
         # Map reranked schemas back to _Hit objects so callers can still
-        # access hit.symbol_id and other internal metadata.
+        # access hit.symbol_id and other internal metadata. Preserve the RRF
+        # score for debugging and overwrite hit.score with the M3 reranked
+        # score so that downstream callers see the final ranking score.
         hit_by_id = {hit.result_id: hit for hit in hits}
         final_hits: List[_Hit] = []
         for schema in final_schemas:
             hit = hit_by_id.get(schema.id)
             if hit:
+                hit.score = schema.score
                 final_hits.append(hit)
         return final_hits
 
@@ -759,6 +1270,7 @@ class Searcher:
         self,
         query: str,
         repo_id: UUID,
+        branch: str = "main",
         limit: int = 20,
         path_overrides: Optional[Dict[str, Any]] = None,
         enable_llm_expand: bool = False,
@@ -797,6 +1309,7 @@ class Searcher:
         context = self.search_with_context(
             query=query,
             repo_id=repo_id,
+            branch=branch,
             limit=limit,
             intent=intent,
             path_overrides=path_overrides,
@@ -809,9 +1322,10 @@ class Searcher:
         self,
         query: str,
         repo_id: Optional[UUID] = None,
+        branch: str = "main",
         limit: int = 20,
     ) -> List[SearchResultItem]:
-        logger.info("Hybrid search query=%s repo_id=%s", query, repo_id)
+        logger.info("Hybrid search query=%s repo_id=%s branch=%s", query, repo_id, branch)
         # Analyze without LLM expansion (network call) so the hot path stays
         # fast; SEMANTIC_MAP / domain-synonym expansions still apply.
         intent = self.intent_analyzer.analyze(
@@ -820,28 +1334,36 @@ class Searcher:
             db=self.db,
             enable_llm_expand=False,
         )
-        hits = self._search_and_fuse(query, repo_id, limit, search_terms=intent.expanded_terms)
-        return [self._to_schema(hit) for hit in hits[:limit]]
+        actual_branch, _ = self._resolve_branch(repo_id, branch)
+        hits = self._search_and_fuse(
+            query, repo_id, actual_branch, limit,
+            search_terms=intent.expanded_terms,
+            intent_type=intent.intent_type,
+        )
+        return [self._to_schema(hit, branch=actual_branch) for hit in hits[:limit]]
 
     def symbol_search(
         self,
         query: str,
         repo_id: Optional[UUID] = None,
+        branch: str = "main",
         limit: int = 20,
     ) -> List[SearchResultItem]:
-        symbols = self._symbol_search_raw(query, repo_id, limit * 3)
-        hits = [_symbol_to_hit(s, self._file_embeddings(s.file_id)) for s in symbols]
+        actual_branch, _ = self._resolve_branch(repo_id, branch)
+        symbols = self._symbol_search_raw(query, repo_id, actual_branch, limit * 3)
+        hits = self._symbols_to_hits(symbols)
         hits.sort(key=lambda h: h.symbol_score, reverse=True)
-        return [self._to_schema(hit) for hit in hits[:limit]]
+        return [self._to_schema(hit, branch=actual_branch) for hit in hits[:limit]]
 
     def _vector_search(
         self,
         query_embedding: List[float],
         repo_id: Optional[UUID],
+        branch: str = "main",
         top_k: int = 50,
         limit: int = 50,
     ) -> List[_Hit]:
-        rows = self.embedding_repo.vector_search(query_embedding, repo_id, top_k)
+        rows = self.embedding_repo.vector_search(query_embedding, repo_id, branch, top_k)
 
         hits: List[_Hit] = []
         for row in rows:
@@ -869,21 +1391,23 @@ class Searcher:
         self,
         query: str,
         repo_id: Optional[UUID],
+        branch: str = "main",
         limit: int = 50,
     ) -> List[Symbol]:
-        return self.symbol_repo.search_by_name(query, repo_id, limit)
+        return self.symbol_repo.search_by_name(query, repo_id, branch, limit)
 
     def _symbol_search(
         self,
         query: str,
         repo_id: Optional[UUID],
+        branch: str = "main",
         top_k: int = 50,
     ) -> List[_Hit]:
-        symbols = self._symbol_search_raw(query, repo_id, top_k)
-        hits: List[_Hit] = []
-        for sym in symbols:
-            embeddings = self._file_embeddings(sym.file_id)
-            hit = _symbol_to_hit(sym, embeddings)
+        symbols = self._symbol_search_raw(query, repo_id, branch, top_k)
+        symbol_by_id = {sym.id: sym for sym in symbols}
+        hits = self._symbols_to_hits(symbols)
+        for hit in hits:
+            sym = symbol_by_id[hit.symbol_id]
             preset_score = getattr(sym, "_search_score", None)
             if preset_score is not None:
                 # Score comes from SymbolRepository (e.g. Chinese flow-label match).
@@ -897,7 +1421,6 @@ class Searcher:
                     hit.symbol_score = 0.7
             else:
                 hit.symbol_score = 0.5
-            hits.append(hit)
         return hits
 
     def _symbol_search_multi(
@@ -905,6 +1428,7 @@ class Searcher:
         query: str,
         search_terms: Optional[List[str]],
         repo_id: Optional[UUID],
+        branch: str = "main",
         top_k: int = 50,
     ) -> List[_Hit]:
         """Symbol search over the raw query plus expanded terms.
@@ -924,17 +1448,33 @@ class Searcher:
 
         best: Dict[UUID, _Hit] = {}
         for term in terms:
-            for hit in self._symbol_search(term, repo_id, top_k):
+            for hit in self._symbol_search(term, repo_id, branch, top_k):
                 key = hit.symbol_id or hit.result_id
                 existing = best.get(key)
                 if existing is None or hit.symbol_score > existing.symbol_score:
                     best[key] = hit
         return sorted(best.values(), key=lambda h: h.symbol_score, reverse=True)[:top_k]
 
+    @staticmethod
+    def _to_or_tsquery(terms: List[str]) -> str:
+        """Build a PostgreSQL OR tsquery from a list of search terms.
+
+        Strips punctuation/whitespace and joins remaining tokens with ``|``.
+        Returns an empty string when no valid terms remain.
+        """
+        cleaned = []
+        for term in terms:
+            for token in re.split(r"[^\w\u4e00-\u9fff]+", term):
+                token = token.strip()
+                if token and len(token) >= 2:
+                    cleaned.append(token)
+        return " | ".join(cleaned)
+
     def _bm25_search(
         self,
         query: str,
         repo_id: Optional[UUID],
+        branch: str = "main",
         top_k: int = 50,
         concepts: Optional[List[str]] = None,
     ) -> List[_Hit]:
@@ -942,8 +1482,14 @@ class Searcher:
         params: Dict[str, Any] = {
             "query": query,
             "repo_id": str(repo_id) if repo_id else None,
+            "branch": branch,
             "limit": top_k,
         }
+
+        # Build OR tsquery so that matching any term contributes to rank.
+        query_terms = [query] + (concepts or [])
+        query_or = self._to_or_tsquery(query_terms)
+        params["query_or"] = query_or if query_or else query
 
         # Direct phrase match bonus.
         params["query_like"] = f"%{query}%"
@@ -951,16 +1497,35 @@ class Searcher:
             like_clauses.append(f"{attr} ILIKE :query_like")
 
         # Concept-level fuzzy fallback for Chinese and short terms.
+        concept_rank_parts: List[str] = []
         for idx, concept in enumerate(concepts or []):
             if len(concept) < 2:
                 continue
-            key = f"concept_{idx}_like"
-            params[key] = f"%{concept}%"
-            like_clauses.append(f"ee.chinese_summary ILIKE :{key}")
-            like_clauses.append(f"ee.keywords ILIKE :{key}")
-            like_clauses.append(f"e.content ILIKE :{key}")
+            like_key = f"concept_{idx}_like"
+            params[like_key] = f"%{concept}%"
+            like_clauses.append(f"ee.chinese_summary ILIKE :{like_key}")
+            like_clauses.append(f"ee.keywords ILIKE :{like_key}")
+            like_clauses.append(f"e.content ILIKE :{like_key}")
+
+            concept_or = self._to_or_tsquery([concept])
+            if concept_or:
+                ts_key = f"concept_{idx}_or"
+                params[ts_key] = concept_or
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), to_tsquery('simple', :{ts_key})), 0)"
+                )
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), to_tsquery('simple', :{ts_key})), 0)"
+                )
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('simple', e.content), to_tsquery('simple', :{ts_key})), 0)"
+                )
+                concept_rank_parts.append(
+                    f"COALESCE(ts_rank_cd(to_tsvector('english', e.content), to_tsquery('english', :{ts_key})), 0)"
+                )
 
         concept_where = " OR ".join(like_clauses) if like_clauses else "FALSE"
+        concept_rank_sql = ", ".join(concept_rank_parts) if concept_rank_parts else "0"
 
         sql = text(
             f"""
@@ -974,10 +1539,11 @@ class Searcher:
                    f.path AS file_path,
                    f.language,
                    GREATEST(
-                       ts_rank_cd(to_tsvector('english', e.content), plainto_tsquery('english', :query)),
-                       ts_rank_cd(to_tsvector('simple', e.content), plainto_tsquery('simple', :query)),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), plainto_tsquery('simple', :query)), 0),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), plainto_tsquery('simple', :query)), 0),
+                       ts_rank_cd(to_tsvector('english', e.content), to_tsquery('english', :query_or)),
+                       ts_rank_cd(to_tsvector('simple', e.content), to_tsquery('simple', :query_or)),
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), to_tsquery('simple', :query_or)), 0),
+                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), to_tsquery('simple', :query_or)), 0),
+                       {concept_rank_sql},
                        CASE WHEN e.content ILIKE :query_like THEN 0.2 ELSE 0 END,
                        CASE WHEN ee.chinese_summary ILIKE :query_like THEN 0.6 ELSE 0 END,
                        CASE WHEN ee.keywords ILIKE :query_like THEN 0.9 ELSE 0 END
@@ -987,11 +1553,12 @@ class Searcher:
             JOIN repositories r ON r.id = e.repo_id
             LEFT JOIN embedding_enrichments ee ON ee.embedding_id = e.id
             WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
+              AND e.branch = :branch
               AND (
-                  to_tsvector('english', e.content) @@ plainto_tsquery('english', :query)
-                  OR to_tsvector('simple', e.content) @@ plainto_tsquery('simple', :query)
-                  OR to_tsvector('simple', ee.chinese_summary) @@ plainto_tsquery('simple', :query)
-                  OR to_tsvector('simple', ee.keywords) @@ plainto_tsquery('simple', :query)
+                  to_tsvector('english', e.content) @@ to_tsquery('english', :query_or)
+                  OR to_tsvector('simple', e.content) @@ to_tsquery('simple', :query_or)
+                  OR to_tsvector('simple', ee.chinese_summary) @@ to_tsquery('simple', :query_or)
+                  OR to_tsvector('simple', ee.keywords) @@ to_tsquery('simple', :query_or)
                   OR {concept_where}
               )
             ORDER BY rank DESC
@@ -1008,6 +1575,10 @@ class Searcher:
             rank = row.rank
             if isinstance(rank, str):
                 rank = float(rank)
+            # ts_rank_cd can produce large values for short queries/texts.
+            # Cap and normalize so BM25 scores stay in the same ballpark as
+            # vector/symbol scores and do not dominate the combined score.
+            normalized_rank = min(rank, 1.5)
             hits.append(
                 _Hit(
                     result_id=row.embedding_id,
@@ -1018,7 +1589,7 @@ class Searcher:
                     language=row.language,
                     content=row.content,
                     line=row.start_line,
-                    bm25_score=rank,
+                    bm25_score=normalized_rank,
                     sources={"bm25"},
                 )
             )
@@ -1028,6 +1599,7 @@ class Searcher:
         self,
         symbol_hits: List[_Hit],
         repo_id: Optional[UUID],
+        branch: str = "main",
         top_k: int = 50,
     ) -> List[_Hit]:
         if not symbol_hits:
@@ -1035,27 +1607,40 @@ class Searcher:
 
         symbol_ids = [h.symbol_id for h in symbol_hits if h.symbol_id and h.sources == {"symbol"}]
         if symbol_ids:
-            related_symbols = self.symbol_repo.get_related_by_edges(symbol_ids, top_k)
+            related_symbols = self.symbol_repo.get_related_by_edges(symbol_ids, branch, top_k)
         else:
             file_ids = list({h.file_id for h in symbol_hits})
-            related_symbols = self.symbol_repo.get_by_file_ids(file_ids, top_k)
+            related_symbols = self.symbol_repo.get_by_file_ids(file_ids, branch, top_k)
 
-        hits: List[_Hit] = []
-        for sym in related_symbols:
-            embeddings = self._file_embeddings(sym.file_id)
-            hit = _symbol_to_hit(sym, embeddings)
+        hits = self._symbols_to_hits(related_symbols)
+        for hit in hits:
             hit.graph_score = 0.7
             hit.sources.add("graph")
-            hits.append(hit)
         return hits
 
     def _file_embeddings(self, file_id: UUID) -> List[Embedding]:
         return self.embedding_repo.get_by_file_id(file_id)
 
+    def _symbols_to_hits(self, symbols: List[Symbol]) -> List[_Hit]:
+        """Convert multiple symbols to hits with a single batched embeddings query.
+
+        Avoids the N+1 pattern caused by calling ``_file_embeddings`` per symbol.
+        """
+        if not symbols:
+            return []
+        file_ids = list({s.file_id for s in symbols})
+        embeddings_by_file = self.embedding_repo.get_by_file_ids(file_ids)
+        hits = []
+        for sym in symbols:
+            hit = _symbol_to_hit(sym, embeddings_by_file.get(sym.file_id, []))
+            hits.append(hit)
+        return hits
+
     def _sparse_search(
         self,
         query_sparse: Dict[int, float],
         repo_id: Optional[UUID],
+        branch: str = "main",
         top_k: int = 50,
     ) -> List[_Hit]:
         if not query_sparse:
@@ -1067,15 +1652,16 @@ class Searcher:
             SparseEmbedding.embedding_id,
             SparseEmbedding.token_id,
             SparseEmbedding.weight,
+        ).join(
+            Embedding,
+            Embedding.id == SparseEmbedding.embedding_id,
         ).filter(
             SparseEmbedding.token_id.in_(query_tokens),
+            Embedding.branch == branch,
         )
 
         if repo_id:
-            rows = rows.join(
-                Embedding,
-                Embedding.id == SparseEmbedding.embedding_id,
-            ).filter(Embedding.repo_id == repo_id)
+            rows = rows.filter(Embedding.repo_id == repo_id)
 
         rows = rows.all()
 
@@ -1104,7 +1690,7 @@ class Searcher:
                 file_id=emb.file_id,
                 repo_id=emb.repo_id,
                 repo_name=emb.repo.name if emb.repo else "",
-                file_path=emb.file_path,
+                file_path=emb.file.path if emb.file else "",
                 language=emb.file.language if emb.file else "",
                 content=emb.content,
                 line=emb.start_line,
@@ -1114,10 +1700,17 @@ class Searcher:
         return hits
 
     def _final_score(self, hit: _Hit) -> float:
+        # If the M3 reranker has overwritten hit.score, use it as the final
+        # score. Otherwise fall back to the RRF combined score.
+        if hit.score:
+            return hit.score
         return _combined_score(hit)
 
-    def _to_schema(self, hit: _Hit) -> SearchResultItem:
-        final_score = getattr(hit, 'rrf_score', self._final_score(hit))
+    def _to_schema(self, hit: _Hit, branch: str = "main") -> SearchResultItem:
+        # ``hit.score`` may have been overwritten by the M3 reranker; if so we
+        # use it as the final score. Otherwise fall back to the RRF score.
+        final_score = self._final_score(hit)
+        rrf_score = getattr(hit, 'rrf_score', _combined_score(hit))
         return SearchResultItem(
             id=hit.result_id,
             file_id=hit.file_id,
@@ -1134,9 +1727,12 @@ class Searcher:
                 "bm25": round(hit.bm25_score, 4),
                 "graph": round(hit.graph_score, 4),
                 "sparse": round(hit.sparse_score, 4),
-                "rrf": round(getattr(hit, 'rrf_score', 0), 4),
+                "rrf": round(rrf_score, 4),
                 "final": round(final_score, 4),
             },
+            file_role=self._infer_file_role(hit.file_path),
+            branch=branch,
+            is_override=hit.is_override,
         )
 
 

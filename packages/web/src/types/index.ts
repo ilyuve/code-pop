@@ -4,12 +4,16 @@ export interface Repo {
   name: string;
   path: string;
   gitUrl?: string;
+  description?: string;
   status: 'indexing' | 'indexed' | 'completed' | 'error';
   errorMessage?: string;
   totalFiles: number;
   indexedFiles: number;
   fileCount?: number;
   symbolCount?: number;
+  defaultBranch: string;
+  activeBranches: string[];
+  syncMode: string;
   createdAt: string;
   lastIndexedAt: string;
 }
@@ -33,6 +37,8 @@ export interface SearchResult {
   language: string;
   score: number;
   scoreBreakdown: ScoreBreakdown;
+  branch: string;
+  isOverride: boolean;
 }
 
 // Settings types
@@ -59,6 +65,7 @@ export interface BenchmarkRun {
   id: string;
   query: string;
   repoId?: string;
+  branch: string;
   mode: 'with_codepop' | 'without_codepop';
   latencyMs: number;
   resultsCount: number;
@@ -114,7 +121,8 @@ export interface LLMCostBreakdown {
 }
 
 export interface LLMCostEstimate {
-  period_minutes: number;
+  period_minutes?: number;
+  period_days?: number;
   repo_id: string | null;
   total_cost: number;
   total_input_tokens: number;
@@ -123,11 +131,33 @@ export interface LLMCostEstimate {
   operation_breakdown: Record<string, LLMCostBreakdown>;
 }
 
+export interface LLMUsageSummary {
+  period_minutes?: number;
+  period_days?: number;
+  total_calls: number;
+  success_calls: number;
+  error_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+}
+
+export interface LLMDailyUsage {
+  date: string;
+  call_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+  cost: number;
+}
+
 // Form types
 export interface AddRepoForm {
   name?: string;
   path?: string;
   gitUrl?: string;
+  activeBranches?: string[];
+  syncMode?: string;
 }
 
 // CodeContext types
@@ -154,9 +184,16 @@ export interface FileSummary {
   key_symbols: string[];
 }
 
+export interface SearchMeta {
+  requested_branch: string;
+  actual_branch: string;
+  branch_fallback: boolean;
+}
+
 export interface CodeContext {
   query: string;
   query_intent: string;
+  branch: string;
   matched_concepts: string[];
   entry_points: SymbolEntry[];
   call_chain: CallChain | null;
@@ -166,6 +203,7 @@ export interface CodeContext {
   total_files: number;
   total_symbols: number;
   search_latency_ms: number;
+  meta?: SearchMeta;
   degraded: boolean;
   degradation_reason?: string;
   unavailable_sources: string[];

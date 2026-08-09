@@ -63,6 +63,8 @@ class WSNotifier:
         stage_progress: Optional[dict] = None,
         log_message: Optional[str] = None,
         log_level: str = "info",
+        branch: str = "main",
+        sync_result: Optional[dict] = None,
     ) -> None:
         payload: dict = {
             "type": "repo_update",
@@ -72,15 +74,19 @@ class WSNotifier:
             "stage": stage,
             "stage_progress": stage_progress,
             "error": error,
+            "branch": branch,
         }
-        
+
+        if sync_result:
+            payload["sync_result"] = sync_result
+
         if log_message:
             payload["log"] = {
                 "message": log_message,
                 "level": log_level,
                 "timestamp": datetime.utcnow(),
             }
-        
+
         await self.broadcast({k: v for k, v in payload.items() if v is not None})
 
     async def send_indexing_log(

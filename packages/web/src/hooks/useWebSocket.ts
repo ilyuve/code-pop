@@ -5,6 +5,7 @@ export type WebSocketStatus = 'connecting' | 'connected' | 'disconnected';
 export interface WebSocketOptions {
   maxAttempts?: number;
   baseDelay?: number;
+  maxReconnectDelay?: number;
   heartbeatInterval?: number;
   heartbeatTimeout?: number;
   onMessage?: (data: unknown) => void;
@@ -24,8 +25,9 @@ export interface UseWebSocketReturn {
 }
 
 const DEFAULT_OPTIONS: Required<WebSocketOptions> = {
-  maxAttempts: 10,
+  maxAttempts: Infinity,
   baseDelay: 1000,
+  maxReconnectDelay: 30000,
   heartbeatInterval: 30000,
   heartbeatTimeout: 10000,
   onMessage: () => {},
@@ -64,6 +66,20 @@ export const useWebSocket = (
       heartbeatTimeoutRef.current = null;
     }
   }, []);
+
+  const scheduleReconnect = useCallback(() => {
+    // 无限重连（maxAttempts 默认 Infinity），停机恢复后自动重新连接
+    if (reconnectAttemptsRef.current >= opts.maxAttempts) {
+      return;
+    }
+    const rawDelay = opts.baseDelay * Math.pow(2, reconnectAttemptsRef.current);
+    const delay = Math.min(rawDelay, opts.maxReconnectDelay);
+    reconnectAttemptsRef.current++;
+
+    reconnectTimeoutRef.current = setTimeout(() => {
+      connect();
+    }, delay);
+  }, [opts.baseDelay, opts.maxAttempts, opts.maxReconnectDelay]);
 
   const resetHeartbeat = useCallback(() => {
     if (heartbeatTimeoutRef.current) {
@@ -141,29 +157,15 @@ export const useWebSocket = (
           return;
         }
 
-        // Auto-reconnect with exponential backoff
-        if (reconnectAttemptsRef.current < opts.maxAttempts) {
-          const delay = opts.baseDelay * Math.pow(2, reconnectAttemptsRef.current);
-          reconnectAttemptsRef.current++;
-
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect();
-          }, delay);
-        }
+        // Auto-reconnect with capped exponential backoff (default: infinite, max 30s)
+        scheduleReconnect();
       };
     } catch (error) {
       setStatus('disconnected');
       // Retry connection on error
-      if (reconnectAttemptsRef.current < opts.maxAttempts) {
-        const delay = opts.baseDelay * Math.pow(2, reconnectAttemptsRef.current);
-        reconnectAttemptsRef.current++;
-
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
-        }, delay);
-      }
+      scheduleReconnect();
     }
-  }, [url, opts, clearTimers, startHeartbeat, resetHeartbeat]);
+  }, [url, opts, clearTimers, startHeartbeat, resetHeartbeat, scheduleReconnect]);
 
   const disconnect = useCallback(() => {
     clearTimers();

@@ -44,6 +44,8 @@ def searcher():
         mock_embedder.encode_query_sparse.return_value = {1: 0.5}
         mock_embedder_cls.return_value = mock_embedder
         searcher = Searcher(db)
+    # Safe defaults so new DB queries don't explode when tests don't care.
+    db.query.return_value.filter.return_value.all.return_value = []
     return searcher
 
 
@@ -87,15 +89,17 @@ class TestBuildCallChain:
         caller = _make_symbol(symbol_id=caller_id, name="caller")
         callee = _make_symbol(symbol_id=callee_id, name="callee")
 
-        searcher.db.query.return_value.filter.return_value.first.side_effect = [
-            root,
-            caller,
-            callee,
-        ]
+        searcher.db.query.return_value.filter.return_value.first.return_value = root
         searcher._query_callers = MagicMock(return_value=[caller_id])
         searcher._query_callees = MagicMock(return_value=[callee_id])
+
+        # _symbol_entries_by_ids first queries Symbol, then SymbolFlowLabel.
+        searcher.db.query.return_value.filter.return_value.all.side_effect = [
+            [caller, callee],
+            [],
+        ]
         searcher._symbol_entry_with_label = MagicMock(
-            side_effect=lambda sym: SymbolEntry(
+            side_effect=lambda sym, label=None: SymbolEntry(
                 id=str(sym.id),
                 name=sym.name,
                 type=sym.type,
@@ -356,3 +360,419 @@ class TestDebugSearch:
 
         assert searcher._vector_search.call_args[1]["top_k"] == 7
         assert searcher._bm25_search.call_args[1]["top_k"] == 13
+
+
+class TestSparseSearch:
+    def test_sparse_search_uses_file_path_from_embedding_file(self, searcher):
+        """_sparse_search must read file_path from emb.file.path, not emb.file_path."""
+        repo_id = uuid4()
+        embedding_id = uuid4()
+        file_id = uuid4()
+
+        file_mock = MagicMock()
+        file_mock.path = "src/order.py"
+        file_mock.language = "python"
+
+        emb = MagicMock()
+        emb.id = embedding_id
+        emb.file_id = file_id
+        emb.repo_id = repo_id
+        emb.repo = MagicMock(name="test-repo")
+        emb.file = file_mock
+        emb.content = "def create_order(): pass"
+        emb.start_line = 1
+
+        # First query returns the sparse token rows; second query returns embeddings.
+        query = searcher.db.query
+        query.return_value.filter.return_value.join.return_value.filter.return_value.all.return_value = [
+            MagicMock(embedding_id=embedding_id, token_id=1, weight=0.5),
+        ]
+        query.return_value.filter.return_value.all.return_value = [emb]
+
+        results = searcher._sparse_search({1: 0.8}, repo_id, top_k=10)
+
+        assert len(results) == 1
+        assert results[0].file_path == "src/order.py"
+        assert results[0].language == "python"
+
+
+class TestInferFileRole:
+    """Directory + file name + extension based role inference."""
+
+    def test_services_searcher_is_analyzer(self, searcher):
+        assert searcher._infer_file_role("backend/services/searcher.py") == "analyzer"
+
+    def test_data_adapter_is_adapter(self, searcher):
+        assert searcher._infer_file_role("packages/core/src/data/adapter.ts") == "adapter"
+
+    def test_web_page_is_web(self, searcher):
+        assert searcher._infer_file_role("packages/web/src/pages/Benchmark.tsx") == "web"
+
+    def test_api_route_is_controller(self, searcher):
+        assert searcher._infer_file_role("backend/api/search.py") == "controller"
+
+    def test_repository_is_repository(self, searcher):
+        assert searcher._infer_file_role("backend/repositories/order_repository.py") == "repository"
+
+    def test_model_is_model(self, searcher):
+        assert searcher._infer_file_role("backend/models.py") == "model"
+
+    def test_test_file_is_test(self, searcher):
+        assert searcher._infer_file_role("backend/tests/test_searcher.py") == "test"
+
+
+class TestCodeRerankerRoleWeights:
+    def test_analyzer_ranks_above_adapter(self):
+        from services.reranker import CodeReranker
+
+        analyzer = SearchResultItem(
+            id=uuid4(),
+            file_id=uuid4(),
+            repo_id=uuid4(),
+            repo_name="test",
+            file_path="backend/services/searcher.py",
+            language="python",
+            content="def search(): pass",
+            line=1,
+            score=0.5,
+            score_breakdown={},
+            file_role="analyzer",
+        )
+        adapter = SearchResultItem(
+            id=uuid4(),
+            file_id=uuid4(),
+            repo_id=uuid4(),
+            repo_name="test",
+            file_path="packages/core/src/data/adapter.ts",
+            language="typescript",
+            content="export class Adapter {}",
+            line=1,
+            score=0.5,
+            score_breakdown={},
+            file_role="adapter",
+        )
+
+        reranked = CodeReranker().rerank("search", [adapter, analyzer])
+
+        assert reranked[0].file_role == "analyzer"
+        assert reranked[1].file_role == "adapter"
+        assert reranked[0].score > reranked[1].score
+
+    def test_domain_relevance_boosts_matching_paths(self):
+        from services.reranker import CodeReranker
+
+        item = SearchResultItem(
+            id=uuid4(),
+            file_id=uuid4(),
+            repo_id=uuid4(),
+            repo_name="test",
+            file_path="backend/services/query_intent.py",
+            language="python",
+            content="def analyze(): pass",
+            line=1,
+            score=0.5,
+            score_breakdown={},
+            file_role="analyzer",
+        )
+
+        reranked = CodeReranker().rerank("query", [item], search_terms=["query", "intent"])
+
+        assert reranked[0].score > 0.5
+
+
+class TestSearchAndFuseDefaults:
+    def test_default_top_k_is_20(self, searcher):
+        repo_id = uuid4()
+        hit = _make_hit()
+        searcher._vector_search = MagicMock(return_value=[hit])
+        searcher._symbol_search_multi = MagicMock(return_value=[])
+        searcher._bm25_search = MagicMock(return_value=[])
+        searcher._sparse_search = MagicMock(return_value=[])
+        searcher._graph_search = MagicMock(return_value=[])
+
+        with patch("services.searcher.CodeReranker") as mock_code_reranker_cls, \
+             patch("services.searcher.get_m3_reranker") as mock_get_m3_reranker:
+            mock_code_reranker_cls.return_value.rerank.return_value = []
+            mock_get_m3_reranker.return_value.model = None
+            mock_get_m3_reranker.return_value.rerank.return_value = []
+
+            searcher._search_and_fuse("订单", repo_id, 10)
+
+        assert searcher._vector_search.call_args[1]["top_k"] == 20
+        assert searcher._bm25_search.call_args[1]["top_k"] == 20
+        assert searcher._sparse_search.call_args[1]["top_k"] == 20
+
+    def test_top_k_override_still_works(self, searcher):
+        repo_id = uuid4()
+        hit = _make_hit()
+        searcher._vector_search = MagicMock(return_value=[hit])
+        searcher._symbol_search_multi = MagicMock(return_value=[])
+        searcher._bm25_search = MagicMock(return_value=[])
+        searcher._sparse_search = MagicMock(return_value=[])
+        searcher._graph_search = MagicMock(return_value=[])
+
+        with patch("services.searcher.CodeReranker") as mock_code_reranker_cls, \
+             patch("services.searcher.get_m3_reranker") as mock_get_m3_reranker:
+            mock_code_reranker_cls.return_value.rerank.return_value = []
+            mock_get_m3_reranker.return_value.model = None
+            mock_get_m3_reranker.return_value.rerank.return_value = []
+
+            searcher._search_and_fuse(
+                "订单", repo_id, 10,
+                path_overrides={"top_k": {"vector": 7, "bm25": 13}},
+            )
+
+        assert searcher._vector_search.call_args[1]["top_k"] == 7
+        assert searcher._bm25_search.call_args[1]["top_k"] == 13
+
+
+class TestRoleWeightsAfterM3:
+    def test_m3_output_receives_role_weight_multiplier(self, searcher):
+        repo_id = uuid4()
+        adapter_hit = _make_hit(file_path="packages/core/src/data/adapter.ts")
+        analyzer_hit = _make_hit(file_path="backend/services/searcher.py")
+        searcher._vector_search = MagicMock(return_value=[adapter_hit, analyzer_hit])
+        searcher._symbol_search_multi = MagicMock(return_value=[])
+        searcher._bm25_search = MagicMock(return_value=[])
+        searcher._sparse_search = MagicMock(return_value=[])
+        searcher._graph_search = MagicMock(return_value=[])
+
+        adapter = SearchResultItem(
+            id=adapter_hit.result_id,
+            file_id=adapter_hit.file_id,
+            repo_id=adapter_hit.repo_id,
+            repo_name="test",
+            file_path="packages/core/src/data/adapter.ts",
+            language="typescript",
+            content="export class Adapter {}",
+            line=1,
+            score=0.9,
+            score_breakdown={},
+            file_role="adapter",
+        )
+        analyzer = SearchResultItem(
+            id=analyzer_hit.result_id,
+            file_id=analyzer_hit.file_id,
+            repo_id=analyzer_hit.repo_id,
+            repo_name="test",
+            file_path="backend/services/searcher.py",
+            language="python",
+            content="def search(): pass",
+            line=1,
+            score=0.8,
+            score_breakdown={},
+            file_role="analyzer",
+        )
+
+        with patch("services.searcher.CodeReranker") as mock_code_reranker_cls, \
+             patch("services.searcher.get_m3_reranker") as mock_get_m3_reranker:
+            mock_code_reranker_cls.return_value.rerank.return_value = [adapter, analyzer]
+            mock_m3 = MagicMock()
+            mock_m3.model = object()  # model loaded
+            mock_m3.rerank.return_value = [adapter, analyzer]
+            mock_get_m3_reranker.return_value = mock_m3
+
+            hits = searcher._search_and_fuse("search", repo_id, 10)
+
+        # analyzer: 0.8 * 1.25 = 1.0; adapter: 0.9 * 0.75 = 0.675
+        assert hits[0].file_path == "backend/services/searcher.py"
+        assert hits[1].file_path == "packages/core/src/data/adapter.ts"
+
+
+class TestRouteEntryPoints:
+    def test_finds_matching_handlers(self, searcher):
+        repo_id = uuid4()
+        sym_id = uuid4()
+        file_id = uuid4()
+
+        route = MagicMock()
+        route.file_id = file_id
+        route.path = "/api/search"
+        route.handler_symbol = "debug_search"
+
+        sym = _make_symbol(symbol_id=sym_id, name="debug_search")
+        sym.file_id = file_id
+        sym.file.path = "backend/api/search.py"
+
+        searcher.db.query.return_value.filter.return_value.all.return_value = [route]
+        searcher.db.query.return_value.filter.return_value.first.return_value = sym
+
+        results = searcher._find_route_entry_points(
+            "search debug", ["search", "debug"], repo_id
+        )
+
+        assert len(results) == 1
+        assert results[0][0].name == "debug_search"
+        assert results[0][1] == 0.96
+
+    def test_ignores_non_matching_routes(self, searcher):
+        repo_id = uuid4()
+
+        route = MagicMock()
+        route.path = "/api/orders"
+        route.handler_symbol = "create_order"
+
+        searcher.db.query.return_value.filter.return_value.all.return_value = [route]
+
+        results = searcher._find_route_entry_points(
+            "search debug", ["search", "debug"], repo_id
+        )
+
+        assert results == []
+
+    def test_prefers_route_file_symbol_on_name_collision(self, searcher):
+        """When two symbols share a handler name, pick the one in the route's file."""
+        repo_id = uuid4()
+        route_file_id = uuid4()
+        other_file_id = uuid4()
+
+        route = MagicMock()
+        route.file_id = route_file_id
+        route.path = "/api/search"
+        route.handler_symbol = "search"
+
+        route_sym = _make_symbol(symbol_id=uuid4(), name="search")
+        route_sym.file_id = route_file_id
+        route_sym.file.path = "backend/api/search.py"
+
+        other_sym = _make_symbol(symbol_id=uuid4(), name="search")
+        other_sym.file_id = other_file_id
+        other_sym.file.path = "backend/services/searcher.py"
+
+        searcher.db.query.return_value.filter.return_value.all.return_value = [route]
+        # The first .first() is the Symbol lookup; it must return the route symbol.
+        searcher.db.query.return_value.filter.return_value.first.return_value = route_sym
+
+        results = searcher._find_route_entry_points(
+            "search", ["search"], repo_id
+        )
+
+        assert len(results) == 1
+        assert results[0][0].file_id == route_file_id
+        assert results[0][0].file.path == "backend/api/search.py"
+
+    def test_prioritizes_route_handler_in_search_with_context(self, searcher):
+        from services.query_intent import QueryIntent, SearchStrategy
+
+        repo_id = uuid4()
+        route_symbol_id = uuid4()
+        hit_symbol_id = uuid4()
+
+        route = MagicMock()
+        route.path = "/api/search"
+        route.handler_symbol = "debug_search"
+
+        route_sym = _make_symbol(symbol_id=route_symbol_id, name="debug_search")
+        route_sym.file.path = "backend/api/search.py"
+
+        hit_sym = _make_symbol(symbol_id=hit_symbol_id, name="search_internal")
+        hit_sym.file.path = "backend/services/searcher.py"
+
+        # First .all() returns routes; subsequent .first() calls return route_sym,
+        # hit_sym, then None for the missing SymbolFlowLabel lookups.
+        searcher.db.query.return_value.filter.return_value.all.return_value = [route]
+        searcher.db.query.return_value.filter.return_value.first.side_effect = [
+            route_sym,
+            hit_sym,
+            None,
+            None,
+        ]
+
+        hit = _make_hit(symbol_id=hit_symbol_id)
+        hit.file_path = "backend/services/searcher.py"
+
+        intent = QueryIntent(
+            original="search debug",
+            intent_type="general",
+            is_chinese=False,
+            expanded_terms=["search", "debug"],
+            search_strategy=SearchStrategy("vector", "bm25"),
+        )
+
+        with patch("services.searcher.get_m3_reranker") as mock_get_m3_reranker:
+            mock_get_m3_reranker.return_value.model = None
+            mock_get_m3_reranker.return_value.rerank.return_value = []
+            searcher._search_and_fuse = MagicMock(return_value=[hit])
+            searcher._infer_file_role = MagicMock(return_value="service")
+
+            context = searcher.search_with_context(
+                "search debug", repo_id=repo_id, intent=intent, limit=10
+            )
+
+        assert len(context.entry_points) == 2
+        assert context.entry_points[0].name == "debug_search"
+        assert context.entry_points[0].file_path == "backend/api/search.py"
+
+
+class TestNPlusOneFixes:
+    """Verify the N+1 query optimizations in call-chain and symbol search."""
+
+    def test_build_call_chain_batches_symbol_and_label_queries(self, searcher):
+        """With N callers/callees, only 2 DB bulk queries should run."""
+        from schemas import SymbolEntry
+
+        root_id = uuid4()
+        caller_ids = [uuid4() for _ in range(5)]
+        callee_ids = [uuid4() for _ in range(5)]
+
+        root = _make_symbol(symbol_id=root_id, name="root")
+        callers = [_make_symbol(symbol_id=i, name=f"caller_{n}") for n, i in enumerate(caller_ids)]
+        callees = [_make_symbol(symbol_id=i, name=f"callee_{n}") for n, i in enumerate(callee_ids)]
+
+        searcher.db.query.return_value.filter.return_value.first.return_value = root
+        searcher._query_callers = MagicMock(return_value=caller_ids)
+        searcher._query_callees = MagicMock(return_value=callee_ids)
+
+        # First .all() loads symbols; second .all() loads flow labels.
+        searcher.db.query.return_value.filter.return_value.all.side_effect = [
+            callers + callees,
+            [],
+        ]
+
+        # Mock entry building so we don't depend on real SymbolFlowLabel rows.
+        searcher._symbol_entry_with_label = MagicMock(
+            side_effect=lambda sym, label=None: SymbolEntry(
+                id=str(sym.id),
+                name=sym.name,
+                type=sym.type,
+                file_path=sym.file.path,
+                line=sym.line,
+            )
+        )
+
+        chain = searcher._build_call_chain(
+            root_id, depth=1, include_callers=True, include_callees=True
+        )
+
+        # Upstream + downstream = 10 related symbols loaded in bulk.
+        assert len(chain.upstream) == 5
+        assert len(chain.downstream) == 5
+
+        all_calls = searcher.db.query.return_value.filter.return_value.all.call_args_list
+        assert len(all_calls) == 2, "Expected one bulk Symbol query and one bulk SymbolFlowLabel query"
+
+    def test_symbols_to_hits_batches_embedding_queries(self, searcher):
+        """With N symbols, embeddings should be loaded in a single batch query."""
+        from unittest.mock import patch
+        from models import Embedding
+
+        file_id = uuid4()
+        symbols = [_make_symbol(symbol_id=uuid4(), name=f"sym_{i}") for i in range(5)]
+        for sym in symbols:
+            sym.file_id = file_id
+
+        emb = MagicMock(spec=Embedding)
+        emb.id = uuid4()
+        emb.file_id = file_id
+        emb.start_line = 1
+        emb.end_line = 100
+        emb.content = "def batch(): pass"
+
+        with patch.object(searcher.embedding_repo, "get_by_file_ids", return_value={file_id: [emb]}) as mock_get:
+            hits = searcher._symbols_to_hits(symbols)
+
+        assert len(hits) == 5
+        mock_get.assert_called_once()
+        call_file_ids = mock_get.call_args[0][0]
+        assert file_id in call_file_ids
+        assert len(call_file_ids) == 1

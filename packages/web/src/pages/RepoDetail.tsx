@@ -2,7 +2,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
-  FolderGit2,
   RefreshCw,
   Trash2,
   Clock,
@@ -18,26 +17,47 @@ import {
   AlertTriangle,
   Terminal,
   ChevronUp,
+  Settings,
+  GitBranch,
 } from 'lucide-react';
 import { useRepo, useRepos } from '../hooks/useRepos';
 import { useIndexing, STAGE_ORDER, STAGE_LABELS } from '../hooks/useIndexing';
 import { StatusBadge } from '../components/StatusBadge';
+import { RepoProviderIcon } from '../components/RepoProviderIcon';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
-import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing } from '../api';
+import { fetchRepoFiles, fetchRepoSymbols, cancelIndexing, previewRepoBranches } from '../api';
+import type { BranchPreview } from '../api';
 import { clsx } from 'clsx';
 import { useState, useRef, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 
 export const RepoDetail = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { deleteRepo, reindex, isDeleting, isReindexing } = useRepos();
+  const queryClient = useQueryClient();
+  const { deleteRepo, reindex, updateRepo, isDeleting, isReindexing, isUpdating } = useRepos();
   const { data: repo, isLoading, error } = useRepo(id!);
   const { isIndexing, progress, stageProgress, currentStageLabel, timing, error: indexingError, logs } = useIndexing(id!, repo);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [showLogs, setShowLogs] = useState(false);
   const [isCanceling, setIsCanceling] = useState(false);
+  const [showBranchModal, setShowBranchModal] = useState(false);
+  const [activeBranchesInput, setActiveBranchesInput] = useState('');
+  const [preview, setPreview] = useState<BranchPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
+  const [saveNotice, setSaveNotice] = useState('');
   const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  const showTemporaryNotice = (text: string) => {
+    setSaveNotice(text);
+    // 刷新仓库信息与索引日志（即使仓库处于 indexed 也会重新拉取）
+    queryClient.invalidateQueries({ queryKey: ['repo', id] });
+    queryClient.invalidateQueries({ queryKey: ['indexingLogs', id] });
+    window.setTimeout(() => setSaveNotice(''), 6000);
+  };
 
   useEffect(() => {
     if (showLogs && logsContainerRef.current) {
@@ -111,6 +131,69 @@ export const RepoDetail = () => {
 
   const handleReindex = () => {
     reindex(id!);
+    showTemporaryNotice('已触发增量同步，请查看下方日志确认执行结果');
+  };
+
+  const handleOpenBranchModal = () => {
+    const branches = repo?.activeBranches?.filter((b) => b !== repo.defaultBranch) || [];
+    setActiveBranchesInput(branches.join(', '));
+    setSelectedBranches(branches);
+    setPreview(null);
+    setPreviewError('');
+    // 先立即打开弹窗，远程分支列表由用户点击「拉取远程分支」手动触发，
+    // 避免网络慢/失败时弹窗卡住，也便于失败后原地重试。
+    setShowBranchModal(true);
+  };
+
+  const handleFetchBranches = () => {
+    if (!repo?.gitUrl) return;
+    setPreviewLoading(true);
+    setPreviewError('');
+    setPreview(null);
+    previewRepoBranches(repo.gitUrl)
+      .then((data) => setPreview(data))
+      .catch((err: any) =>
+        setPreviewError(err?.response?.data?.detail || err?.message || '无法获取远程分支列表')
+      )
+      .finally(() => setPreviewLoading(false));
+  };
+
+  const toggleBranch = (branch: string) => {
+    setSelectedBranches((prev) => {
+      if (prev.includes(branch)) {
+        return prev.filter((b) => b !== branch);
+      }
+      if (prev.length >= 2) {
+        alert('个人版最多支持 2 个业务分支');
+        return prev;
+      }
+      return [...prev, branch];
+    });
+  };
+
+  const handleSaveBranches = () => {
+    const activeBranches =
+      preview && !previewLoading
+        ? selectedBranches
+        : activeBranchesInput
+            .split(/[,\s]+/)
+            .map((b) => b.trim())
+            .filter((b) => b.length > 0);
+    if (activeBranches.length > 2) {
+      alert('个人版最多支持 2 个业务分支');
+      return;
+    }
+    updateRepo(
+      { id: id!, data: { activeBranches } },
+      {
+        onSuccess: () => {
+          setShowBranchModal(false);
+          showTemporaryNotice(
+            '业务分支配置已保存，已触发增量同步（删除/重建分支索引），请查看下方日志'
+          );
+        },
+      }
+    );
   };
 
   const toggleDir = (dir: string) => {
@@ -218,20 +301,53 @@ export const RepoDetail = () => {
         返回仓库列表
       </button>
 
+      {saveNotice && (
+        <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl px-4 py-3">
+          <Info className="w-4 h-4 shrink-0" />
+          {saveNotice}
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
         <div className="flex items-start justify-between mb-6">
           <div className="flex items-center gap-4">
-            <div className="p-3 bg-indigo-100 dark:bg-indigo-900/30 rounded-xl">
-              <FolderGit2 className="w-8 h-8 text-indigo-600 dark:text-indigo-400" />
-            </div>
+            <RepoProviderIcon
+              gitUrl={repo.gitUrl}
+              containerClassName="p-3 rounded-xl"
+              className="w-8 h-8"
+            />
             <div>
               <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
                 {repo.name}
               </h1>
-              <p className="text-slate-500 dark:text-slate-400 mt-1">
+              {repo.description && (
+                <p className="text-slate-500 dark:text-slate-400 mt-1 max-w-lg">
+                  {repo.description}
+                </p>
+              )}
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
                 {repo.path}
               </p>
+              {/* 已索引分支（与列表卡片一致） */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800" title="默认分支">
+                  <GitBranch className="w-3 h-3" />
+                  {repo.defaultBranch}
+                </span>
+                {repo.activeBranches
+                  .filter((b) => b !== repo.defaultBranch)
+                  .slice(0, 2)
+                  .map((branch) => (
+                    <span
+                      key={branch}
+                      className="text-xs px-2 py-0.5 rounded-full border bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600"
+                      title="业务分支"
+                    >
+                      {branch}
+                    </span>
+                  ))}
+              </div>
             </div>
           </div>
           <StatusBadge status={repo.status} />
@@ -526,19 +642,41 @@ export const RepoDetail = () => {
       )}
 
       {/* Actions */}
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         <button
           onClick={handleReindex}
-          disabled={isReindexing}
+          disabled={isReindexing || repo.status === 'indexing'}
           className={clsx(
             'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors',
-            isReindexing
+            isReindexing || repo.status === 'indexing'
               ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
               : 'bg-indigo-500 hover:bg-indigo-600 text-white'
           )}
         >
           <RefreshCw className={clsx('w-5 h-5', isReindexing && 'animate-spin')} />
           {repo.status === 'indexing' ? '强制重新索引' : '重新索引'}
+        </button>
+        <button
+          onClick={handleReindex}
+          disabled={isReindexing || repo.status === 'indexing'}
+          title="仅同步有变更的分支增量数据，服务停机后点击此按钮可补齐遗漏的增量更新"
+          className={clsx(
+            'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-colors border border-indigo-200 dark:border-indigo-700',
+            isReindexing || repo.status === 'indexing'
+              ? 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
+              : 'bg-white dark:bg-slate-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400'
+          )}
+        >
+          <GitBranch className="w-5 h-5" />
+          增量同步
+        </button>
+        <button
+          onClick={handleOpenBranchModal}
+          disabled={isUpdating}
+          className="flex items-center gap-2 px-6 py-3 bg-white dark:bg-slate-700 hover:bg-slate-50 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 rounded-xl font-medium transition-colors"
+        >
+          <Settings className="w-5 h-5" />
+          配置业务分支
         </button>
         <button
           onClick={handleDelete}
@@ -549,6 +687,99 @@ export const RepoDetail = () => {
           删除仓库
         </button>
       </div>
+
+      {/* Branch Config Modal */}
+      {showBranchModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-xl max-w-md w-full p-6">
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-2">
+              配置业务分支
+            </h3>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
+              默认分支始终为 <span className="font-medium text-slate-700 dark:text-slate-300">{repo.defaultBranch}</span>。
+              下方可配置额外索引的最多 2 个业务分支，修改后会自动触发增量同步。
+            </p>
+            {repo.gitUrl && !previewLoading && !preview && !previewError && (
+              <button
+                onClick={handleFetchBranches}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 mb-4 border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg text-sm font-medium transition-colors"
+              >
+                <GitBranch className="w-4 h-4" />
+                拉取远程分支
+              </button>
+            )}
+            {previewLoading && (
+              <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 mb-4">
+                <LoadingSpinner size="sm" />
+                正在获取远程分支列表...
+              </div>
+            )}
+            {previewError && !previewLoading && (
+              <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg mb-4">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span className="flex-1">无法获取远程分支：{previewError}</span>
+                <button
+                  onClick={handleFetchBranches}
+                  className="shrink-0 text-indigo-600 dark:text-indigo-400 font-medium hover:underline"
+                >
+                  重试
+                </button>
+              </div>
+            )}
+            {preview && !previewLoading && preview.branches.filter((b) => b !== repo.defaultBranch).length > 0 ? (
+              <div className="max-h-48 overflow-y-auto space-y-1.5 rounded-lg border border-slate-200 dark:border-slate-600 p-2 mb-4">
+                {preview.branches
+                  .filter((b) => b !== repo.defaultBranch)
+                  .map((branch) => {
+                    const checked = selectedBranches.includes(branch);
+                    return (
+                      <label
+                        key={branch}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleBranch(branch)}
+                          className="w-4 h-4 accent-indigo-500"
+                        />
+                        <span className="text-sm text-slate-700 dark:text-slate-300">{branch}</span>
+                      </label>
+                    );
+                  })}
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={activeBranchesInput}
+                onChange={(e) => setActiveBranchesInput(e.target.value)}
+                placeholder="feature/payment, feature/order"
+                className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4"
+              />
+            )}
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-6">
+              {preview && !previewLoading
+                ? '勾选要额外索引的业务分支（最多 2 个）；留空表示只保留默认分支。'
+                : '用逗号或空格分隔；留空表示只保留默认分支。'}
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowBranchModal(false)}
+                className="px-4 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSaveBranches}
+                disabled={isUpdating}
+                className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+              >
+                {isUpdating ? '保存中...' : '保存并同步'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* File Tree & Symbols */}
       {repo.status === 'indexed' && (

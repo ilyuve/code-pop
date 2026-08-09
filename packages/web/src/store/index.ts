@@ -3,6 +3,13 @@ import { persist } from 'zustand/middleware';
 import type { Repo, SearchResult, Settings } from '../types';
 import type { WebSocketStatus } from '../hooks/useWebSocket';
 
+export interface SearchMeta {
+  requested_branch: string;
+  actual_branch: string;
+  branch_fallback: boolean;
+  message?: string;
+}
+
 interface LogEntry {
   timestamp: string;
   level: string;
@@ -21,6 +28,8 @@ interface AppStore {
   // Search State
   searchResults: SearchResult[];
   setSearchResults: (results: SearchResult[]) => void;
+  searchMeta: SearchMeta | null;
+  setSearchMeta: (meta: SearchMeta | null) => void;
   recentSearches: string[];
   addRecentSearch: (query: string) => void;
 
@@ -44,6 +53,23 @@ interface AppStore {
   addIndexingLog: (repoId: string, log: LogEntry) => void;
   setIndexingLogs: (repoId: string, logs: LogEntry[]) => void;
   clearIndexingLogs: (repoId: string) => void;
+
+  // Live indexing progress (driven by global WebSocket / REST polling)
+  indexingProgress: Record<string, LiveIndexingProgress>;
+  setIndexingProgress: (repoId: string, data: LiveIndexingProgress) => void;
+}
+
+export interface LiveStageProgress {
+  stage: string;
+  current: number;
+  total: number;
+  percentage: number;
+}
+
+export interface LiveIndexingProgress {
+  progress: number;
+  stage: string;
+  stageProgress: LiveStageProgress | null;
 }
 
 export const useStore = create<AppStore>()(
@@ -67,6 +93,8 @@ export const useStore = create<AppStore>()(
       // Search State
       searchResults: [],
       setSearchResults: (results) => set({ searchResults: results }),
+      searchMeta: null,
+      setSearchMeta: (meta) => set({ searchMeta: meta }),
       recentSearches: [],
       addRecentSearch: (query) =>
         set((state) => ({
@@ -119,6 +147,13 @@ export const useStore = create<AppStore>()(
           delete newLogs[repoId];
           return { indexingLogs: newLogs };
         }),
+
+      // Live indexing progress
+      indexingProgress: {},
+      setIndexingProgress: (repoId, data) =>
+        set((state) => ({
+          indexingProgress: { ...state.indexingProgress, [repoId]: data },
+        })),
     }),
     {
       name: 'codepop-storage',

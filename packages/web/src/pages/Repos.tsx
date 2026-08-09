@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, X, FolderGit2, GitBranch } from 'lucide-react';
+import { Plus, X, FolderGit2, GitBranch, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { useRepos } from '../hooks/useRepos';
 import { RepoCard } from '../components/RepoCard';
 import { LoadingSpinner, PageLoader } from '../components/LoadingSpinner';
 import { useStore } from '../store';
+import { previewRepoBranches } from '../api';
+import type { BranchPreview } from '../api';
 
 type AddType = 'path' | 'git';
 
@@ -30,90 +32,93 @@ export const Repos = () => {
     isReindexing,
   } = useRepos();
 
-  const addRealTimeUpdate = useStore((state) => state.addRealTimeUpdate);
+  // Live indexing progress is maintained by the global WebSocket bridge
+  // (mounted in App.tsx), so the card progress matches the detail page.
+  const indexingProgress = useStore((state) => state.indexingProgress);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [addType, setAddType] = useState<AddType>('path');
   const [pathInput, setPathInput] = useState('');
   const [gitUrlInput, setGitUrlInput] = useState('');
+  const [activeBranchesInput, setActiveBranchesInput] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [indexingProgress, setIndexingProgress] = useState<Record<string, IndexingProgress>>({});
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectDelayRef = useRef(1000);
 
-  const connectWebSocket = () => {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
-    
-    wsRef.current = new WebSocket(wsUrl);
+  // Remote branch preview for the create-repo form (manually triggered).
+  const [preview, setPreview] = useState<BranchPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [selectedActiveBranches, setSelectedActiveBranches] = useState<string[]>([]);
 
-    wsRef.current.onopen = () => {
-      console.log('WebSocket connected');
-      reconnectDelayRef.current = 1000;
-    };
-
-    wsRef.current.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'repo_update') {
-          const { repoId, progress, stage, stage_progress, error, log } = data;
-          setIndexingProgress(prev => ({
-            ...prev,
-            [repoId]: {
-              progress: progress || 0,
-              stage: stage || '',
-              stageProgress: stage_progress || null,
-            },
-          }));
-          addRealTimeUpdate(`repo_${repoId}`, {
-            progress,
-            stage,
-            stage_progress,
-            error,
-            log,
-          });
-        }
-      } catch (e) {
-        console.error('Failed to parse WebSocket message:', e);
-      }
-    };
-
-    wsRef.current.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-
-    wsRef.current.onclose = (event) => {
-      console.log('WebSocket disconnected, reconnecting in', reconnectDelayRef.current, 'ms');
-      setTimeout(() => {
-        if (wsRef.current?.readyState !== WebSocket.OPEN) {
-          connectWebSocket();
-        }
-      }, reconnectDelayRef.current);
-      reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, 30000);
-    };
+  const parseActiveBranches = (): string[] => {
+    return activeBranchesInput
+      .split(/[,\s]+/)
+      .map((b) => b.trim())
+      .filter((b) => b.length > 0);
   };
 
-  useEffect(() => {
-    connectWebSocket();
+  const fetchPreview = async (url: string) => {
+    setPreviewLoading(true);
+    setPreviewError('');
+    setPreview(null);
+    setSelectedActiveBranches([]);
+    try {
+      const data = await previewRepoBranches(url);
+      setPreview(data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || '无法获取远程分支列表';
+      setPreviewError(detail);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmount');
+  const handleGitUrlChange = (value: string) => {
+    setGitUrlInput(value);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setPreview(null);
+      setPreviewError('');
+      setSelectedActiveBranches([]);
+    }
+  };
+
+  const toggleActiveBranch = (branch: string) => {
+    setSelectedActiveBranches((prev) => {
+      if (prev.includes(branch)) {
+        return prev.filter((b) => b !== branch);
       }
-    };
-  }, [addRealTimeUpdate]);
+      if (prev.length >= 2) {
+        alert('个人版最多支持 2 个业务分支');
+        return prev;
+      }
+      return [...prev, branch];
+    });
+  };
 
   const handleAdd = () => {
+    const payload: Parameters<typeof addRepo>[0] =
+      addType === 'path' ? { path: pathInput.trim() } : { gitUrl: gitUrlInput.trim() };
+    const activeBranches =
+      addType === 'git' && selectedActiveBranches.length > 0
+        ? selectedActiveBranches
+        : parseActiveBranches();
+    if (activeBranches.length > 0) {
+      payload.activeBranches = activeBranches;
+    }
     if (addType === 'path' && pathInput.trim()) {
-      addRepo({ path: pathInput.trim() }, { onSuccess: handleAddSuccess, onError: handleAddError });
+      addRepo(payload, { onSuccess: handleAddSuccess, onError: handleAddError });
     } else if (addType === 'git' && gitUrlInput.trim()) {
-      addRepo({ gitUrl: gitUrlInput.trim() }, { onSuccess: handleAddSuccess, onError: handleAddError });
+      addRepo(payload, { onSuccess: handleAddSuccess, onError: handleAddError });
     }
   };
 
   const handleAddSuccess = () => {
     setPathInput('');
     setGitUrlInput('');
+    setActiveBranchesInput('');
+    setSelectedActiveBranches([]);
+    setPreview(null);
+    setPreviewError('');
     setShowAddModal(false);
   };
 
@@ -245,7 +250,7 @@ export const Repos = () => {
             </div>
 
             {/* Input */}
-            <div className="mb-6">
+            <div className="mb-4">
               {addType === 'path' ? (
                 <input
                   type="text"
@@ -258,12 +263,107 @@ export const Repos = () => {
                 <input
                   type="text"
                   value={gitUrlInput}
-                  onChange={(e) => setGitUrlInput(e.target.value)}
+                  onChange={(e) => handleGitUrlChange(e.target.value)}
                   placeholder="https://github.com/user/repo.git"
                   className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               )}
             </div>
+
+            {/* Git branch preview (only for git URL, manually triggered) */}
+            {addType === 'git' && gitUrlInput.trim() && (
+              <div className="mb-6 space-y-4">
+                {!preview && !previewLoading && !previewError && (
+                  <button
+                    onClick={() => fetchPreview(gitUrlInput.trim())}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    <GitBranch className="w-4 h-4" />
+                    拉取远程分支
+                  </button>
+                )}
+                {previewLoading && (
+                  <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    正在获取远程分支列表...
+                  </div>
+                )}
+                {previewError && !previewLoading && (
+                  <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg">
+                    <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                    <span className="flex-1">无法获取远程分支：{previewError}</span>
+                    <button
+                      onClick={() => fetchPreview(gitUrlInput.trim())}
+                      className="shrink-0 text-indigo-600 dark:text-indigo-400 font-medium hover:underline"
+                    >
+                      重试
+                    </button>
+                  </div>
+                )}
+                {preview && !previewLoading && (
+                  <>
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="text-slate-500 dark:text-slate-400">默认分支：</span>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 font-medium">
+                        <CheckCircle2 className="w-3 h-3" />
+                        {preview.default_branch}
+                      </span>
+                      <span className="text-xs text-slate-400">（自动识别，作为主分支始终全量索引）</span>
+                    </div>
+                    {preview.branches.filter((b) => b !== preview.default_branch).length > 0 && (
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                          业务分支（最多 2 个）
+                        </label>
+                        <div className="max-h-40 overflow-y-auto space-y-1.5 rounded-lg border border-slate-200 dark:border-slate-600 p-2">
+                          {preview.branches
+                            .filter((b) => b !== preview.default_branch)
+                            .map((branch) => {
+                              const checked = selectedActiveBranches.includes(branch);
+                              return (
+                                <label
+                                  key={branch}
+                                  className="flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleActiveBranch(branch)}
+                                    className="w-4 h-4 accent-indigo-500"
+                                  />
+                                  <span className="text-sm text-slate-700 dark:text-slate-300">{branch}</span>
+                                </label>
+                              );
+                            })}
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          选中后为这些分支构建额外 diff 索引。
+                        </p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Active Branches (legacy path mode) */}
+            {addType === 'path' && (
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  业务分支（可选，最多 2 个，用逗号或空格分隔）
+                </label>
+                <input
+                  type="text"
+                  value={activeBranchesInput}
+                  onChange={(e) => setActiveBranchesInput(e.target.value)}
+                  placeholder="feature/payment, feature/order"
+                  className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  默认只索引主分支；配置业务分支后会额外构建 diff 索引。
+                </p>
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex gap-3">

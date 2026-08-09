@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   FolderGit2,
@@ -16,56 +15,18 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { useRepos } from '../hooks/useRepos';
 import { useSearch } from '../hooks/useSearch';
-import { useWebSocket } from '../hooks/useWebSocket';
-import { useStore } from '../store';
 import { fetchSearchHistoryStats } from '../api';
 import { ServiceStatus } from '../components/ServiceStatus';
 
 export const Dashboard = () => {
   const { repos, isLoading: reposLoading } = useRepos();
   const { recentSearches } = useSearch();
-  const { setWsStatus, addRealTimeUpdate, updateRepo } = useStore();
-  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
-  const [animated, setAnimated] = useState(false);
 
   const { data: searchStats } = useQuery({
     queryKey: ['searchHistoryStats'],
     queryFn: () => fetchSearchHistoryStats(),
     refetchInterval: 30000,
   });
-
-  // WebSocket connection for real-time updates
-  const { status, lastMessage, send } = useWebSocket(wsUrl, {
-    onMessage: (data: unknown) => {
-      const msg = data as { type?: string; repoId?: string; [key: string]: unknown };
-      if (msg.type === 'repo_update' && msg.repoId) {
-        addRealTimeUpdate(`repo_${msg.repoId}`, msg);
-        // Update repo in store if we have the data
-        if (msg.repoId && msg.data) {
-          updateRepo(msg.repoId as string, msg.data as Partial<import('../types').Repo>);
-        }
-      }
-    },
-    onConnect: () => setWsStatus('connected'),
-    onDisconnect: () => setWsStatus('disconnected'),
-    reconnectOnMount: true,
-  });
-
-  // Sync WebSocket status to store
-  useEffect(() => {
-    setWsStatus(status);
-  }, [status, setWsStatus]);
-
-  // Request initial data on connect
-  useEffect(() => {
-    if (status === 'connected') {
-      send({ type: 'subscribe', channels: ['repos', 'indexing'] });
-    }
-  }, [status, send]);
-
-  useEffect(() => {
-    setAnimated(true);
-  }, []);
 
   const totalFiles = repos.reduce((acc, r) => acc + (r.fileCount || 0), 0);
   const totalSymbols = repos.reduce((acc, r) => acc + (r.symbolCount || 0), 0);
