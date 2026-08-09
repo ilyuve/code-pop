@@ -150,17 +150,17 @@ export const Dashboard = () => {
             </div>
             <div>
               <h1 className="text-3xl font-black text-white tracking-tight">
-                代码波普
+                Code:Pop 代码波普
               </h1>
               <p className="text-white/80 font-medium">
-                让代码真正活着，让 AI 真正理解
+                让代码真正活着，让 AI 真正理解代码
               </p>
             </div>
           </div>
 
           <p className="text-white/90 text-lg mb-6 max-w-2xl">
-            面向 AI Agent 的代码专用检索基础设施。通过混合索引、智能检索与上下文压缩，
-            为 Claude Code、Cursor 等编码 Agent 提供精准的代码上下文。
+            面向 AI Agent 的代码专用检索基础设施。通过混合索引、中文检索增强与上下文压缩，
+            为 Trae、Claude Code、Cursor 等编码 Agent 提供精准的代码上下文。
           </p>
 
           <div className="flex gap-4">
