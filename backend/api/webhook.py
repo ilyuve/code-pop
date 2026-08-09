@@ -124,15 +124,21 @@ async def github_webhook(
 
 
 @router.post("/webhook/github/{repo_id}", status_code=status.HTTP_202_ACCEPTED)
-async def github_webhook_by_repo_id(
+@router.post("/webhook/gitee/{repo_id}", status_code=status.HTTP_202_ACCEPTED)
+async def repo_webhook_by_id(
     repo_id: UUID,
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     x_hub_signature_256: Optional[str] = Header(None),
     x_gitee_token: Optional[str] = Header(None),
+    x_gitee_event: Optional[str] = Header(None),
 ) -> dict:
-    """Alternative webhook URL that triggers indexing for a known repo_id."""
+    """仓库级 Webhook 回调（GitHub / Gitee 共用）。
+
+    按仓库平台返回 /webhook/github/{repo_id} 或 /webhook/gitee/{repo_id}，
+    两个路径指向同一处理逻辑，通过请求头区分平台验签。
+    """
     repo = db.query(Repository).filter(Repository.id == repo_id).first()
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -144,8 +150,42 @@ async def github_webhook_by_repo_id(
     if x_gitee_token:
         if not _verify_gitee_token(x_gitee_token, repo_token):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gitee token")
-    elif not _verify_github_signature(payload, x_hub_signature_256, repo_token):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+        event_type = (x_gitee_event or "push").lower()
+    else:
+        if not _verify_github_signature(payload, x_hub_signature_256, repo_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+        event_type = (request.headers.get("x-github-event") or "push").lower()
+
+    if event_type != "push":
+        return {"status": "ignored", "event": event_type}
+
+    # GitHub 默认以 application/x-www-form-urlencoded 发送，payload 在 form 的 payload 字段中；
+    # Gitee 直接发送 application/json body。解析时兼容两种格式。
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        raw_payload = form.get("payload")
+        if raw_payload is None:
+            raise HTTPException(status_code=400, detail="Missing payload field")
+        raw_payload = raw_payload.encode() if isinstance(raw_payload, str) else raw_payload
+    else:
+        raw_payload = payload
+    try:
+        data = json.loads(raw_payload)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    ref = data.get("ref", "")
+    branch = ref.removeprefix("refs/heads/")
+    if not branch:
+        return {"status": "ignored", "reason": f"ref {ref} is not a branch push"}
+
+    active_branches = json.loads(repo.active_branches or "[]") or []
+    is_main_branch = branch in ("main", "master")
+    is_active_branch = branch in active_branches
+    if not is_main_branch and not is_active_branch:
+        return {"status": "ignored", "reason": f"branch {branch} not main/master or active"}
 
     background_tasks.add_task(_sync_repo_branches, repo.id)
+    logger.info("Webhook triggered branch sync for repo %s (branch %s)", repo.id, branch)
     return {"status": "accepted", "repo_id": str(repo_id)}

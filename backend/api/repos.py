@@ -103,6 +103,14 @@ def _get_repo(db: Session, repo_id: UUID) -> Repository:
     return repo
 
 
+def _repo_webhook_path(repo: Repository) -> str:
+    """按仓库平台返回 webhook 回调路径：Gitee 走 /webhook/gitee/，其余走 /webhook/github/。"""
+    host = (repo.git_url or "").lower()
+    if "gitee.com" in host:
+        return f"/webhook/gitee/{repo.id}"
+    return f"/webhook/github/{repo.id}"
+
+
 @router.get("/{repo_id}/webhook", response_model=dict)
 def get_repo_webhook(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     """查看仓库的 webhook 配置（URL 为相对路径，前端拼接当前站点地址）。"""
@@ -110,7 +118,7 @@ def get_repo_webhook(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     return {
         "repo_id": str(repo.id),
         "webhook_token": repo.webhook_token or "",
-        "webhook_url": f"/webhook/github/{repo.id}",
+        "webhook_url": _repo_webhook_path(repo),
     }
 
 
@@ -128,7 +136,7 @@ def generate_repo_webhook_token(repo_id: UUID, db: Session = Depends(get_db)) ->
     return {
         "repo_id": str(repo.id),
         "webhook_token": repo.webhook_token,
-        "webhook_url": f"/webhook/github/{repo.id}",
+        "webhook_url": _repo_webhook_path(repo),
     }
 
 
