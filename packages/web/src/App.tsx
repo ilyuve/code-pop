@@ -112,16 +112,16 @@ function App() {
   return (
     <Router>
       <GlobalSocketBridge />
-      <div className={clsx('min-h-screen bg-[var(--bg)] dark:bg-[var(--bg)] transition-colors')}>
+      <div className={clsx('min-h-screen flex flex-col bg-[var(--bg)] dark:bg-[var(--bg)] transition-colors')}>
         <Sidebar />
         <div
           className={clsx(
-            'transition-all duration-300',
+            'flex-1 flex flex-col transition-all duration-300',
             sidebarOpen ? 'ml-64' : 'ml-16'
           )}
         >
           <Header />
-          <main className="p-6">
+          <main className="flex-1 p-6">
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/repos" element={<Repos />} />
