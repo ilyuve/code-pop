@@ -170,6 +170,7 @@ def search_context(
         raise HTTPException(status_code=400, detail=f"limit exceeds {settings.search_max_limit}")
 
     try:
+        start = time.perf_counter()
         searcher = Searcher(db)
         context = searcher.search_with_context(
             query=query.query,
@@ -177,6 +178,8 @@ def search_context(
             branch=query.branch,
             limit=query.limit,
         )
+        # REST 入口也补充检索耗时，与 MCP search_code 保持一致
+        context.search_latency_ms = int((time.perf_counter() - start) * 1000)
         return CodeContextResponse(context=context, success=True)
     except Exception as exc:
         return CodeContextResponse(

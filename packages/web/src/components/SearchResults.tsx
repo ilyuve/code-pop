@@ -206,7 +206,7 @@ export const SearchResults = ({ results, isLoading, unavailableSources = [], met
                 </button>
               </div>
             </div>
-            <CodePreview code={result.code} language="typescript" />
+            <CodePreview code={result.code} language={result.language} filePath={result.filePath} />
             {isExpanded && renderScoreBreakdown(result.scoreBreakdown)}
           </div>
         );

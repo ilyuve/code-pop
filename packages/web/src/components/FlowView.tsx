@@ -1,7 +1,18 @@
 import type { CodeContext } from '../types';
 import { CodePreview } from './CodePreview';
 import { DegradationBanner } from './DegradationBanner';
-import { FileText, GitBranch, ArrowUpCircle, ArrowDownCircle, Folder, Zap } from 'lucide-react';
+import {
+  FileText,
+  GitBranch,
+  ArrowUpCircle,
+  ArrowDownCircle,
+  Folder,
+  Zap,
+  Copy,
+  CheckCircle,
+} from 'lucide-react';
+import { useState } from 'react';
+import { clsx } from 'clsx';
 
 interface FlowViewProps {
   context: CodeContext;
@@ -48,25 +59,115 @@ const ROLE_COLORS: Record<string, string> = {
 };
 
 export const FlowView = ({ context }: FlowViewProps) => {
+  const [copied, setCopied] = useState<'json' | 'markdown' | null>(null);
+
+  const buildMarkdown = (): string => {
+    const lines: string[] = [];
+    lines.push(`# 检索结果：${context.query}`);
+    lines.push('');
+    lines.push(`- 意图: ${INTENT_LABELS[context.query_intent] || context.query_intent}`);
+    lines.push(`- 分支: ${context.branch || 'main'}`);
+    if (context.matched_concepts.length) {
+      lines.push(`- 匹配概念: ${context.matched_concepts.join(', ')}`);
+    }
+    lines.push(`- 耗时: ${context.search_latency_ms}ms`);
+    lines.push('');
+
+    if (context.entry_points.length) {
+      lines.push('## 入口点');
+      context.entry_points.forEach((ep) => {
+        lines.push(`- \`${ep.name}\` (${ep.type}) — ${ep.file_path}:${ep.line}`);
+      });
+      lines.push('');
+    }
+
+    if (context.call_chain) {
+      lines.push('## 调用链');
+      if (context.call_chain.upstream.length) {
+        lines.push('### 上游调用者');
+        context.call_chain.upstream.forEach((s) => lines.push(`- ${s.name} — ${s.file_path}:${s.line}`));
+      }
+      lines.push(`### 入口: ${context.call_chain.root.name} — ${context.call_chain.root.file_path}:${context.call_chain.root.line}`);
+      if (context.call_chain.downstream.length) {
+        lines.push('### 下游被调用者');
+        context.call_chain.downstream.forEach((s) => lines.push(`- ${s.name} — ${s.file_path}:${s.line}`));
+      }
+      lines.push('');
+    }
+
+    if (context.related_files.length) {
+      lines.push('## 涉及文件');
+      context.related_files.forEach((f) => lines.push(`- ${f.path} (${ROLE_LABELS[f.role] || f.role})`));
+      lines.push('');
+    }
+
+    if (context.code_snippets.length) {
+      lines.push('## 代码片段');
+      context.code_snippets.forEach((s) => {
+        lines.push(`### ${s.filePath}:${s.lineNumber} [${s.repoName}] (score ${s.score.toFixed(3)})`);
+        lines.push('```');
+        lines.push(s.code);
+        lines.push('```');
+        lines.push('');
+      });
+    }
+    return lines.join('\n');
+  };
+
+  const handleCopy = async (format: 'json' | 'markdown') => {
+    const text =
+      format === 'json' ? JSON.stringify(context, null, 2) : buildMarkdown();
+    await navigator.clipboard.writeText(text);
+    setCopied(format);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
   return (
     <div className="flow-view space-y-6">
       <DegradationBanner degraded={context.degraded || false} reason={context.degradation_reason} />
-      <div className="flex items-center gap-4">
-        <div className={`px-3 py-1 rounded-full text-sm font-medium ${INTENT_COLORS[context.query_intent] || INTENT_COLORS.general}`}>
-          意图: {INTENT_LABELS[context.query_intent] || context.query_intent}
-        </div>
-        {context.matched_concepts.length > 0 && (
-          <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-yellow-500" />
-            <span className="text-sm text-slate-500">
-              匹配: {context.matched_concepts.slice(0, 5).join(', ')}
-              {context.matched_concepts.length > 5 && ` +${context.matched_concepts.length - 5}`}
-            </span>
+      {/* Copy toolbar */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className={`px-3 py-1 rounded-full text-sm font-medium ${INTENT_COLORS[context.query_intent] || INTENT_COLORS.general}`}>
+            意图: {INTENT_LABELS[context.query_intent] || context.query_intent}
           </div>
-        )}
-        <span className="text-sm text-slate-400 ml-auto">
-          耗时 {context.search_latency_ms}ms
-        </span>
+          {context.matched_concepts.length > 0 && (
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-yellow-500" />
+              <span className="text-sm text-slate-500">
+                匹配: {context.matched_concepts.slice(0, 5).join(', ')}
+                {context.matched_concepts.length > 5 && ` +${context.matched_concepts.length - 5}`}
+              </span>
+            </div>
+          )}
+          <span className="text-sm text-slate-400">
+            耗时 {context.search_latency_ms}ms
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => handleCopy('json')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+          >
+            {copied === 'json' ? (
+              <CheckCircle className="w-4 h-4 text-green-500" />
+            ) : (
+              <Copy className="w-4 h-4" />
+            )}
+            JSON
+          </button>
+          <button
+            onClick={() => handleCopy('markdown')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-800/30 transition-colors"
+          >
+            {copied === 'markdown' ? (
+              <CheckCircle className="w-4 h-4 text-green-500" />
+            ) : (
+              <Copy className="w-4 h-4" />
+            )}
+            Markdown
+          </button>
+        </div>
       </div>
 
       {context.entry_points.length > 0 && (
@@ -196,11 +297,25 @@ export const FlowView = ({ context }: FlowViewProps) => {
                   <span className="text-slate-600 dark:text-slate-300">{snippet.filePath}</span>
                   <span className="text-slate-400">行 {snippet.lineNumber}</span>
                 </div>
-                <span className="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded">
-                  {snippet.repoName}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={clsx(
+                      'text-xs px-2 py-1 rounded border',
+                      snippet.isOverride
+                        ? 'bg-pink-100 dark:bg-pink-900/30 text-pink-600 dark:text-pink-400 border-pink-200 dark:border-pink-800'
+                        : 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800'
+                    )}
+                    title={snippet.isOverride ? '业务分支覆盖' : '来自默认分支'}
+                  >
+                    {snippet.branch || 'main'}
+                    {snippet.isOverride && ' · override'}
+                  </span>
+                  <span className="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded">
+                    {snippet.repoName}
+                  </span>
+                </div>
               </div>
-              <CodePreview code={snippet.code} language="typescript" />
+              <CodePreview code={snippet.code} language={snippet.language} filePath={snippet.filePath} />
             </div>
           ))}
         </div>
