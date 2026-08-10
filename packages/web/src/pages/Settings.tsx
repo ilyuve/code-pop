@@ -1,11 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Save, RotateCcw, Server, Brain, Plus, Trash2, Play, AlertCircle, CheckCircle2, Loader2, TrendingUp } from 'lucide-react';
-import { useStore } from '../store';
+import { Save, Server, Plus, Trash2, Play, AlertCircle, CheckCircle2, Loader2, Brain } from 'lucide-react';
 import {
   fetchLLMProviders,
-  fetchLLMUsage,
   fetchLLMSettings,
-  fetchLLMCost,
   saveLLMSettings,
   saveLLMProvider,
   deleteLLMProvider,
@@ -34,40 +31,11 @@ interface LLMProvider {
   updated_at?: string;
 }
 
-interface UsageSummary {
-  period_minutes?: number;
-  period_days?: number;
-  total_calls: number;
-  success_calls: number;
-  error_calls: number;
-  input_tokens: number;
-  output_tokens: number;
-  latency_ms: number;
-}
-
 interface LLMSettings {
   enable_index_chinese_enrich: boolean;
   enable_query_llm_expand: boolean;
   enable_flow_label: boolean;
   default_provider_id?: string | null;
-}
-
-interface LLMCostBreakdown {
-  input_tokens: number;
-  output_tokens: number;
-  call_count: number;
-  cost: number;
-}
-
-interface LLMCostEstimate {
-  period_minutes?: number;
-  period_days?: number;
-  repo_id: string | null;
-  total_cost: number;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  provider_breakdown: Record<string, LLMCostBreakdown>;
-  operation_breakdown: Record<string, LLMCostBreakdown>;
 }
 
 // 已知厂商的 USD/1K tokens 参考单价（供新增 Provider 时预填，用户可按实际套餐修改）。
@@ -80,26 +48,13 @@ const PRESET_COSTS: Record<string, { input: number; output: number }> = {
 };
 
 export const Settings = () => {
-  const { settings, updateSettings } = useStore();
-  const [embeddingProvider, setEmbeddingProvider] = useState(settings.embeddingProvider);
-  const [hasChanges, setHasChanges] = useState(false);
-  const [saved, setSaved] = useState(false);
-
   const [providers, setProviders] = useState<LLMProvider[]>([]);
   const [editingProvider, setEditingProvider] = useState<LLMProvider | null>(null);
   const [loadingProviders, setLoadingProviders] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
-  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [llmSettings, setLlmSettings] = useState<LLMSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [cost, setCost] = useState<LLMCostEstimate | null>(null);
-  const [costPeriod, setCostPeriod] = useState<number>(60);
-
-  useEffect(() => {
-    const changed = embeddingProvider !== settings.embeddingProvider;
-    setHasChanges(changed);
-  }, [embeddingProvider, settings]);
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true);
@@ -113,15 +68,6 @@ export const Settings = () => {
     }
   }, []);
 
-  const fetchUsage = useCallback(async () => {
-    try {
-      const data = await fetchLLMUsage(60);
-      setUsage(data);
-    } catch (e) {
-      console.error('Failed to load usage', e);
-    }
-  }, []);
-
   const fetchLlmSettings = useCallback(async () => {
     try {
       const data = await fetchLLMSettings();
@@ -131,21 +77,10 @@ export const Settings = () => {
     }
   }, []);
 
-  const fetchCost = useCallback(async () => {
-    try {
-      const data = await fetchLLMCost(costPeriod);
-      setCost(data);
-    } catch (e) {
-      console.error('Failed to load cost', e);
-    }
-  }, [costPeriod]);
-
   useEffect(() => {
     fetchProviders();
-    fetchUsage();
     fetchLlmSettings();
-    fetchCost();
-  }, [fetchProviders, fetchUsage, fetchLlmSettings, fetchCost]);
+  }, [fetchProviders, fetchLlmSettings]);
 
   const saveLlmSettings = async () => {
     if (!llmSettings) return;
@@ -158,20 +93,6 @@ export const Settings = () => {
     } finally {
       setSavingSettings(false);
     }
-  };
-
-  const handleSave = () => {
-    updateSettings({
-      embeddingProvider,
-    });
-    setHasChanges(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  };
-
-  const handleReset = () => {
-    setEmbeddingProvider('openai');
-    setHasChanges(true);
   };
 
   const handleAddProvider = () => {
@@ -259,10 +180,59 @@ export const Settings = () => {
     }
   };
 
-  const formatNumber = (n: number) => n.toLocaleString();
-
   return (
-    <div className="space-y-6 animate-fadeIn max-w-4xl">
+    <div className="space-y-6 animate-fadeIn max-w-7xl mx-auto">
+      {/* MCP 接入说明 */}
+      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="p-2 bg-[#ff3d8a] rounded-lg border-2 border-[#2D2D2D] shadow-[2px_2px_0_#2D2D2D]">
+            <Server className="w-5 h-5 text-white" />
+          </div>
+          <h2 className="text-lg font-black text-[#2D2D2D]">MCP 接入</h2>
+        </div>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 leading-relaxed">
+          在 Claude Code / Cursor / Trae 等 AI 工具的 MCP 配置中添加以下任一服务器，即可让 AI 直接检索你的代码库
+          （<strong className="text-slate-600 dark:text-slate-300">search_code</strong>、
+          <strong className="text-slate-600 dark:text-slate-300">analyze_impact</strong>、
+          <strong className="text-slate-600 dark:text-slate-300">list_repositories</strong>、
+          <strong className="text-slate-600 dark:text-slate-300">list_file_symbols</strong> 等工具）。
+          地址中的 <code className="font-mono bg-white px-1 rounded">HOST</code> 请替换为你的 CodePop 服务器地址（公网 IP 或内网 IP 均可）。
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div className="rounded-xl border-2 border-[#2D2D2D] p-4 bg-[#F5F5F0]">
+            <div className="text-sm font-bold text-[#2D2D2D] mb-2">Claude Code / Cursor</div>
+            <pre className="text-xs font-mono bg-white border border-slate-200 rounded-lg p-3 overflow-x-auto text-[#2D2D2D]">{`{
+  "mcpServers": {
+    "codepop": {
+      "type": "http",
+      "url": "http://HOST:18080/mcp/sse"
+    }
+  }
+}`}</pre>
+          </div>
+          <div className="rounded-xl border-2 border-[#2D2D2D] p-4 bg-[#F5F5F0]">
+            <div className="text-sm font-bold text-[#2D2D2D] mb-2">Trae</div>
+            <pre className="text-xs font-mono bg-white border border-slate-200 rounded-lg p-3 overflow-x-auto text-[#2D2D2D]">{`{
+  "mcpServers": {
+    "codepop": {
+      "url": "http://HOST:18080/mcp/http"
+    }
+  }
+}`}</pre>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2 rounded-lg bg-[#fff34d]/30 border-2 border-[#2D2D2D] p-3">
+          <AlertCircle className="w-4 h-4 text-[#2D2D2D] shrink-0 mt-0.5" />
+          <p className="text-xs text-[#2D2D2D] leading-relaxed">
+            注意：Trae 会按 URL 后缀自动选择传输协议，<code className="font-mono bg-white px-1 rounded">/mcp/sse</code> 结尾会被判定为旧版 SSE 导致连接超时，
+            因此 Trae 请使用 <code className="font-mono bg-white px-1 rounded">/mcp/http</code>；Claude Code / Cursor 使用 <code className="font-mono bg-white px-1 rounded">/mcp/sse</code> 即可。
+            接入后直接在 AI 对话中提问，如「帮我找一下登录的 JWT 验证逻辑在哪」「这个项目的限流是怎么实现的」，AI 会自动调用 CodePop 检索并返回结果。
+          </p>
+        </div>
+      </section>
+
       {/* LLM Provider Management */}
       <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
         <div className="flex items-center justify-between mb-6">
@@ -623,184 +593,6 @@ export const Settings = () => {
           <div className="text-center py-6 text-slate-500 dark:text-slate-400 text-sm">加载中...</div>
         )}
       </section>
-
-      {/* Cost Dashboard */}
-      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
-              <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <h2 className="text-lg font-black text-[#2D2D2D]">LLM 成本估算</h2>
-          </div>
-          <select
-            value={costPeriod}
-            onChange={(e) => setCostPeriod(parseInt(e.target.value))}
-            className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm"
-          >
-            <option value={60}>最近 1 小时</option>
-            <option value={360}>最近 6 小时</option>
-            <option value={1440}>最近 24 小时</option>
-            <option value={10080}>最近 7 天</option>
-          </select>
-        </div>
-        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-          金额按上方 Provider 配置的 USD/1K tokens 单价 × 实际调用 token 数估算；
-          单价留空（0）时该项计为 $0。如需按人民币估算，可按汇率自行换算。
-        </p>
-        {cost ? (
-          <div className="space-y-6">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-                <div className="text-xs text-slate-500 dark:text-slate-400">预估总成本</div>
-                <div className="text-xl font-semibold text-slate-900 dark:text-white">${cost.total_cost.toFixed(6)}</div>
-              </div>
-              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-                <div className="text-xs text-slate-500 dark:text-slate-400">输入 Tokens</div>
-                <div className="text-xl font-semibold text-slate-900 dark:text-white">{formatNumber(cost.total_input_tokens)}</div>
-              </div>
-              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-                <div className="text-xs text-slate-500 dark:text-slate-400">输出 Tokens</div>
-                <div className="text-xl font-semibold text-slate-900 dark:text-white">{formatNumber(cost.total_output_tokens)}</div>
-              </div>
-              <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-                <div className="text-xs text-slate-500 dark:text-slate-400">调用次数</div>
-                <div className="text-xl font-semibold text-slate-900 dark:text-white">
-                  {formatNumber(Object.values(cost.provider_breakdown).reduce((sum, p) => sum + p.call_count, 0))}
-                </div>
-              </div>
-            </div>
-            {Object.keys(cost.provider_breakdown).length > 0 && (
-              <div>
-                <h3 className="text-sm font-medium text-slate-900 dark:text-white mb-3">按 Provider</h3>
-                <div className="space-y-2">
-                  {Object.entries(cost.provider_breakdown).map(([name, data]) => (
-                    <div key={name} className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
-                      <div className="text-sm text-slate-700 dark:text-slate-300">{name}</div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400">
-                        {data.call_count} 次 · {formatNumber(data.input_tokens)} / {formatNumber(data.output_tokens)} tokens · ${data.cost.toFixed(6)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {Object.keys(cost.operation_breakdown).length > 0 && (
-              <div>
-                <h3 className="text-sm font-medium text-slate-900 dark:text-white mb-3">按 Operation</h3>
-                <div className="space-y-2">
-                  {Object.entries(cost.operation_breakdown).map(([name, data]) => (
-                    <div key={name} className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/50">
-                      <div className="text-sm text-slate-700 dark:text-slate-300">{name}</div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400">
-                        {data.call_count} 次 · {formatNumber(data.input_tokens)} / {formatNumber(data.output_tokens)} tokens · ${data.cost.toFixed(6)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="text-center py-6 text-slate-500 dark:text-slate-400 text-sm">暂无数据</div>
-        )}
-      </section>
-
-      {/* Usage Dashboard */}
-      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
-            <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-          </div>
-          <h2 className="text-lg font-black text-[#2D2D2D]">LLM 用量监控（最近 1 小时）</h2>
-        </div>
-        {usage ? (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-              <div className="text-xs text-slate-500 dark:text-slate-400">总调用</div>
-              <div className="text-xl font-semibold text-slate-900 dark:text-white">{usage.total_calls}</div>
-            </div>
-            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-              <div className="text-xs text-slate-500 dark:text-slate-400">成功 / 失败</div>
-              <div className="text-xl font-semibold text-slate-900 dark:text-white">
-                {usage.success_calls} / {usage.error_calls}
-              </div>
-            </div>
-            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-              <div className="text-xs text-slate-500 dark:text-slate-400">输入 / 输出 Tokens</div>
-              <div className="text-xl font-semibold text-slate-900 dark:text-white">
-                {formatNumber(usage.input_tokens)} / {formatNumber(usage.output_tokens)}
-              </div>
-            </div>
-            <div className="p-4 rounded-xl bg-[#F5F5F0] border-2 border-[#2D2D2D]">
-              <div className="text-xs text-slate-500 dark:text-slate-400">总延迟</div>
-              <div className="text-xl font-semibold text-slate-900 dark:text-white">{usage.latency_ms}ms</div>
-            </div>
-          </div>
-        ) : (
-          <div className="text-center py-6 text-slate-500 dark:text-slate-400 text-sm">暂无数据</div>
-        )}
-      </section>
-
-      {/* Embedding Provider */}
-      <section className="bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[4px_4px_0_#2D2D2D] p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
-            <Brain className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-          </div>
-          <h2 className="text-lg font-black text-[#2D2D2D]">Embedding 提供商</h2>
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <button
-            onClick={() => setEmbeddingProvider('openai')}
-            className={clsx(
-              'p-4 rounded-xl border-2 transition-all duration-200 text-left',
-              embeddingProvider === 'openai'
-                ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'
-                : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
-            )}
-          >
-            <h3 className="font-semibold text-slate-900 dark:text-white mb-1">OpenAI</h3>
-            <p className="text-sm text-slate-500 dark:text-slate-400">使用 OpenAI API 进行 embedding</p>
-          </button>
-          <button
-            onClick={() => setEmbeddingProvider('local')}
-            className={clsx(
-              'p-4 rounded-xl border-2 transition-all duration-200 text-left',
-              embeddingProvider === 'local'
-                ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'
-                : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
-            )}
-          >
-            <h3 className="font-semibold text-slate-900 dark:text-white mb-1">本地模型</h3>
-            <p className="text-sm text-slate-500 dark:text-slate-400">使用本地部署的 embedding 模型</p>
-          </button>
-        </div>
-      </section>
-
-      {/* Action Buttons */}
-      <div className="flex gap-3">
-        <button
-          onClick={handleSave}
-          disabled={!hasChanges}
-          className={clsx(
-            'flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-all duration-200',
-            hasChanges
-              ? 'bg-indigo-500 hover:bg-indigo-600 text-white'
-              : 'bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
-          )}
-        >
-          <Save className="w-5 h-5" />
-          {saved ? '已保存!' : '保存设置'}
-        </button>
-        <button
-          onClick={handleReset}
-          className="flex items-center gap-2 px-6 py-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-xl font-medium transition-colors"
-        >
-          <RotateCcw className="w-5 h-5" />
-          重置
-        </button>
-      </div>
     </div>
   );
 };
