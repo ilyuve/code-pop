@@ -85,8 +85,10 @@ def search(query: SearchQuery, db: Session = Depends(get_db)) -> SearchResponse:
         meta=SearchMeta(
             requested_branch=query.branch,
             actual_branch=actual_branch,
-            # 请求分支与返回结果分支不一致时，说明发生了分支回落
-            branch_fallback=bool(query.branch and actual_branch and query.branch != actual_branch),
+            # 请求分支与返回结果分支不一致时，说明发生了分支回落（仅定向搜索存在）
+            branch_fallback=bool(
+                query.repo_id and query.branch and actual_branch and query.branch != actual_branch
+            ),
         ),
     )
 

@@ -49,6 +49,7 @@ class EmbeddingRepository(BaseRepository):
             SELECT e.id AS embedding_id,
                    e.file_id,
                    e.repo_id,
+                   e.branch,
                    r.name AS repo_name,
                    e.content,
                    e.start_line,
@@ -60,7 +61,7 @@ class EmbeddingRepository(BaseRepository):
             JOIN code_files f ON f.id = e.file_id
             JOIN repositories r ON r.id = e.repo_id
             WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
-              AND e.branch = :branch
+              AND (:branch IS NULL OR e.branch = :branch)
             ORDER BY e.embedding <=> (:embedding)::vector
             LIMIT :limit
             """

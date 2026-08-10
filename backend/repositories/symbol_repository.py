@@ -33,8 +33,9 @@ class SymbolRepository(BaseRepository):
             self.db.query(Symbol)
             .join(CodeFile, Symbol.file_id == CodeFile.id)
             .outerjoin(SymbolFlowLabel, Symbol.id == SymbolFlowLabel.symbol_id)
-            .filter(Symbol.branch == branch)
         )
+        if branch:
+            q = q.filter(Symbol.branch == branch)
         if repo_id:
             q = q.filter(Symbol.repo_id == repo_id)
 
@@ -98,13 +99,10 @@ class SymbolRepository(BaseRepository):
     ) -> List[Symbol]:
         if not file_ids:
             return []
-        return (
-            self.db.query(Symbol)
-            .filter(Symbol.file_id.in_(file_ids))
-            .filter(Symbol.branch == branch)
-            .limit(limit)
-            .all()
-        )
+        q = self.db.query(Symbol).filter(Symbol.file_id.in_(file_ids))
+        if branch:
+            q = q.filter(Symbol.branch == branch)
+        return q.limit(limit).all()
 
     def get_related_by_edges(
         self,
@@ -124,13 +122,13 @@ class SymbolRepository(BaseRepository):
                     CallGraphEdge.target_symbol_id.in_(symbol_ids),
                 )
             )
-            .filter(CallGraphEdge.branch == branch)
-            .limit(limit * 2)
-            .all()
         )
+        if branch:
+            edges = edges.filter(CallGraphEdge.branch == branch)
+        edges = edges.limit(limit * 2).all()
         related_ids: set = set()
         for edge in edges:
             related_ids.add(edge.source_symbol_id)
             related_ids.add(edge.target_symbol_id)
         symbols = self.get_by_ids(list(related_ids))
-        return [s for s in symbols if s.branch == branch][:limit]
+        return [s for s in symbols if not branch or s.branch == branch][:limit]
