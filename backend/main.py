@@ -26,7 +26,7 @@ if _backend_dir not in sys.path:
 from api import repos, search, webhook, ws
 from api.admin import llm as admin_llm
 from config import settings
-from mcp_server.server import get_mcp_app, get_mcp_session_manager
+from mcp_server.server import get_mcp_app, get_mcp_sse_app, get_mcp_session_manager
 from database import SessionLocal, get_db
 from exceptions import CodePopException
 from models import RepoStatus, Repository
@@ -200,32 +200,55 @@ app.include_router(ws.router)
 app.include_router(admin_llm.router)
 
 mcp_app = get_mcp_app()
+mcp_sse_app = get_mcp_sse_app()
 
 
-class _MCPNoSlashCompat:
-    """兼容无尾斜杠的 /mcp/sse 请求。
+class _MCPCompatApp:
+    """兼容 MCP 客户端对 URL 后缀的协议选择差异。
 
-    FastMCP 的 streamable HTTP 端点注册在 /mcp/sse/（带尾斜杠），
-    Starlette 对 /mcp/sse（无尾斜杠）返回 307 重定向。部分 MCP 客户端
-    对 POST 307 不自动跟随，导致官网/问卷中的
-    ``http://host:port/mcp/sse`` 配置连不上。此包装把无尾斜杠请求
-    改写到带斜杠路径后直接交给 mcp_app，消除 307。
+    部分客户端（如 Trae）会按 URL 路径是否以 ``/sse`` 结尾来自动选择
+    传输协议：以 ``/sse`` 结尾走旧版 SSE（SSEClientTransport），否则走
+    Streamable HTTP。因此：
+
+    - ``/mcp/sse`` 与 ``/mcp/http`` 均路由到 Streamable HTTP（官方推荐）。
+      ``/mcp/http`` 是不以 ``/sse`` 结尾的别名，供按后缀判协议的客户端
+      使用，避免其误选旧版 SSE 后因收不到 ``event: endpoint`` 握手而转圈。
+    - ``/mcp/sse-legacy`` + ``/mcp/sse-messages`` 提供旧版 SSE transport 备用。
+
+    Streamable HTTP 同样用 GET 建立通知流，因此不能按请求方法把 GET
+    分流给旧版 SSE（会破坏 Streamable 握手）。
     """
 
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, streamable, sse):
+        self.streamable = streamable
+        self.sse = sse
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
-            if path == "/mcp/sse":
+            # 备用旧 SSE transport：/mcp/sse-legacy（GET 握手）+ /mcp/sse-messages
+            if path in ("/mcp/sse-legacy", "/mcp/sse-legacy/"):
+                scope = dict(scope)
+                scope["path"] = "/mcp/sse"
+                scope["raw_path"] = b"/mcp/sse"
+                await self.sse(scope, receive, send)
+                return
+            if path in ("/mcp/sse-messages", "/mcp/sse-messages/"):
+                scope = dict(scope)
+                scope["path"] = "/mcp/messages/"
+                scope["raw_path"] = b"/mcp/messages/"
+                await self.sse(scope, receive, send)
+                return
+            # Streamable HTTP：无尾斜杠兼容（消除 307）。/mcp/http 是不以
+            # /sse 结尾的别名，避免 Trae 等客户端按 URL 后缀误选旧版 SSE。
+            if path in ("/mcp/sse", "/mcp/http"):
                 scope = dict(scope)
                 scope["path"] = "/mcp/sse/"
                 scope["raw_path"] = b"/mcp/sse/"
-        await self.app(scope, receive, send)
+        await self.streamable(scope, receive, send)
 
 
-app.mount("/mcp", _MCPNoSlashCompat(mcp_app))
+app.mount("/mcp", _MCPCompatApp(mcp_app, mcp_sse_app))
 
 
 @app.get("/health")

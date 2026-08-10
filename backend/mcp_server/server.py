@@ -439,6 +439,7 @@ def codepop_impact(
 
 
 _mcp_streamable_app = None
+_mcp_sse_app = None
 _mcp_session_manager = None
 
 
@@ -448,6 +449,20 @@ def get_mcp_app():
     if _mcp_streamable_app is None:
         _mcp_streamable_app = mcp.streamable_http_app()
     return _mcp_streamable_app
+
+
+def get_mcp_sse_app():
+    """Get the legacy SSE ASGI app (SseServerTransport) for mounting.
+
+    Streamable HTTP 是推荐协议，但部分客户端（如部分 Trae 版本）对 URL
+    路径含 ``/sse`` 会按旧版 SSE 协议连接（GET 期待 ``event: endpoint``
+    握手事件）。此 app 提供旧 SSE transport，与 streamable HTTP 共用同一
+    FastMCP 实例，由 main.py 中的分发器按请求方法路由。
+    """
+    global _mcp_sse_app
+    if _mcp_sse_app is None:
+        _mcp_sse_app = mcp.sse_app()
+    return _mcp_sse_app
 
 
 def get_mcp_session_manager():
