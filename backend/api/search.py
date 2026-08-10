@@ -182,6 +182,16 @@ def search_context(
         )
         # REST 入口也补充检索耗时，与 MCP search_code 保持一致
         context.search_latency_ms = int((time.perf_counter() - start) * 1000)
+        # 记录搜索历史（Web 搜索现在只走本接口，历史/统计依赖此记录）
+        _record_history(
+            db,
+            query.query,
+            query.repo_id,
+            query.mode,
+            len(context.code_snippets or []),
+            context.search_latency_ms,
+            [],
+        )
         return CodeContextResponse(context=context, success=True)
     except Exception as exc:
         return CodeContextResponse(

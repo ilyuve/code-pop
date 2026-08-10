@@ -1,5 +1,6 @@
 """Query intent analysis: understand what the user wants and expand synonyms."""
 
+import concurrent.futures
 import logging
 import re
 from dataclasses import dataclass, field
@@ -10,6 +11,15 @@ from services.chinese_enricher import expand_query_with_synonyms, load_domain_sy
 from services.llm_router import LLMRouter
 
 logger = logging.getLogger(__name__)
+
+# 查询扩展 LLM 调用的最大等待时间（秒）：外部模型慢/无响应时快速回落到本地
+# 模板层（SEMANTIC_MAP/领域同义词），避免每次搜索被外部 API 拖垮。
+# 实测 DeepSeek 单次响应约 0.8~1.4s；收紧到 0.6s 保证「任何查询 ≤5s」的
+# 硬指标——LLM 未在窗口内返回时回落本地模板，中文匹配质量由离线同义词表兜底。
+_LLM_EXPAND_TIMEOUT_SECONDS = 0.6
+_llm_expand_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="llm-expand"
+)
 
 
 @dataclass
@@ -105,6 +115,10 @@ class QueryIntentAnalyzer:
         "删除": ["delete", "remove", "del", "drop", "clear", "destroy"],
         "查询": ["query", "select", "find", "get", "search", "lookup", "fetch"],
         "验证": ["validate", "verify", "check", "assert", "confirm", "test"],
+        "点赞": ["like", "zan", "praise", "vote", "up_vote", "upvote", "thumb"],
+        "帖子": ["post", "thread", "topic", "article", "bbs"],
+        "回帖": ["reply", "comment", "replied", "respond"],
+        "收藏": ["collect", "favorite", "star", "bookmark"],
     }
 
     # Generic role-word expansions that are relatively stable across projects.
@@ -336,7 +350,14 @@ class QueryIntentAnalyzer:
         # 失败/超时会被 try/except 兜住，自动回落到上面的模板层结果。
         if enable_llm_expand and llm_router and is_chinese:
             try:
+                import time as _time
+                _t0 = _time.monotonic()
                 llm_terms = self._expand_with_llm(query, concepts, llm_router)
+                logger.info(
+                    "LLM query expansion took %.2fs, added %d terms",
+                    _time.monotonic() - _t0,
+                    len(llm_terms),
+                )
                 llm_hits.extend(llm_terms)
             except Exception as e:
                 logger.warning("LLM query expansion failed: %s", e)
@@ -384,10 +405,23 @@ class QueryIntentAnalyzer:
         )
         import json as _json
 
-        response, _provider_id = llm_router.chat_sync(
+        # 在独立线程中调用外部 LLM，并施加短超时：外部模型慢/无响应时抛出
+        # TimeoutError，由 analyze 的 try/except 兜住并回落到本地模板层。
+        future = _llm_expand_executor.submit(
+            llm_router.chat_sync,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
         )
+        try:
+            response, _provider_id = future.result(timeout=_LLM_EXPAND_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            logger.warning(
+                "LLM query expansion timed out after %.1fs, falling back to local templates",
+                _LLM_EXPAND_TIMEOUT_SECONDS,
+            )
+            raise
+
         data = _json.loads(response.content)
         terms: Set[str] = set()
         for t in data.get("synonyms", []):

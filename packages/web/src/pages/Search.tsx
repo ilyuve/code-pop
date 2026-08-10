@@ -17,7 +17,7 @@ const SAMPLE_QUERIES = [
 
 export const Search = () => {
   const { repos } = useRepos();
-  const { query, setQuery, isSearching, search, recentSearches } = useSearch();
+  const { query, setQuery, recentSearches, addRecentSearch } = useSearch();
   const [selectedRepoId, setSelectedRepoId] = useState<string>('');
   const [contextResults, setContextResults] = useState<CodeContext | null>(null);
 
@@ -36,17 +36,19 @@ export const Search = () => {
     },
   });
 
+  // 单请求检索：只调用 /api/search/context（返回完整上下文供 FlowView 渲染），
+  // 不再并行发 /api/search，避免一次搜索触发两份全量检索抢 CPU（弱服务器尤其明显）。
   const handleSearch = (searchQuery: string) => {
     if (!searchQuery.trim()) return;
     if (!selectedRepoId) return; // 无可用仓库时不做全局搜索
-    search(searchQuery, selectedRepoId);
+    setQuery(searchQuery);
+    addRecentSearch(searchQuery);
     contextSearchMutation.mutate({ query: searchQuery, repoId: selectedRepoId });
   };
 
   const handleRepoFilter = (repoId: string) => {
     setSelectedRepoId(repoId);
     if (query.trim() && repoId) {
-      search(query, repoId);
       contextSearchMutation.mutate({ query, repoId });
     }
   };
@@ -56,9 +58,11 @@ export const Search = () => {
     handleSearch(sample);
   };
 
-  const showEmptyState = !query && !contextResults && !isSearching && !contextSearchMutation.isPending;
-  const showLoading = isSearching || contextSearchMutation.isPending;
+  const showEmptyState = !query && !contextResults && !contextSearchMutation.isPending;
+  const showLoading = contextSearchMutation.isPending;
   const showError = contextSearchMutation.isError && !contextResults;
+  // 查询完成但所有检索路径均无相关命中（如与代码库无关的提问）
+  const noResults = contextResults && (contextResults.code_snippets?.length ?? 0) === 0;
 
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -137,6 +141,16 @@ export const Search = () => {
           <Code2 className="w-16 h-16 text-[#ff3d8a] mx-auto mb-4" />
           <p className="text-[#666] font-medium">
             检索失败，请稍后重试或更换关键词
+          </p>
+        </div>
+      ) : noResults ? (
+        <div className="text-center py-12 bg-white rounded-xl border-2 border-[#2D2D2D] shadow-[6px_6px_0_#2D2D2D]">
+          <Code2 className="w-16 h-16 text-[#b88dff] mx-auto mb-4" />
+          <p className="text-[#2D2D2D] font-black text-lg mb-1">
+            未找到相关内容
+          </p>
+          <p className="text-[#666] font-medium">
+            当前仓库中没有与「{query}」匹配的代码，换个说法试试
           </p>
         </div>
       ) : contextResults ? (
