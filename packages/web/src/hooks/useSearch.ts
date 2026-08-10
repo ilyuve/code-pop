@@ -50,5 +50,6 @@ export const useSearch = () => {
     search,
     clearResults,
     recentSearches,
+    addRecentSearch,
   };
 };

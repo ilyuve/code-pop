@@ -34,6 +34,69 @@ RRF_K = 60
 
 MAX_CHUNKS_PER_FILE = 3
 
+# 向量相似度阈值：BGE-M3 编码下，与代码库相关的查询向量分数通常 ≥0.5
+# （实测「登录流程」0.535~0.637），无关查询（如「火星撞地球」）仅 0.39~0.43。
+# 低于阈值的向量命中直接丢弃，避免无意义查询也返回 top-k 结果。
+VECTOR_SIMILARITY_THRESHOLD = 0.5
+
+# 稀疏命中分数阈值：无关查询的 token 权重乘积趋近于 0（实测 0.0055），
+# 相关命中通常 ≥0.04。过滤掉噪声级命中。
+SPARSE_SCORE_THRESHOLD = 0.01
+
+# 静态/构建产物/第三方目录路径。这些目录的压缩产物（如 layui/minified JS）
+# 会被符号解析器拆出大量单字符符号（如 `s`）并进入调用图，混入调用链后
+# 会显示成「一堆单独的英文字母」。所有下游展示（调用链/入口点/向量命中）
+# 都应排除这类路径。
+STATIC_PATH_RE = re.compile(r"(^|/)(static|assets|dist|public|build|vendor|libs|node_modules)(/|$)")
+
+# 符号名完全等于这些通用词时视为框架/工具函数（HTTP 方法封装、通用 CRUD
+# 命名，如 web/api.js 的 `post()`）。它们不反映业务语义，且会与查询扩展的
+# 泛化词（帖子→post）撞车，造成跨项目符号级误命中，因此不参与符号检索。
+GENERIC_SYMBOL_NAMES = frozenset({
+    "post", "get", "put", "delete", "patch", "head", "options",
+    "create", "update", "query", "list", "search", "find", "save",
+    "remove", "del", "add", "edit", "index", "init", "run", "main",
+})
+
+
+def _is_confident_hit(hit: "_Hit") -> bool:
+    """判定一条融合命中是否有足够的召回证据，过滤跨项目误命中。
+
+    独有功能查询（如「帖子点赞怎么实现」）在无关仓库里往往只有 vector
+    一条弱路径命中（实测 0.53~0.57 的泛匹配，无 symbol/bm25/graph 支撑），
+    但也能通过 0.5 的向量阈值进入融合。真实相关查询则通常多路重合
+    （vector + bm25 + symbol + sparse）。规则：
+
+    - 多路召回（≥2 路）：需要至少一路达到强命中门槛（多路全弱证据的
+      词级巧合（task/job/login）不视为真实相关）
+    - 单路召回：需要该路分数足够强才保留（阈值取「无关仓库泛匹配」与
+      「同仓库相关命中」之间的空隙）
+    """
+    sources = hit.sources
+    if len(sources) >= 2:
+        # 多路召回但全是弱证据（如 vector 0.54 + bm25 0.2 + sparse 0.05，
+        # 常见于通用英文词 task/job/login 的跨项目词级巧合）仍应过滤，
+        # 要求至少一路达到强命中门槛。
+        strong = (
+            hit.vector_score >= 0.58
+            or hit.bm25_score >= 0.4
+            or hit.symbol_score >= 0.8
+            or hit.sparse_score >= 0.1
+            or hit.graph_score >= 0.05
+        )
+        return strong
+    if sources == {"vector"}:
+        return hit.vector_score >= 0.58
+    if sources == {"bm25"}:
+        return hit.bm25_score >= 0.4
+    if sources == {"symbol"}:
+        return hit.symbol_score >= 0.8
+    if sources == {"sparse"}:
+        return hit.sparse_score >= 0.1
+    if sources == {"graph"}:
+        return hit.graph_score >= 0.05
+    return True
+
 
 @dataclass
 class _Hit:
@@ -342,6 +405,17 @@ class Searcher:
     ) -> "CodeContext":
         from schemas import CallChain, CodeContext, FileSummary, SearchMeta, SymbolEntry
 
+        _phase_t0 = time.perf_counter()
+
+        def _phase_log(name: str) -> None:
+            nonlocal _phase_t0
+            logger.info(
+                "PHASE %-20s took %4.0fms",
+                name,
+                (time.perf_counter() - _phase_t0) * 1000,
+            )
+            _phase_t0 = time.perf_counter()
+
         llm_settings = get_effective_settings(self.db, repo_id)
         # 在线 LLM 查询扩展主开关（默认开启）：开启后 query 扩展会追加
         # LLM 生成的中文同义词/英文代码词；关闭或 LLM 不可用时自动回落到
@@ -358,6 +432,7 @@ class Searcher:
                 llm_router=llm_router,
             )
         logger.info("Query intent: %s, strategy: %s", intent.intent_type, intent.search_strategy)
+        _phase_log("intent_analyze")
 
         requested_branch = branch
         actual_branch, branch_fallback = self._resolve_branch(repo_id, branch)
@@ -370,6 +445,7 @@ class Searcher:
             trace=trace,
             intent_type=intent.intent_type,
         )
+        _phase_log("search_and_fuse")
 
         entry_points = []
         call_chain = None
@@ -398,13 +474,24 @@ class Searcher:
             if existing is None or score * route_boost > existing[1]:
                 candidates[sym.id] = (sym, score * route_boost)
 
+        # 2.5. 按符号名直接匹配扩展词：覆盖无路由注册/无 service 分层的
+        # 项目（如 PyFly 的 reply_zan），让真实实现能进入口点。只对
+        # how_it_works 生效，避免普通查询的入口点被符号名匹配污染。
+        if is_how_it_works:
+            for sym, score in self._find_symbol_name_entry_points(
+                intent.expanded_terms, repo_id, actual_branch
+            ):
+                existing = candidates.get(sym.id)
+                if existing is None or score > existing[1]:
+                    candidates[sym.id] = (sym, score)
+
         # 3. Fall back to symbols from the top retrieval hits.
         seen_symbols = set(candidates.keys())
         for hit in hits[:5]:
             if hit.symbol_id and hit.symbol_id not in seen_symbols:
                 seen_symbols.add(hit.symbol_id)
                 sym = self.db.query(Symbol).filter(Symbol.id == hit.symbol_id).first()
-                if sym:
+                if sym and not STATIC_PATH_RE.search(sym.file.path if sym.file else ""):
                     candidates[sym.id] = (sym, self._final_score(hit))
 
         # Keep the top 5 most relevant entry points.
@@ -415,6 +502,7 @@ class Searcher:
             entry_point = self._symbol_entry_with_label(sym)
             entry_point.relevance_score = score
             entry_points.append(entry_point)
+        _phase_log("entry_points")
 
         if strategy.include_callers or strategy.include_callees:
             if entry_points:
@@ -430,6 +518,7 @@ class Searcher:
                 chain.flow_summary = self._generate_flow_summary(query, intent.intent_type, entry_points, chain)
                 chain_files = self._collect_chain_files(chain)
                 related_files.extend(chain_files)
+            _phase_log("call_chain")
 
         flow_summary = call_chain.flow_summary if call_chain else None
 
@@ -487,6 +576,7 @@ class Searcher:
                 ))
 
         related_files = self._ensure_chinese_enricher(query, repo_id, related_files, actual_branch)
+        _phase_log("snippets_build")
 
         return CodeContext(
             query=query,
@@ -679,6 +769,67 @@ class Searcher:
 
         return list(matched.values())
 
+    def _find_symbol_name_entry_points(
+        self,
+        search_terms: Optional[List[str]],
+        repo_id: Optional[UUID],
+        branch: str = "main",
+    ) -> List[Tuple[Symbol, float]]:
+        """按符号名直接匹配扩展词，补充路由/service 层覆盖不到的实现入口。
+
+        部分项目（如 PyFly）的 AJAX 接口（reply_zan 等）没有注册到
+        framework_routes，且项目无 backend/services 分层，导致入口点只能
+        靠 RRF 融合后的 hits 兜底——而真实实现往往被通用扩展词（post/
+        thread）的大量命中挤到重排输入之外。此方法对所有函数/方法符号做
+        符号名匹配，让查询的核心概念（点赞→zan/like）能命中对应实现。
+        """
+        if not repo_id or not search_terms:
+            return []
+
+        # 忽略过短的模式（单字符会匹配大量压缩 JS 符号），保留查询核心词
+        patterns = [t.lower() for t in search_terms if len(t) >= 3]
+        if not patterns:
+            return []
+
+        symbols = (
+            self.db.query(Symbol)
+            .join(CodeFile)
+            .filter(
+                Symbol.repo_id == repo_id,
+                Symbol.branch == branch,
+                Symbol.type.in_(["function", "method"]),
+                CodeFile.path.notlike("%static/%"),
+            )
+            .all()
+        )
+
+        matched: Dict[UUID, Tuple[Symbol, float]] = {}
+        # 每个 pattern 最多贡献 1 个得分最高的符号：通用扩展词（如帖子→
+        # post）会匹配同项目大量 post_* 函数，若不加限制会占满入口点名额，
+        # 把真实核心实现（点赞→reply_zan）挤出 top5。
+        for pattern in patterns:
+            best: Optional[Tuple[Symbol, float]] = None
+            for sym in symbols:
+                name_lower = (sym.name or "").lower()
+                if pattern not in name_lower:
+                    continue
+                # 短 pinyin 缩写（zan 等 2~3 字符）通常是查询核心概念的真实
+                # 实现名，给与更高权重，避免被 post 这类泛扩展词压过。
+                if len(pattern) <= 3:
+                    score = 0.98
+                else:
+                    score = 0.88 + 0.06 * min(len(pattern) / 6.0, 1.0)
+                if sym.name.startswith(pattern):
+                    score += 0.03
+                if best is None or score > best[1]:
+                    best = (sym, score)
+            if best is not None:
+                sid, sc = best
+                if sid not in matched or sc > matched[sid][1]:
+                    matched[sid] = (sid, sc)
+
+        return list(matched.values())
+
     def _symbol_entry_with_label(
         self, sym: Symbol, label: Optional[SymbolFlowLabel] = None
     ) -> "SymbolEntry":
@@ -756,8 +907,14 @@ class Searcher:
         related_ids = set(caller_ids) | set(callee_ids)
         entries = self._symbol_entries_by_ids(related_ids)
 
-        upstream = [entries[cid] for cid in caller_ids if cid in entries]
-        downstream = [entries[cid] for cid in callee_ids if cid in entries]
+        # 排除静态/第三方目录的符号（layui/minified JS 会产出大量单字符符号
+        # 如 `s`），避免调用链显示成「一堆单独的英文字母」。
+        def _non_static(sym_id: UUID) -> bool:
+            entry = entries.get(sym_id)
+            return bool(entry) and not STATIC_PATH_RE.search(entry.file_path)
+
+        upstream = [entries[cid] for cid in caller_ids if cid in entries and _non_static(cid)]
+        downstream = [entries[cid] for cid in callee_ids if cid in entries and _non_static(cid)]
 
         return CallChain(
             root=root_entry,
@@ -1058,6 +1215,9 @@ class Searcher:
                     )
                     if sym is None:
                         break
+                    # 静态/第三方目录的 handler（压缩 JS 产物等）不作为入口点
+                    if STATIC_PATH_RE.search(sym.file.path if sym.file else ""):
+                        break
                     # Boost controllers/handlers so they outrank internal helpers.
                     score = 0.92
                     if pattern in handler_lower:
@@ -1223,6 +1383,14 @@ class Searcher:
             "graph": graph_results,
         }
         hits = _rrf_fuse(results_by_source)
+        # 过滤跨项目误命中：独有功能查询在无关仓库通常只有单路弱证据
+        # （vector 0.53~0.57 泛匹配），此处按 _is_confident_hit 过滤后再
+        # 进入重排，避免把无关结果一路送到前端。静态/构建产物目录
+        # （压缩 JS 等）在任何查询下都不进入结果。
+        hits = [
+            h for h in hits
+            if not STATIC_PATH_RE.search(h.file_path) and _is_confident_hit(h)
+        ]
         if trace is not None:
             trace.set_fusion(RRF_K, hits)
 
@@ -1243,7 +1411,12 @@ class Searcher:
             english_terms = [t for t in search_terms if re.match(r"^[a-zA-Z0-9_]+$", t)]
             if english_terms:
                 m3_query = query + " " + " ".join(english_terms[:6])
-        final_schemas = m3_reranker.rerank(m3_query, reranked[:limit * 2], top_k=limit)
+        # bge-reranker-base 在 CPU 上对每个候选对做交叉编码，耗时与输入规模成正比
+        # （本地约 70ms/对）。输入数量须与最终输出条数对齐：benchmark/评测按
+        # 「期望文件出现在 top20」判定，若 M3 输入过少（如 12）会把部分真实
+        # 命中（fusion 排名 5~12 之后）挤出重排输入，导致召回退化。20 对约
+        # 1.4s，配合 BM25 两阶段优化后整体查询仍在 5s 硬指标内。
+        final_schemas = m3_reranker.rerank(m3_query, reranked[: min(limit * 2, 20)], top_k=limit)
 
         # M3 reranker recomputes scores from scratch and discards the role
         # weights applied by CodeReranker. Re-apply them when the model is
@@ -1384,10 +1557,18 @@ class Searcher:
 
         hits: List[_Hit] = []
         for row in rows:
+            # 静态/构建产物目录的 chunk 不参与向量检索（压缩 JS 等对语义检索无意义）
+            if STATIC_PATH_RE.search(row["file_path"]):
+                continue
             distance = row.get("distance")
             if isinstance(distance, str):
                 distance = float(distance)
             score = max(0.0, 1.0 - distance)
+            # 无相似度下限时，任意查询都会拿到 top-k 个「相对最高分」的 chunk
+            # （无关查询也能有 0.4 左右的分数）。低于阈值的命中与查询无关，
+            # 直接丢弃，避免 RRF 融合后把无关结果当命中返回。
+            if score < VECTOR_SIMILARITY_THRESHOLD:
+                continue
             hits.append(
                 _Hit(
                     result_id=row["embedding_id"],
@@ -1422,6 +1603,13 @@ class Searcher:
         top_k: int = 50,
     ) -> List[_Hit]:
         symbols = self._symbol_search_raw(query, repo_id, branch, top_k)
+        # 过滤通用框架/工具函数（HTTP 方法封装、通用 CRUD 命名）与
+        # 静态/第三方目录符号，避免与查询扩展出的泛化词撞车造成误命中
+        symbols = [
+            s for s in symbols
+            if SymbolNormalizer.normalize(s.name) not in GENERIC_SYMBOL_NAMES
+            and not STATIC_PATH_RE.search(s.file.path if s.file else "")
+        ]
         symbol_by_id = {sym.id: sym for sym in symbols}
         hits = self._symbols_to_hits(symbols)
         for hit in hits:
@@ -1496,7 +1684,6 @@ class Searcher:
         top_k: int = 50,
         concepts: Optional[List[str]] = None,
     ) -> List[_Hit]:
-        like_clauses: List[str] = []
         params: Dict[str, Any] = {
             "query": query,
             "repo_id": str(repo_id) if repo_id else None,
@@ -1508,86 +1695,128 @@ class Searcher:
         query_terms = [query] + (concepts or [])
         query_or = self._to_or_tsquery(query_terms)
         params["query_or"] = query_or if query_or else query
+        logger.info("BM25 debug concepts(%d): %s", len(concepts or []), (concepts or [])[:20])
+
+        # 静态/构建产物/第三方目录的大文件不参与 BM25：关键词检索价值低，
+        # 且 minified 产物单 chunk 可达数万字符，实时 to_tsvector 分词成本极高
+        # （PyFly 的 layui 压缩 JS 曾导致 BM25 路径耗时 17s+）。
+        # 与 _infer_file_role 的 static 判定保持一致（目录段含 static/assets/dist 等）。
+        params["static_path_regex"] = r"(^|/)(static|assets|dist|public|build|vendor|libs|node_modules)(/|$)"
 
         # Direct phrase match bonus.
         params["query_like"] = f"%{query}%"
-        for attr in ("e.content", "ee.chinese_summary", "ee.keywords"):
-            like_clauses.append(f"{attr} ILIKE :query_like")
 
         # Concept-level fuzzy fallback for Chinese and short terms.
-        concept_rank_parts: List[str] = []
+        # 只对纯中文概念做 ILIKE：英文概念（auth/login/token）已被 english
+        # content 的 GIN 分支覆盖，再做 ILIKE 会让候选集随概念数线性膨胀
+        # （11 个概念 × 2 个短字段命中面广，rank 阶段对大量候选构建 tsvector
+        # 实测 700ms+）。中文概念在英文代码 content 中不命中，必须靠中文
+        # 摘要/关键词的模糊匹配补充召回。
+        concept_where_ee: List[str] = []
         for idx, concept in enumerate(concepts or []):
             if len(concept) < 2:
                 continue
+            if not re.fullmatch(r"[\u4e00-\u9fff]+", concept):
+                continue
             like_key = f"concept_{idx}_like"
             params[like_key] = f"%{concept}%"
-            like_clauses.append(f"ee.chinese_summary ILIKE :{like_key}")
-            like_clauses.append(f"ee.keywords ILIKE :{like_key}")
-            like_clauses.append(f"e.content ILIKE :{like_key}")
+            concept_where_ee.append(f"ee.chinese_summary ILIKE :{like_key}")
+            concept_where_ee.append(f"ee.keywords ILIKE :{like_key}")
 
-            concept_or = self._to_or_tsquery([concept])
-            if concept_or:
-                ts_key = f"concept_{idx}_or"
-                params[ts_key] = concept_or
-                concept_rank_parts.append(
-                    f"COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), to_tsquery('simple', :{ts_key})), 0)"
-                )
-                concept_rank_parts.append(
-                    f"COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), to_tsquery('simple', :{ts_key})), 0)"
-                )
-                concept_rank_parts.append(
-                    f"COALESCE(ts_rank_cd(to_tsvector('simple', e.content), to_tsquery('simple', :{ts_key})), 0)"
-                )
-                concept_rank_parts.append(
-                    f"COALESCE(ts_rank_cd(to_tsvector('english', e.content), to_tsquery('english', :{ts_key})), 0)"
-                )
-
-        concept_where = " OR ".join(like_clauses) if like_clauses else "FALSE"
-        concept_rank_sql = ", ".join(concept_rank_parts) if concept_rank_parts else "0"
-
+        # 两阶段 BM25：
+        #  1) cand：UNION 候选筛选，每条分支独立优化，让 Postgres 把
+        #     to_tsvector('english', e.content) @@ 下推到 GIN 表达式索引
+        #     （idx_embeddings_content_fts）。实测「OR 合并谓词」会让优化器
+        #     在 Join 之上对全部行做 tsvector 构建（auth/login 类命中面广时
+        #     1.5~2.2s）；拆分后 english 分支走 Bitmap Index Scan ~1ms。
+        #     simple(content) 分支与 english 分支召回几乎重合且无索引（全扫
+        #     25KB 文本分词 ~650ms），故移除，仅保留 ee 短字段分支补充中文
+        #     摘要/关键词命中。
+        #  2) rank：只对候选集（数十行）构建 tsvector 计算 ts_rank_cd，
+        #     避免对全表行重复构建。
         sql = text(
             f"""
-            SELECT e.id AS embedding_id,
-                   e.file_id,
-                   e.repo_id,
-                   e.branch,
-                   r.name AS repo_name,
-                   e.content,
-                   e.start_line,
-                   e.end_line,
-                   f.path AS file_path,
-                   f.language,
+            WITH cand AS MATERIALIZED (
+                SELECT e.id AS eid
+                FROM embeddings e
+                WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
+                  AND (:branch IS NULL OR e.branch = :branch)
+                  AND to_tsvector('english', e.content) @@ to_tsquery('english', :query_or)
+                UNION
+                SELECT e.id AS eid
+                FROM embeddings e
+                JOIN embedding_enrichments ee ON ee.embedding_id = e.id
+                WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
+                  AND (:branch IS NULL OR e.branch = :branch)
+                  AND (
+                        to_tsvector('simple', ee.chinese_summary) @@ to_tsquery('simple', :query_or)
+                        OR to_tsvector('simple', ee.keywords) @@ to_tsquery('simple', :query_or)
+                        OR ee.chinese_summary ILIKE :query_like
+                        OR ee.keywords ILIKE :query_like
+                        {(" OR " + " OR ".join(concept_where_ee)) if concept_where_ee else ""}
+                      )
+            )
+            SELECT x.embedding_id,
+                   x.file_id,
+                   x.repo_id,
+                   x.branch,
+                   x.repo_name,
+                   x.content,
+                   x.start_line,
+                   x.end_line,
+                   x.file_path,
+                   x.language,
                    GREATEST(
-                       ts_rank_cd(to_tsvector('english', e.content), to_tsquery('english', :query_or)),
-                       ts_rank_cd(to_tsvector('simple', e.content), to_tsquery('simple', :query_or)),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.chinese_summary), to_tsquery('simple', :query_or)), 0),
-                       COALESCE(ts_rank_cd(to_tsvector('simple', ee.keywords), to_tsquery('simple', :query_or)), 0),
-                       {concept_rank_sql},
-                       CASE WHEN e.content ILIKE :query_like THEN 0.2 ELSE 0 END,
-                       CASE WHEN ee.chinese_summary ILIKE :query_like THEN 0.6 ELSE 0 END,
-                       CASE WHEN ee.keywords ILIKE :query_like THEN 0.9 ELSE 0 END
+                       ts_rank_cd(x.tsv_simple, to_tsquery('simple', :query_or)),
+                       COALESCE(ts_rank_cd(x.tsv_summary, to_tsquery('simple', :query_or)), 0),
+                       COALESCE(ts_rank_cd(x.tsv_keywords, to_tsquery('simple', :query_or)), 0),
+                       CASE WHEN x.content ILIKE :query_like THEN 0.2 ELSE 0 END,
+                       CASE WHEN x.chinese_summary ILIKE :query_like THEN 0.6 ELSE 0 END,
+                       CASE WHEN x.keywords ILIKE :query_like THEN 0.9 ELSE 0 END
                    ) AS rank
-            FROM embeddings e
-            JOIN code_files f ON f.id = e.file_id
-            JOIN repositories r ON r.id = e.repo_id
-            LEFT JOIN embedding_enrichments ee ON ee.embedding_id = e.id
-            WHERE (:repo_id IS NULL OR e.repo_id = :repo_id)
-              AND (:branch IS NULL OR e.branch = :branch)
-              AND (
-                  to_tsvector('english', e.content) @@ to_tsquery('english', :query_or)
-                  OR to_tsvector('simple', e.content) @@ to_tsquery('simple', :query_or)
-                  OR to_tsvector('simple', ee.chinese_summary) @@ to_tsquery('simple', :query_or)
-                  OR to_tsvector('simple', ee.keywords) @@ to_tsquery('simple', :query_or)
-                  OR {concept_where}
-              )
+            FROM (
+                SELECT e.id AS embedding_id,
+                       e.file_id,
+                       e.repo_id,
+                       e.branch,
+                       r.name AS repo_name,
+                       e.content,
+                       e.start_line,
+                       e.end_line,
+                       f.path AS file_path,
+                       f.language,
+                       ee.chinese_summary,
+                       ee.keywords,
+                       -- 只对候选集构建一次 tsvector，避免 GREATEST/WHERE 中重复实时分词。
+                       -- 不再构建 english 版 content tsvector：english 词干化在
+                       -- 大 chunk 上最贵（候选数十行时 ~700ms），召回已由 cand 中
+                       -- english GIN 索引分支保证，排序用 simple/summary/keywords。
+                       to_tsvector('simple', e.content) AS tsv_simple,
+                       to_tsvector('simple', ee.chinese_summary) AS tsv_summary,
+                       to_tsvector('simple', ee.keywords) AS tsv_keywords
+                FROM embeddings e
+                JOIN cand ON cand.eid = e.id
+                JOIN code_files f ON f.id = e.file_id
+                JOIN repositories r ON r.id = e.repo_id
+                LEFT JOIN embedding_enrichments ee ON ee.embedding_id = e.id
+                WHERE f.path !~* :static_path_regex
+            ) x
             ORDER BY rank DESC
             LIMIT :limit
             """
         )
+        import time as _time
+        _t0 = _time.perf_counter()
         rows = self.db.execute(
             sql,
             params,
         ).fetchall()
+        logger.info(
+            "BM25 db.execute took %.0fms, rows=%d, concepts=%d",
+            (_time.perf_counter() - _t0) * 1000,
+            len(rows),
+            len(concepts or []),
+        )
 
         hits: List[_Hit] = []
         for row in rows:
@@ -1697,7 +1926,12 @@ class Searcher:
                 scores[eid] = 0
             scores[eid] += query_weight * doc_weight
 
-        sorted_eids = sorted(scores.keys(), key=lambda eid: -scores[eid])[:top_k]
+        # 过滤噪声级命中（无关查询的 token 权重乘积趋近于 0），避免
+        # 单条 0.005 的稀疏命中进入 RRF 融合并出现在最终结果里。
+        sorted_eids = sorted(
+            (eid for eid, s in scores.items() if s >= SPARSE_SCORE_THRESHOLD),
+            key=lambda eid: -scores[eid],
+        )[:top_k]
 
         embeddings = self.db.query(Embedding).filter(
             Embedding.id.in_(sorted_eids)
@@ -1705,6 +1939,9 @@ class Searcher:
 
         hits = []
         for emb in embeddings:
+            # 静态/第三方目录的 chunk 不参与稀疏检索（与向量/BM25 一致）
+            if STATIC_PATH_RE.search(emb.file.path if emb.file else ""):
+                continue
             score = scores.get(emb.id, 0)
             hits.append(_Hit(
                 result_id=emb.id,
