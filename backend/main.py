@@ -200,7 +200,32 @@ app.include_router(ws.router)
 app.include_router(admin_llm.router)
 
 mcp_app = get_mcp_app()
-app.mount("/mcp", mcp_app)
+
+
+class _MCPNoSlashCompat:
+    """兼容无尾斜杠的 /mcp/sse 请求。
+
+    FastMCP 的 streamable HTTP 端点注册在 /mcp/sse/（带尾斜杠），
+    Starlette 对 /mcp/sse（无尾斜杠）返回 307 重定向。部分 MCP 客户端
+    对 POST 307 不自动跟随，导致官网/问卷中的
+    ``http://host:port/mcp/sse`` 配置连不上。此包装把无尾斜杠请求
+    改写到带斜杠路径后直接交给 mcp_app，消除 307。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/mcp/sse":
+                scope = dict(scope)
+                scope["path"] = "/mcp/sse/"
+                scope["raw_path"] = b"/mcp/sse/"
+        await self.app(scope, receive, send)
+
+
+app.mount("/mcp", _MCPNoSlashCompat(mcp_app))
 
 
 @app.get("/health")
