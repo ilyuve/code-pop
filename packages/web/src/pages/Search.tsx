@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { SearchBox } from '../components/SearchBox';
 import { FlowView } from '../components/FlowView';
 import { useSearch } from '../hooks/useSearch';
@@ -21,6 +21,13 @@ export const Search = () => {
   const [selectedRepoId, setSelectedRepoId] = useState<string>('');
   const [contextResults, setContextResults] = useState<CodeContext | null>(null);
 
+  // 仓库列表就绪后默认选中第一个仓库，避免误用全局搜索（弱服务器上全库检索易超时）
+  useEffect(() => {
+    if (!selectedRepoId && repos.length > 0) {
+      setSelectedRepoId(repos[0].id);
+    }
+  }, [repos, selectedRepoId]);
+
   const contextSearchMutation = useMutation({
     mutationFn: ({ query, repoId }: { query: string; repoId?: string }) =>
       searchContext(query, repoId),
@@ -31,14 +38,15 @@ export const Search = () => {
 
   const handleSearch = (searchQuery: string) => {
     if (!searchQuery.trim()) return;
-    search(searchQuery, selectedRepoId || undefined);
-    contextSearchMutation.mutate({ query: searchQuery, repoId: selectedRepoId || undefined });
+    if (!selectedRepoId) return; // 无可用仓库时不做全局搜索
+    search(searchQuery, selectedRepoId);
+    contextSearchMutation.mutate({ query: searchQuery, repoId: selectedRepoId });
   };
 
   const handleRepoFilter = (repoId: string) => {
     setSelectedRepoId(repoId);
-    if (query.trim()) {
-      search(query, repoId || undefined);
+    if (query.trim() && repoId) {
+      search(query, repoId);
       contextSearchMutation.mutate({ query, repoId });
     }
   };
@@ -78,9 +86,10 @@ export const Search = () => {
             <select
               value={selectedRepoId}
               onChange={(e) => handleRepoFilter(e.target.value)}
-              className="px-4 py-2.5 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] font-bold focus:outline-none focus:border-[#2ad4ff] shadow-[3px_3px_0_#2D2D2D] min-w-[180px]"
+              disabled={repos.length === 0}
+              title={repos.length === 0 ? '暂无可搜索的仓库' : undefined}
+              className="px-4 py-2.5 bg-white border-2 border-[#2D2D2D] rounded-lg text-[#2D2D2D] font-bold focus:outline-none focus:border-[#2ad4ff] shadow-[3px_3px_0_#2D2D2D] min-w-[180px] disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <option value="">所有仓库</option>
               {repos.map((repo) => (
                 <option key={repo.id} value={repo.id}>
                   {repo.name}
