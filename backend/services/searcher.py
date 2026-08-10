@@ -472,7 +472,7 @@ class Searcher:
                     "final": round(self._final_score(hit), 4),
                 },
                 file_role=self._infer_file_role(hit.file_path),
-                branch=actual_branch,
+                branch=actual_branch or hit.branch or "main",
                 is_override=hit.is_override,
             ))
 
@@ -491,7 +491,7 @@ class Searcher:
         return CodeContext(
             query=query,
             query_intent=intent.intent_type,
-            branch=actual_branch,
+            branch=actual_branch or "main",
             matched_concepts=intent.expanded_terms[:10],
             entry_points=entry_points,
             call_chain=call_chain,
@@ -503,7 +503,7 @@ class Searcher:
             search_latency_ms=0,
             meta=SearchMeta(
                 requested_branch=requested_branch,
-                actual_branch=actual_branch,
+                actual_branch=actual_branch or "main",
                 branch_fallback=branch_fallback,
             ),
         )

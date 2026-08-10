@@ -111,7 +111,12 @@ export const SearchBox = ({
           {recentSearches.slice(0, 5).map((term, index) => (
             <button
               key={index}
-              onClick={() => handleQuickSearch(term)}
+              onMouseDown={(e) => {
+                // mousedown 先于 input blur 触发；preventDefault 阻止失焦导致下拉被移除，
+                // 确保点击历史记录时文字能回填并触发搜索
+                e.preventDefault();
+                handleQuickSearch(term);
+              }}
               className="w-full px-4 py-2.5 text-left hover:bg-[#fff34d] text-[#2D2D2D] transition-colors font-medium"
             >
               {term}
